@@ -816,6 +816,9 @@
         const data=await api('/screening/workbench?compact=1');
         if(serial!==state.serial)return;
         showResults(data);state.version=data.status.results_loading?'':version(data.status);
+        // The new result proof is now installed. A subsequent review-notes
+        // failure must not invalidate these verified candidates or their chart.
+        newerProofStatus=null;
         message(data.status.results_loading?(data.status.previous_result_count?'正在读取本轮结果，上次结果将逐步替换。':data.status.results_available?`已展示 ${data.status.results_through} 只标的中通过核验的候选，正在读取新增结果。`:RESULTS_LOADING):'');
         if(data.status.results_loading&&!data.status.results_available)return;
         state.reviewsLoadedSource=null;

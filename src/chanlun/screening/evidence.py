@@ -162,7 +162,7 @@ def _nested_snapshot(path, size, mtime_ns, ctime_ns, expected_digest):
         raise ValueError("区间内结构确认证据校验失败")
     snapshot = _decode_snapshot(raw)
     return {k: snapshot[k] for k in ("symbol", "source_frequency", "source_closed_at", "source_started_at",
-                                    "analysis_scope", "native_member_policy",
+                                    "analysis_scope", "native_member_policy", "center_view_selections",
                                    "price_basis_revision", "structure_price_quantum", "levels",
                                    "screening_segments", "screening_units_by_level", "native_consolidation_alerts",
                                    "screening_interval_signals", "segment_construction",

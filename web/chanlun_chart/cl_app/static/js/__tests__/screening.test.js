@@ -252,6 +252,43 @@ test('a failed refresh cannot leave candidates from a superseded '+field+' activ
   assert.match(ui.get('selected-title').textContent,/new fixture/);
 });
 
+for(const [field,before,after] of [['live_recheck_version','before','after'],['current_source_revision','old','new'],
+  ['result_reader_revision','old-reader','new-reader'],['source_current',false,true]])
+test('a review failure cannot clear successfully refreshed candidates after '+field+' changes',async()=>{
+  let latest=withCandidate(),failReviews=false,resultReads=0,reviewReads=0;
+  latest.status[field]=before;
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/workbench'))resultReads++;
+    if(url.startsWith('/screening/reviews')){
+      reviewReads++;
+      if(failReviews)return response({error:'review notes temporarily unavailable'},503);
+    }
+    return dispatch(latest,url);
+  });await settle();
+  const chart=ui.get('chart-frame').src;
+  ui.get('review-notes').value='unsaved local note';ui.get('review-form').listeners.input();
+  latest={...latest,status:{...latest.status,[field]:after},
+    candidates:[{...latest.candidates[0],name:'freshly verified candidate'}]};
+  failReviews=true;
+  await ui.timers[0]();await settle();
+  assert.equal(resultReads,2,'the new verified result response was installed');
+  assert.equal(reviewReads,2,'only the following optional notes request failed');
+  assert.equal(ui.get('signal-list').children.length,1);
+  assert.equal(ui.get('signal-count').textContent,1);
+  assert.equal(ui.get('selected-detail').hidden,false);
+  assert.match(ui.get('selected-title').textContent,/freshly verified candidate/);
+  assert.equal(ui.get('chart-frame').src,chart);
+  assert.equal(ui.get('review-notes').value,'unsaved local note');
+  assert.equal(ui.get('page-message').textContent,'review notes temporarily unavailable');
+  failReviews=false;
+  await ui.timers[0]();await settle();
+  assert.equal(resultReads,2,'unchanged verified results need no replacement fetch');
+  assert.equal(reviewReads,3);
+  assert.equal(ui.get('page-message').textContent,'');
+  assert.equal(ui.get('chart-frame').src,chart);
+  assert.equal(ui.get('review-notes').value,'unsaved local note');
+});
+
 test('monitor revalidation removes the active candidate and restores it after verification',async()=>{
   let latest=withCandidate();
   latest.status.live_recheck_version='verified';

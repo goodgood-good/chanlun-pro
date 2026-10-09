@@ -291,9 +291,11 @@ class USmartClient:
     def _response_data(response, api_path: str) -> Mapping[str, Any]:
         status_code = getattr(response, "status_code", None)
         if status_code is None or not 200 <= int(status_code) < 300:
+            delay = str((getattr(response, "headers", None) or {}).get("Retry-After", ""))
             raise USmartAPIError(
                 f"uSMART API {api_path} returned HTTP {status_code}",
                 status_code=status_code,
+                retry_after=min(3600, int(delay)) if delay.isascii() and delay.isdecimal() else None,
             )
         try:
             result = response.json()
@@ -362,6 +364,24 @@ class USmartClient:
             return token
 
     def quote(self, endpoint: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Retry one transient read failure; never retry login or business errors."""
+        # Login is intentionally outside the retry loop. Each retry signs a
+        # fresh request ID, and only the failed page is repeated, not history.
+        if not self.channel:
+            raise RuntimeError("USMART_CHANNEL is required")
+        if not self.token:
+            self.login()
+        for attempt in range(2):
+            try:
+                return self._quote_once(endpoint, payload)
+            except USmartAPIError as exc:
+                transient = (exc.status_code in {502, 503, 504}
+                             or isinstance(exc.__cause__, (requests.Timeout, requests.ConnectionError)))
+                if attempt or not transient or (exc.retry_after is not None and exc.retry_after > 1):
+                    raise
+                time.sleep(max(0.25, exc.retry_after or 0))
+
+    def _quote_once(self, endpoint: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """调用基础行情接口并返回响应的 data 字典。"""
         if not self.channel:
             raise RuntimeError("USMART_CHANNEL is required")

@@ -43,7 +43,11 @@ $action = New-ScheduledTaskAction `
     -Execute "$PSHOME\powershell.exe" `
     -Argument $arguments `
     -WorkingDirectory $ProjectRoot
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
+# An interrupted interactive task can stay Ready despite RestartCount. Recover
+# this existing pool after a stop as well as after logon; IgnoreNew prevents twins.
+$recoveryTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 $principal = New-ScheduledTaskPrincipal `
     -UserId $identity `
     -LogonType Interactive `
@@ -51,6 +55,8 @@ $principal = New-ScheduledTaskPrincipal `
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 1)
@@ -58,7 +64,7 @@ $settings = New-ScheduledTaskSettingsSet `
 Register-ScheduledTask `
     -TaskName $taskName `
     -Action $action `
-    -Trigger $trigger `
+    -Trigger @($logonTrigger, $recoveryTrigger) `
     -Principal $principal `
     -Settings $settings `
     -Force | Out-Null

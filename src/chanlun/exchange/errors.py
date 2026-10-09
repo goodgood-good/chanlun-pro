@@ -4,10 +4,11 @@
 class USmartAPIError(RuntimeError):
     """uSMART HTTP or business failure, excluding credentials and request bodies."""
 
-    def __init__(self, message: str, *, code=None, status_code: int | None = None):
+    def __init__(self, message: str, *, code=None, status_code: int | None = None, retry_after=None):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        self.retry_after = retry_after
 
 
 class LongbridgeConnectionLimitError(RuntimeError):

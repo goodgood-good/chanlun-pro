@@ -1521,12 +1521,13 @@ def tv_history():
         }, 503, {"Retry-After": str(exc.retry_after)}
     except USmartAPIError as exc:
         LogUtil.warning(f"[tv_history] uSMART history unavailable code={exc.code} http={exc.status_code}")
+        retry_after = exc.retry_after or 15
         return {
             "s": "error",
             "error_code": "usmart_history_unavailable",
             "errmsg": "盈立行情暂不可用，请稍后重试。",
-            "retry_after": 15,
-        }, 503, {"Retry-After": "15"}
+            "retry_after": retry_after,
+        }, 503, {"Retry-After": str(retry_after)}
     except Exception as e:
         req_qs = request.query_string.decode("utf-8", errors="ignore")
         LogUtil.error(f"[tv_history] unhandled error query={req_qs} err={e}", exc_info=True)

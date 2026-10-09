@@ -490,7 +490,7 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
         if stock.get("holding_lookup_failed"):
             row["consolidation_error"] = "持仓名单读取失败，本周期盘整背驰尚未检查"
         context = {**contexts[frequency], "symbol": code}
-        phase = "compute"
+        phase = "fetch"
         period_started = time.monotonic()
         timings = {}
         row['processing_timeline'] = {'calculation_started_at': time.time()}
@@ -498,6 +498,7 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             if context.get('calendar_error'):
                 raise MarketDataContractError('SESSION_CALENDAR_UNAVAILABLE', context['calendar_error'])
             frame = fetch_frame(code, frequency, context)
+            phase = "compute"
             row['processing_timeline']['fetched_at'] = time.time()
             timings['fetch'] = (time.monotonic()-period_started)*1000
             quality = frame_quality(frame, context)
@@ -650,7 +651,8 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             timings['persistence'] = (time.monotonic()-persistence_started)*1000
         except Exception as exc:
             reason = ("EVIDENCE_WRITE_FAILED" if phase == "evidence" else
-                      exc.reason if isinstance(exc, MarketDataContractError) else "ENGINE_ERROR")
+                      exc.reason if isinstance(exc, MarketDataContractError) else
+                      "DATA_SOURCE_UNAVAILABLE" if phase == "fetch" else "ENGINE_ERROR")
             row.update(selected=[], observations=[], consolidation_alerts=[], data_errors=[reason],
                        error=f"{type(exc).__name__}: {exc}")
         finally:

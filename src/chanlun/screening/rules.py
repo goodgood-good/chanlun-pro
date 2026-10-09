@@ -88,6 +88,7 @@ REASON_LABELS = {
     "CONFIRMATION_TIME_MISMATCH": "买点在所标确认时刻之前已经确认，时间证据不一致",
     "REBUILD_MISMATCH": "独立重算与筛选证据不一致",
     "ENGINE_ERROR": "结构计算失败",
+    "DATA_SOURCE_UNAVAILABLE": "行情数据源暂不可用",
     "BAR_TIME_LABEL_UNAVAILABLE": "行情源缺少已核实的分钟K线时间口径",
     "SESSION_CALENDAR_UNAVAILABLE": "缺少已核实的标的交易时段",
     "EVIDENCE_WRITE_FAILED": "复核证据保存失败，候选未发布",
