@@ -1793,7 +1793,18 @@ class SignalMonitor:
             live_pending=[symbol for symbol in pending if _symbol_key(symbol) in recent]
             mode='live' if live_pending else 'background'
             if live_pending:
-                pending=live_pending
+                historical=[symbol for symbol in pending if _symbol_key(symbol) not in recent]
+                protected=sum(_symbol_key(symbol) in state['holding_symbols'] or _symbol_key(symbol) in urgent
+                              for symbol in live_pending)
+                # Continuous live candles must not starve an already approved
+                # historical/version recheck. Reserve at most one worker wave
+                # and a quarter of the existing batch, without displacing
+                # holdings/urgent live checks or the last live slot. Preserve
+                # the sorted order: live work starts first; attempted cutoffs
+                # and the existing force queue rotate the remaining members.
+                reserved=min(workers,max(1,batch_size//4),len(historical),
+                             max(0,batch_size-max(1,protected)))
+                pending=[*live_pending[:batch_size-reserved],*historical[:reserved]]
             elif recent:
                 batch_size=min(batch_size,workers*MONITOR_BACKGROUND_WAVES)
             pending = pending[:batch_size]

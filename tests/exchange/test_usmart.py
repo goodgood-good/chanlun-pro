@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from typing import Any, Mapping
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -98,6 +99,7 @@ def test_quote_request_uses_exact_signed_body_and_required_headers(rsa_keys):
         token="test-token",
         quote_host="https://quote.example",
         session=session,
+        rate_limiter=SimpleNamespace(wait=lambda **_: None),
     )
 
     assert client.quote("marketstate", {"market": "hk"}) == {"status": 7}

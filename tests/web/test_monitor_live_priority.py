@@ -77,9 +77,10 @@ def test_live_clock_is_checked_before_closed_market_rebuild_even_if_closed_stock
 ):
     service, _, live, clock, _ = mixed
     service._schedule_monitor(clock[0], None)
-    assert [s["code"] for s in live.started[0]["symbols"]] == ["LIVE.US"]
-    assert service._load()["pending_symbols_count"] == 20
-    assert len(service._load()["force_pending_symbols"]) == 20
+    assert [s["code"] for s in live.started[0]["symbols"]] == [
+        "LIVE.US", "SH.600000", "SH.600001", "SH.600002", "SH.600003"]
+    assert service._load()["pending_symbols_count"] == 16
+    assert len(service._load()["force_pending_symbols"]) == 16
 
 
 def test_background_batches_are_small_while_another_market_has_live_bars(mixed):
@@ -113,12 +114,13 @@ def test_new_bar_yields_background_then_requeues_unfinished_symbols_without_fals
         state["force_pending_symbols"]
     )
     service._schedule_monitor(clock[0], None)
-    assert [s["code"] for s in live.started[-1]["symbols"]] == ["LIVE.US"]
+    assert live.started[-1]["symbols"][0]["code"] == "LIVE.US"
+    assert len(live.started[-1]["symbols"]) <= 5
 
 
 def test_no_new_bar_does_not_cancel_work_and_background_eventually_drains(mixed):
     service, live, clock, closed = background(mixed)
-    checked = set()
+    checked = {s["code"] for s in live.started[0]["symbols"] if s["market"] == "a"}
     for _ in range(8):
         if live.state["status"] == "running":
             service._schedule_monitor(clock[0], None)
@@ -158,7 +160,8 @@ def test_restart_reissues_a_durable_yield_intent_and_keeps_unfinished_work(
     finish(restored, live, closed["a"], cancelled=True, committed=[])
     assert unfinished.issubset(restored._load()["force_pending_symbols"])
     restored._schedule_monitor(clock[0], None)
-    assert [s["code"] for s in live.started[-1]["symbols"]] == ["LIVE.US"]
+    assert live.started[-1]["symbols"][0]["code"] == "LIVE.US"
+    assert len(live.started[-1]["symbols"]) <= 5
 
 
 def test_a_naturally_completed_batch_wins_a_racing_yield_request(mixed):
@@ -206,7 +209,7 @@ def test_yielded_completed_prefix_is_fully_consumed_before_replacement(mixed):
     service._consume_monitor()
     assert service._load()["monitor_cursor"]["completed"] == 20
     service._schedule_monitor(clock[0], None)
-    assert [s["code"] for s in live.started[-1]["symbols"]] == ["LIVE.US"]
+    assert [s["code"] for s in live.started[-1]["symbols"]] == ["LIVE.US", "SH.600019"]
 
 
 def test_bound_shorter_period_can_yield_a_background_batch(mixed, monkeypatch):

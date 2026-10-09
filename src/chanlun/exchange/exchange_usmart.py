@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import multiprocessing
 import os
 import threading
 import time
@@ -172,6 +173,7 @@ class USmartClient:
         trade_host: str | None = None,
         timeout: float | None = None,
         session: requests.Session | None = None,
+        rate_limiter=None,
     ):
         self.channel = str(
             channel if channel is not None else getattr(config, "USMART_CHANNEL", "")
@@ -224,6 +226,10 @@ class USmartClient:
         )
         self.timeout = _positive_number(timeout_value, 8)
         self.session = session or requests.Session()
+        if rate_limiter is None:
+            from chanlun.exchange.usmart_rate_limit import USmartRateLimiter
+            rate_limiter = USmartRateLimiter()
+        self._rate_limiter = rate_limiter
         if session is None:
             # Quote routing is independent of the user's browser/VPN proxy.
             # Explicitly supplied sessions retain their own transport settings.
@@ -386,6 +392,10 @@ class USmartClient:
         if not self.channel:
             raise RuntimeError("USMART_CHANNEL is required")
         token = self.token or self.login()
+        self._rate_limiter.wait(
+            host=self.quote_host, channel=self.channel, endpoint=endpoint,
+            priority="interactive" if multiprocessing.current_process().name == "MainProcess" else "background",
+        )
         signer = self._get_signer()
         body = self._json_body(payload)
         api_path = f"{_QUOTE_API_PREFIX}/{endpoint.lstrip('/')}"

@@ -22,7 +22,8 @@ def client_for(monkeypatch, replies):
             raise reply
         return reply
     client = USmartClient(channel='fixture', token='fixture-token',
-                         session=SimpleNamespace(post=post))
+                         session=SimpleNamespace(post=post),
+                         rate_limiter=SimpleNamespace(wait=lambda **_: None))
     monkeypatch.setattr(client, '_get_signer', lambda: SimpleNamespace(sign=lambda *_a, **_k: 'fixture-signature'))
     monkeypatch.setattr('chanlun.exchange.exchange_usmart.time.sleep', delays.append)
     return client, calls, delays
@@ -73,3 +74,32 @@ def test_login_failure_is_never_retried_by_quote_wrapper(monkeypatch):
     with pytest.raises(USmartAPIError):
         client.quote('kline',{})
     assert len(attempts) == 1 and calls == delays == []
+
+
+@pytest.mark.parametrize('process,priority',[('MainProcess','interactive'),('SpawnProcess-4','background')])
+def test_every_quote_attempt_uses_shared_admission_before_sending(monkeypatch,process,priority):
+    client,calls,_=client_for(monkeypatch,[response(503),response()])
+    admissions=[]
+    def wait(**kwargs):
+        assert len(calls)==len(admissions)
+        admissions.append(kwargs)
+    client._rate_limiter=SimpleNamespace(wait=wait)
+    monkeypatch.setattr('chanlun.exchange.exchange_usmart.multiprocessing.current_process',
+                        lambda:SimpleNamespace(name=process))
+    assert client.quote('kline',{})=={'value':1}
+    assert len(admissions)==len(calls)==2
+    assert all(item=={'host':client.quote_host,'channel':client.channel,'endpoint':'kline','priority':priority}
+               for item in admissions)
+
+
+def test_failed_admission_never_sends_or_immediately_retries(monkeypatch):
+    from chanlun.exchange.usmart_rate_limit import USmartRateLimitTimeout
+    client,calls,delays=client_for(monkeypatch,[])
+    admissions=[]
+    def wait(**_):
+        admissions.append(True)
+        raise USmartRateLimitTimeout()
+    client._rate_limiter=SimpleNamespace(wait=wait)
+    with pytest.raises(USmartRateLimitTimeout):
+        client.quote('kline',{})
+    assert len(admissions)==1 and calls==delays==[]
