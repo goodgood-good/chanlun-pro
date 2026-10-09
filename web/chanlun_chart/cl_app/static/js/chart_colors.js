@@ -37,7 +37,25 @@
         }
         return study;
     }
-    const same = (left,right) => String(left).toLowerCase()===String(right).toLowerCase();
+    function colorKey(value) {
+        const text=String(value).trim().toLowerCase();
+        const rgb=text.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(1(?:\.0+)?))?\s*\)$/);
+        if(rgb&&rgb.slice(1,4).every(channel=>Number(channel)<=255))
+            return '#'+rgb.slice(1,4).map(channel=>Number(channel).toString(16).padStart(2,'0')).join('');
+        return text;
+    }
+    const same = (left,right) => colorKey(left)===colorKey(right);
+    const legacyMacdPalettes = [
+        ['#26a69a','#b2dfdb','#ffcdd2','#ff5252'],
+        ['#26a69a','#b2dfdb','#ffcdd2','#ef5350'],
+        ['#22ab94','#ace5dc','#fccbcd','#ff5252'],
+        ['#22ab94','#ace5dc','#fccbcd','#f7525f'],
+    ];
+    const matchesPalette = (colors, sets) => !!colors && sets.some(old=>old.every((color,i)=>same(colors[i]?.color,color)));
+    function macdHistogramOverrides(name, values) {
+        if(name!=='MACD'||!matchesPalette(values?.palettes?.palette_0?.colors,legacyMacdPalettes))return null;
+        return Object.fromEntries(histogram.map((color,i)=>['histogram.color.'+i,color]));
+    }
     function legacyPair(style, up, down) {
         if(!style)return;
         if ((same(style[up],'#26a69a') && same(style[down],'#ef5350'))
@@ -49,7 +67,7 @@
         if(!colors)return;
         // Only recognized complete default palettes are migrated. Arbitrary
         // saved user colors and every non-color field are retained.
-        if(oldSets.some(old=>old.every((color,i)=>same(colors[i]?.color,color)))) {
+        if(matchesPalette(colors,oldSets)) {
             desired.forEach((color,i)=>{colors[i].color=color;});
         }
     }
@@ -70,7 +88,7 @@
     function normalizeStudyState(state,id) {
         if(id.startsWith('Moving Average Convergence/Divergence@')) {
             migratePalette(state.palettes?.palette_0?.colors,
-                [['#26a69a','#b2dfdb','#ffcdd2','#ff5252'],['#26a69a','#b2dfdb','#ffcdd2','#ef5350']],histogram);
+                legacyMacdPalettes,histogram);
             if(same(state.styles?.plot_1?.color,'#2196F3'))state.styles.plot_1.color=palette.dif;
             if(same(state.styles?.plot_0?.color,'#FF5252'))state.styles.plot_0.color=palette.up;
         }
@@ -95,7 +113,7 @@
         } catch (_) { return content; }
     }
     const api={palette, histogram:Object.freeze(histogram), seriesOverrides:Object.freeze(seriesOverrides),
-        studyOverrides:Object.freeze(studyOverrides), customDefaults, normalizeSavedSource, normalizeStudyTemplate};
+        studyOverrides:Object.freeze(studyOverrides), customDefaults, normalizeSavedSource, normalizeStudyTemplate, macdHistogramOverrides};
     root.ChartColors=Object.freeze(api);
     if(typeof module!=='undefined'&&module.exports)module.exports=api;
 })(typeof window!=='undefined'?window:globalThis);

@@ -3133,6 +3133,21 @@ class ChartManager {
         return pending;
     }
 
+    applyMacdColors(studyId = null) {
+        const chart=this.widget?.activeChart?.() || this.chart;
+        if (!window.ChartColors || !chart?.getAllStudies) return;
+        for (const item of chart.getAllStudies()) {
+            if (item.name !== 'MACD' || (studyId !== null && item.id !== studyId)) continue;
+            try {
+                const study=chart.getStudyById(item.id);
+                const overrides=window.ChartColors.macdHistogramOverrides(item.name,study.getStyleValues());
+                if(overrides)study.applyOverrides(overrides);
+            } catch (error) {
+                console.warn('[CHARTS] restore MACD histogram colors failed',error);
+            }
+        }
+    }
+
     applyDeviceDensity() {
         if (!window.WorkspaceDevice?.isPhone) return;
         const chart=this.widget?.activeChart?.() || this.chart;
@@ -3426,6 +3441,16 @@ class ChartManager {
             this.chart = this.widget.activeChart();
             if (!this.chart) return;
             this.applyDeviceDensity();
+            this.applyMacdColors();
+            this.widget.subscribe('study_event', (id, kind) => {
+                if (kind !== 'create' && kind !== 'paste_study') return;
+                const widget=this.widget;
+                // TradingView emits creation before it finishes applying the
+                // browser's saved indicator defaults. Correct the final state.
+                setTimeout(() => {
+                    if (!this._disposed && this.widget === widget) this.applyMacdColors(id);
+                }, 0);
+            });
 
             this.ensureRequestedDefaultStudies().catch((e) => {
                 console.warn("[CHARTS] initialize requested default studies failed", e);
@@ -3433,6 +3458,7 @@ class ChartManager {
             this._alignResolutionOnReady();   // 按真实周期校正显示配置(构造 _curResolution 仅为猜测)
             this.widget.subscribe('chart_loaded', () => {
                 this.applyDeviceDensity();
+                this.applyMacdColors();
                 if (!this._pendingSavedPriceViewport) return;
                 this.chart = this.widget.activeChart();
                 const restoreWhenReady = () => this._scheduleChartStableReady(

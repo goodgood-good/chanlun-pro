@@ -1978,6 +1978,21 @@ test('phone chart layout clients are independent while drawing clients remain sh
   assert.equal(new URL(manifest.url,'http://local').searchParams.get('client'),'chanlun_pro_a_1');
 });
 
+test('existing and newly added MACD indicators correct their old histogram colors once',()=>{
+  const {ChartManager,sb}=loadChartManager(),writes=[];
+  sb.ChartColors=require('../chart_colors.js');
+  const values={palettes:{palette_0:{colors:Object.fromEntries(['#22AB94','#ACE5DC','#FCCBCD','#FF5252'].map((color,i)=>[i,{color}]))}}};
+  const chart={getAllStudies:()=>[{id:'macd',name:'MACD'},{id:'rsi',name:'RSI'}],getStudyById:id=>{
+    assert.equal(id,'macd');return {getStyleValues:()=>values,applyOverrides:overrides=>{
+      writes.push(overrides);Object.values(overrides).forEach((color,i)=>{values.palettes.palette_0.colors[i].color=color;});
+    }};
+  }};
+  const cm=Object.create(ChartManager.prototype);cm.widget={activeChart:()=>chart};
+  cm.applyMacdColors('rsi');assert.equal(writes.length,0);
+  cm.applyMacdColors('macd');cm.applyMacdColors();assert.equal(writes.length,1);
+  assert.deepEqual(Object.values(writes[0]),sb.ChartColors.histogram);
+});
+
 test('phone density applies only display overrides and desktop layouts keep their own density',()=>{
   const {ChartManager,sb}=loadChartManager(),changes=[];
   const cm=Object.create(ChartManager.prototype);

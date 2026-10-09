@@ -56,3 +56,25 @@ test('study templates update recognized defaults while keeping sources and malfo
   assert.equal(saved.metaInfo.defaults.palettes.palette_0.colors[0].color,colors.palette.up);
   assert.equal(colors.normalizeStudyTemplate('invalid'),'invalid');
 });
+
+for(const old of [
+  ['#22AB94','#ACE5DC','#FCCBCD','#FF5252'],
+  ['rgba(34, 171, 148, 1)','rgb(172, 229, 220)','rgba(252, 203, 205, 1.0)','#FF5252'],
+])test('the palette found in saved production MACD layouts converts above-zero green to red: '+old[0],()=>{
+  const source={type:'Study',metaInfo:{id:'Moving Average Convergence/Divergence@tv-basicstudies-1'},
+    state:{palettes:{palette_0:palette(old)},inputs:{in_0:17},styles:{plot_1:{color:'#abcdef'}}}};
+  const overrides=colors.macdHistogramOverrides('MACD',source.state);
+  assert.deepEqual(Object.values(overrides),colors.histogram);
+  colors.normalizeSavedSource(source);
+  assert.deepEqual(Object.values(source.state.palettes.palette_0.colors).map(row=>row.color),colors.histogram);
+  assert.equal(source.state.inputs.in_0,17);assert.equal(source.state.styles.plot_1.color,'#abcdef');
+  assert.equal(colors.macdHistogramOverrides('MACD',source.state),null);
+});
+test('the runtime correction leaves custom, transparent and unrelated palettes alone',()=>{
+  const values={palettes:{palette_0:palette(['#123456','#ACE5DC','#FCCBCD','#FF5252'])}};
+  assert.equal(colors.macdHistogramOverrides('MACD',values),null);
+  values.palettes.palette_0.colors[0].color='rgba(34,171,148,0.5)';
+  assert.equal(colors.macdHistogramOverrides('MACD',values),null);
+  values.palettes.palette_0.colors[0].color='#22AB94';
+  assert.equal(colors.macdHistogramOverrides('RSI',values),null);
+});
