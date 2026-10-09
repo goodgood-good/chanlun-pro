@@ -203,7 +203,7 @@ def test_center_rejects_disconnected_body_and_scanner_rejects_same_direction():
         low_tick=value.initial_units[1].low_tick - 1,
     )
     initial = (value.initial_units[0], disconnected) + value.initial_units[2:]
-    with pytest.raises(ValueError, match="center body prices must connect"):
+    with pytest.raises(ValueError, match="physical establishment role prices must connect"):
         replace(
             value,
             initial_units=initial,

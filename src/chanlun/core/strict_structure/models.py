@@ -639,6 +639,18 @@ class TrendCenter:
         )
         if len(establishment_ids) != 5 or len(set(establishment_ids)) != 5:
             raise ValueError("physical center requires five unique establishment roles")
+        if self.entry_unit.direction != establishment_leave.direction:
+            raise ValueError("physical establishment entry and leave must share direction")
+        # The immutable establishment window is exactly five consecutive
+        # roles. A later lifecycle departure may point the other way, but it
+        # cannot replace the fifth role even when the entire history connects.
+        for previous, current in zip(roles, roles[1:]):
+            if previous.direction == current.direction:
+                raise ValueError("physical establishment roles must alternate direction")
+            if previous.end_tick != current.start_tick:
+                raise ValueError("physical establishment role prices must connect")
+            if previous.market_end != current.market_start:
+                raise ValueError("physical establishment role market endpoints must connect")
         if len({item.unit_id for item in self.body_units}) != len(self.body_units):
             raise ValueError("center body unit ids must be unique")
         if any(

@@ -627,6 +627,19 @@ function strictSameIds(left, right) {
         && left.every((item, index) => item === right[index]);
 }
 
+function strictSameSegmentRole(left, right) {
+    return !!left && !!right && typeof left.unit_id === 'string' && left.unit_id.length > 0
+        && ['up', 'down'].includes(left.direction)
+        && ['start_time', 'end_time', 'start_tick', 'end_tick', 'low_tick', 'high_tick']
+            .every(key => Number.isInteger(left[key]))
+        && left.start_time < left.end_time
+        && left.low_tick <= Math.min(left.start_tick, left.end_tick)
+        && left.high_tick >= Math.max(left.start_tick, left.end_tick)
+        && (left.direction === 'up' ? left.start_tick < left.end_tick : left.start_tick > left.end_tick)
+        && ['unit_id', 'direction', 'start_time', 'end_time',
+        'start_tick', 'end_tick', 'low_tick', 'high_tick'].every(key => left[key] === right[key]);
+}
+
 function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
     if (
         !item || item.schema !== 'chanlun-chart-center'
@@ -672,6 +685,8 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
                 || item.core_unit_ids.includes(entry.unit_id) || item.core_unit_ids.includes(leave.unit_id)
                 || entry.unit_id === leave.unit_id || item.frame_missing_conditions.length
                 || entry.direction !== expectedDirection || !['up', 'down'].includes(leave.direction)
+                || (item.source_kind === 'segment' && (leave.direction !== entry.direction
+                    || leave.unit_id !== item.establishment_leave_unit_id))
                 || !(leave.direction === 'up' ? leave.end_tick > item.core.zg_tick : leave.end_tick < item.core.zd_tick)
                 || Math.max(entry.low_tick, item.core.zd_tick) > Math.min(entry.high_tick, item.core.zg_tick)
                 || Math.max(leave.low_tick, item.core.zd_tick) > Math.min(leave.high_tick, item.core.zg_tick)) {
@@ -728,6 +743,15 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
             || Math.max(...roles.map(unit => unit.low_tick)) > Math.min(...roles.map(unit => unit.high_tick))) {
             throw new Error('native center requires five consecutive overlapping source segments');
         }
+        // Establishment roles are immutable. A later opposite departure belongs
+        // to lifecycle/boundary evidence and must not replace the fifth role.
+        if ((item.entering_segment !== undefined && !strictSameSegmentRole(item.entering_segment, roles[0]))
+            || (item.leaving_segment !== undefined && !strictSameSegmentRole(item.leaving_segment, roles[4]))
+            || (item.establishment_leaving_segment !== undefined
+                && !strictSameSegmentRole(item.establishment_leaving_segment, roles[4]))
+            || (item.frame_leave_unit_id !== undefined && item.frame_leave_unit_id !== roles[4].unit_id)) {
+            throw new Error('native center establishment entry/leave evidence is inconsistent');
+        }
     }
     // Older saved one-price centers counted only positive-width overlaps.
     // Accept their declared closed-contact policy only when all five saved
@@ -750,6 +774,33 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
         || (item.overlap_component_count < expected.length && !legacyClosedContact)
         || item.lifecycle_role_count < expected.length
     ) throw new Error('physical center five-role overlap contract is invalid');
+}
+
+function normalizeLegacyCenterFrameRoles(item, level, allowPartialPhysical) {
+    if (item?.source_kind !== 'segment'
+        || Object.prototype.hasOwnProperty.call(item, 'establishment_leaving_segment')) return item;
+    const roles = item.establishment_segments;
+    if (!Array.isArray(roles) || roles.length !== 5 || roles.some(unit => !unit)) return item;
+    const establishmentLeave = roles[4];
+    const priorLeave = item.leaving_segment;
+    if ((priorLeave !== undefined && !strictSameSegmentRole(priorLeave, establishmentLeave)
+        && !strictSameSegmentRole(priorLeave, item.lifecycle_leaving_segment))
+        || (item.frame_leave_unit_id !== undefined && item.frame_leave_unit_id !== priorLeave?.unit_id)) {
+        throw new Error('legacy native center leaving evidence does not match its saved roles');
+    }
+    const boundaryLeave = priorLeave === undefined ? establishmentLeave : priorLeave;
+    if ((item.boundary_leaving_segment !== undefined
+        && !strictSameSegmentRole(item.boundary_leaving_segment, boundaryLeave))
+        || (item.boundary_leave_unit_id !== undefined && item.boundary_leave_unit_id !== boundaryLeave.unit_id)) {
+        throw new Error('legacy native center boundary evidence is inconsistent');
+    }
+    // Old snapshots used leaving_segment for the boundary/current departure.
+    // Normalize only a transient render copy; retain prices, points and revision.
+    const normalized = {...item, leaving_segment: establishmentLeave,
+        establishment_leaving_segment: establishmentLeave, frame_leave_unit_id: establishmentLeave.unit_id,
+        boundary_leaving_segment: boundaryLeave, boundary_leave_unit_id: boundaryLeave.unit_id};
+    validateStrictCenterRenderContract(normalized, level, allowPartialPhysical);
+    return normalized;
 }
 
 
@@ -905,11 +956,24 @@ function getCenterVisualStyle(role, item = {}) {
 function centerEvidenceTitle(item) {
     const bounds = item.core || {};
     const interval = '[' + bounds.zd_price + ', ' + bounds.zg_price + ']';
+    const roleDetails = [];
+    if (item.source_kind === 'segment') {
+        const direction = unit => unit?.direction === 'up' ? '向上' : unit?.direction === 'down' ? '向下' : null;
+        const entry = item.entering_segment || item.establishment_segments?.[0];
+        const establishmentLeave = item.establishment_leaving_segment || item.establishment_segments?.[4];
+        const lifecycleLeave = item.lifecycle_leaving_segment;
+        if (direction(entry)) roleDetails.push(`建立进入：${direction(entry)}`);
+        if (direction(establishmentLeave)) roleDetails.push(`建立离开：${direction(establishmentLeave)}`);
+        if (lifecycleLeave && lifecycleLeave.unit_id !== establishmentLeave?.unit_id && direction(lifecycleLeave)) {
+            roleDetails.push(`${item.third_class_confirmed ? '最终离开' : '当前离开'}：${direction(lifecycleLeave)}`);
+        }
+    }
+    const roleTitle = roleDetails.length ? '；' + roleDetails.join('；') : '';
     if (item.render_kind === 'conditional_center') {
         return interval + '；笔的前后连接待定，本范围内的中枢观察随取舍更新';
     }
     if (item.render_kind === 'center_preview') {
-        return interval + '；' + centerPreviewLabel(item)
+        return interval + roleTitle + '；' + centerPreviewLabel(item)
             + (item.preview_status === 'awaiting_completion_confirmation'
                 ? '；回试已位于中枢区间外，相关线段待最终确认'
                 : '；虚线部分随未确认线段更新');
@@ -920,8 +984,8 @@ function centerEvidenceTitle(item) {
         : item.state === 'superseded' ? '后继中枢已成立，原划分已固定'
         : awaitingReturn ? '回试已位于中枢区间外，相关线段待最终确认' : '中枢延伸或等待回试确认';
     const formation = item.source_kind === 'trend_type' ? '三个已完成下级结构重叠'
-        : '五段连续共同重叠；框体取中间三段核心，进入与离开段独立';
-    return (item.source_frequency ? `${item.source_frequency}·` : '') + interval + '；' + formation + '；' + state
+        : '五段连续共同重叠；框体取中间三段核心，建立进入与建立离开段独立';
+    return (item.source_frequency ? `${item.source_frequency}·` : '') + interval + '；' + formation + roleTitle + '；' + state
         + (!item.third_class_confirmed && item.tail_status
             ? '；' + centerPreviewLabel({preview_status: item.tail_status}) : '');
 }
@@ -4711,22 +4775,24 @@ class ChartManager {
             const ownerProjections = new Map(previews.filter(item => item.owner_center_id)
                 .map(item => [item.owner_center_id, item]));
             const centerLabels = new Map();
-            for (const item of level.centers) {
-                if (item.render_kind !== 'formal_center' || item.source_kind !== (depth === 0 ? 'segment' : 'trend_type')) {
+            for (const rawItem of level.centers) {
+                if (rawItem.render_kind !== 'formal_center' || rawItem.source_kind !== (depth === 0 ? 'segment' : 'trend_type')) {
                     throw new Error('center source is invalid');
                 }
+                const item = normalizeLegacyCenterFrameRoles(rawItem, depth, false);
                 validateStrictCenterRenderContract(item, depth, false);
                 const label = (periodPrefix + (depth === 0 ? '' : `L${depth}`)).replace(/·$/, '');
                 centerLabels.set(item.center_id, label);
                 add({...item, tail_status: ownerProjections.get(item.center_id)?.preview_status}, depth, label);
             }
-            for (const item of previews) {
-                if (item.render_kind !== 'center_preview' || item.state !== 'forming'
-                    || item.tradable !== false || item.third_class_confirmed !== false
-                    || item.source_kind !== (depth === 0 ? 'segment' : 'trend_type')
-                    || (item.owner_center_id && !centerLabels.has(item.owner_center_id))) {
+            for (const rawItem of previews) {
+                if (rawItem.render_kind !== 'center_preview' || rawItem.state !== 'forming'
+                    || rawItem.tradable !== false || rawItem.third_class_confirmed !== false
+                    || rawItem.source_kind !== (depth === 0 ? 'segment' : 'trend_type')
+                    || (rawItem.owner_center_id && !centerLabels.has(rawItem.owner_center_id))) {
                     throw new Error('forming center evidence is invalid');
                 }
+                const item = normalizeLegacyCenterFrameRoles(rawItem, depth, true);
                 validateStrictCenterRenderContract(item, depth, true);
                 if (item.draw_geometry === false) continue;
                 const label = (periodPrefix + (depth === 0 ? '' : `L${depth}`)).replace(/·$/, '');

@@ -234,6 +234,20 @@ def test_failed_departure_preserves_five_role_seed_and_stops_at_core_break(mirro
     assert frame["failed_departure_unit_ids"] == [units[4].unit_id]
     assert frame["body_unit_ids"] == [unit.unit_id for unit in (*units[1:4], *units[5:7])]
     assert units[7].unit_id not in frame["body_unit_ids"]
+    # The immutable fifth role certifies establishment. A later reverse exit
+    # controls the extended frame boundary and third point independently.
+    assert frame["frame_qualified"]
+    assert frame["frame_leave_unit_id"] == units[4].unit_id
+    assert frame["leaving_segment"]["unit_id"] == units[4].unit_id
+    assert frame["establishment_leaving_segment"] == frame["leaving_segment"]
+    assert frame["entering_segment"]["direction"] == frame["leaving_segment"]["direction"]
+    assert frame["boundary_leave_unit_id"] == units[7].unit_id
+    assert frame["boundary_leaving_segment"] == frame["lifecycle_leaving_segment"]
+    assert frame["lifecycle_leaving_segment"]["direction"] != frame["entering_segment"]["direction"]
+    assert frame["points"][-1]["time"] == int(units[7].market_start.timestamp())
+    if locked_tail:
+        assert frame["third_class_confirmed"]
+        assert frame["completion_point_type"] == ("3buy" if mirror else "3sell")
     if not locked_tail:
         assert frame["owner_center_id"] == owner["center_id"]
         assert frame["draw_geometry"] and not frame["third_class_confirmed"]

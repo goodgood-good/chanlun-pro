@@ -8,11 +8,10 @@ from chanlun.core.strict_structure.models import ConstituentUnit
 
 
 def initial_center_known_at(center) -> datetime:
-    """Earliest time the three completed initial members certify a center.
+    """Initial formation clock, excluding later lifecycle updates.
 
-    ``established_at`` is a market timestamp, while the center object's later
-    ``available_at`` can include subsequent lifecycle updates. Neither alone
-    is the initial three-member evidence clock.
+    ``established_at`` already includes the declared formation certificate;
+    ``available_at`` can additionally include later departures and returns.
     """
 
     members = tuple(getattr(center, "initial_units", ()))
@@ -45,23 +44,25 @@ def center_frame_leave(center) -> ConstituentUnit | None:
 
 
 def center_frame_evidence(center) -> dict:
-    """Observe the five directional display roles without changing formation.
+    """Read the initial directional certificate without changing formation.
 
-    A core child cannot double as the external departure. Native undirected
-    consolidations remain valid cores even if no directional frame is present.
-    This helper creates neither a third point nor a movement completion.
+    A five-role certificate retains its original entry and fifth-role exit.
+    Later departures control the current boundary and may reverse direction;
+    they cannot replace establishment evidence or create a third point here.
     """
     core = center.initial_units
     directions = tuple(unit.direction for unit in core)
     expected = ("up" if directions == ("down", "up", "down") else
                 "down" if directions == ("up", "down", "up") else None)
     entry = center.entry_unit
-    leave = center_frame_leave(center)
+    five_role = center.formation_rule == "five_role"
+    leave = (center.establishment_leave_unit if five_role
+             else center_frame_leave(center))
     missing = [] if expected is not None else ["core_direction_not_alternating"]
     for role, unit in (("entry", entry), ("leave", leave)):
         if unit is None:
             missing.append(f"{role}_unavailable")
-        elif role == "entry" and expected is not None and unit.direction != expected:
+        elif (role == "entry" or five_role) and expected is not None and unit.direction != expected:
             missing.append(f"{role}_direction_mismatch")
         elif max(unit.low_tick, center.zd_tick) > min(unit.high_tick, center.zg_tick):
             missing.append(f"{role}_does_not_intersect_core")

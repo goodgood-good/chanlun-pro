@@ -275,7 +275,9 @@ def _center_payload(
     )
     if center.zd_tick > center.zg_tick:
         raise ValueError("formal chart center violates source overlap contract")
-    leaving_unit = center_frame_leave(center)
+    boundary_leave = center_frame_leave(center)
+    leaving_unit = (center.establishment_leave_unit
+                    if center.formation_rule == "five_role" else boundary_leave)
     frame_end = center.display_range_end_market_time
     establishment_units = center.establishment_units
     overlap_units = _center_overlap_units(center)
@@ -433,6 +435,13 @@ def _center_payload(
         "leaving_segment": None
         if leaving_unit is None
         else _unit_audit_payload(leaving_unit),
+        "establishment_leaving_segment": None
+        if center.establishment_leave_unit is None
+        else _unit_audit_payload(center.establishment_leave_unit),
+        "boundary_leave_unit_id": None
+        if boundary_leave is None else boundary_leave.unit_id,
+        "boundary_leaving_segment": None
+        if boundary_leave is None else _unit_audit_payload(boundary_leave),
         "lifecycle_leaving_segment": None
         if center.lifecycle_leave_unit is None
         else _unit_audit_payload(center.lifecycle_leave_unit),
@@ -488,7 +497,8 @@ def strict_center_preview_to_chart_dict(
     establishment = core if recursive else tuple(
         value for value in (entry, *core, initial_exit) if value is not None
     )
-    frame_leave = leave or initial_exit or next(iter(failed), None)
+    boundary_leave = leave or initial_exit or next(iter(failed), None)
+    frame_leave = boundary_leave if recursive else initial_exit
     end = leave.market_start if leave is not None else body[-1].market_end
     start_time = aware_datetime_to_epoch_seconds(core[0].market_start)
     end_time = aware_datetime_to_epoch_seconds(end)
@@ -550,6 +560,10 @@ def strict_center_preview_to_chart_dict(
         "entering_segment": None if entry is None else _unit_audit_payload(entry),
         "middle_three_components": [_unit_audit_payload(value) for value in core],
         "leaving_segment": None if frame_leave is None else _unit_audit_payload(frame_leave),
+        "establishment_leaving_segment": None if initial_exit is None else _unit_audit_payload(initial_exit),
+        "boundary_leave_unit_id": None if boundary_leave is None else boundary_leave.unit_id,
+        "boundary_leaving_segment": None if boundary_leave is None else _unit_audit_payload(boundary_leave),
+        "lifecycle_leaving_segment": None if leave is None else _unit_audit_payload(leave),
         "available_at": aware_datetime_to_epoch_seconds(preview.available_at),
     }
     result["render_id"] = stable_structure_id("chart-center-preview", result)

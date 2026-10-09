@@ -1360,10 +1360,10 @@ test('orphan sweep does not inspect TradingView-owned shapes outside debug mode'
 });
 
 
-test('formal center validation accepts opposite external exits and rejects an exit inside the core', () => {
-  const { sandbox } = loadChartManager();
+test('same-direction establishment stays distinct from opposite lifecycle departure and confirmed third-class points', () => {
   for (const reverse of [false, true]) {
-    const ticks = [80, 120, 90, 115, 100, 130, 70].map(p => reverse ? 200 - p : p);
+    const {cm,sandbox}=manager(`direction-${reverse}`);
+    const ticks = [80, 120, 90, 115, 100, 130, 70, 95].map(p => reverse ? 200 - p : p);
     const units = ticks.slice(1).map((end, index) => ({
       unit_id: `u${index + 1}`, direction: end > ticks[index] ? 'up' : 'down',
       start_tick: ticks[index], end_tick: end,
@@ -1371,17 +1371,81 @@ test('formal center validation accepts opposite external exits and rejects an ex
       start_time: BASE + index * 100, end_time: BASE + (index + 1) * 100,
       locked: true, confirmed_at: BASE + (index + 1) * 100,
     }));
-    const core = units.slice(1, 4), leave = units[5];
+    const core = units.slice(1, 4), establishmentLeave = units[4], lifecycleLeave = units[5];
     const item = center(1, { core_formed: true, frame_qualified: true,
       frame_missing_conditions: [], center_ended: false, third_class_confirmed: false,
-      center_end_available_at: null, available_at: BASE + 600,
-      entering_segment: units[0], leaving_segment: leave, middle_three_components: core,
+      center_end_available_at: null, available_at: BASE + 700,
+      entering_segment: units[0], leaving_segment: establishmentLeave,
+      establishment_leaving_segment: establishmentLeave, middle_three_components: core,
+      lifecycle_leaving_segment: lifecycleLeave, boundary_leaving_segment: lifecycleLeave,
+      boundary_leave_unit_id: 'u6', frame_leave_unit_id: 'u5',
       core: { zd_tick: Math.max(...core.map(u => u.low_tick)), zg_tick: Math.min(...core.map(u => u.high_tick)) },
-      frame_leave_unit_id: 'u6', establishment_segments: units.slice(0, 5),
+      establishment_segments: units.slice(0, 5),
     });
+    const originalPoints=structuredClone(item.points);
     assert.doesNotThrow(() => sandbox.validateStrictCenterRenderContract(item, 0));
-    leave.end_tick = reverse ? item.core.zg_tick : item.core.zd_tick;
-    assert.throws(() => sandbox.validateStrictCenterRenderContract(item, 0), /independent entry or leave/);
+    const establishedDirection=reverse?'向下':'向上', laterDirection=reverse?'向上':'向下';
+    const title=sandbox.centerEvidenceTitle(item);
+    assert.ok(title.includes(`建立进入：${establishedDirection}`));
+    assert.ok(title.includes(`建立离开：${establishedDirection}`));
+    assert.ok(title.includes(`当前离开：${laterDirection}`));
+    const preview={...item,render_kind:'center_preview',state:'forming',preview_status:'awaiting_completion_confirmation'};
+    assert.doesNotThrow(()=>sandbox.validateStrictCenterRenderContract(preview,0,true));
+    assert.ok(sandbox.centerEvidenceTitle(preview).includes(`当前离开：${laterDirection}`));
+    assert.throws(() => sandbox.validateStrictCenterRenderContract({...item,
+      leaving_segment:lifecycleLeave,frame_leave_unit_id:'u6'}, 0), /independent entry or leave/);
+    assert.throws(() => sandbox.validateStrictCenterRenderContract({...item,
+      establishment_leaving_segment:{...establishmentLeave,direction:lifecycleLeave.direction}}, 0), /establishment entry\/leave evidence/);
+    const completed={...item,state:'completed',center_ended:true,third_class_confirmed:true,
+      center_end_available_at:BASE+700,completion_return_segment:units[6],
+      completion_leave_unit_id:'u6',completion_return_unit_id:'u7',completion_direction:lifecycleLeave.direction};
+    assert.doesNotThrow(()=>sandbox.validateStrictCenterRenderContract(completed,0));
+    assert.ok(sandbox.centerEvidenceTitle(completed).includes(`最终离开：${laterDirection}`));
+    assert.deepEqual(completed.points,originalPoints,'role clarification does not change frame bounds');
+    const legacy={...completed,leaving_segment:lifecycleLeave,frame_leave_unit_id:'u6'};
+    delete legacy.establishment_leaving_segment;
+    delete legacy.boundary_leaving_segment;
+    delete legacy.boundary_leave_unit_id;
+    const before=JSON.stringify(legacy);
+    const legacyStructure=snapshot({source_closed_at:BASE+800,levels:[{structural_level:0,origin:'native_segments',
+      centers:[legacy]}]});
+    const savedRevision=legacyStructure.snapshot_revision;
+    const normalized=[...cm._strictRenderGroups(legacyStructure,scopeContext(cm)).values()].flat()[0];
+    assert.equal(normalized.leaving_segment.unit_id,'u5');
+    assert.equal(normalized.establishment_leaving_segment.unit_id,'u5');
+    assert.equal(normalized.boundary_leaving_segment.unit_id,'u6');
+    assert.equal(normalized.lifecycle_leaving_segment.unit_id,'u6');
+    assert.equal(JSON.stringify(legacy),before,'a saved notification snapshot remains immutable');
+    assert.equal(legacyStructure.snapshot_revision,savedRevision);
+    const oldPreview={...legacy,render_kind:'center_preview',state:'forming',center_ended:false,
+      third_class_confirmed:false,center_end_available_at:null,preview_status:'awaiting_completion_confirmation'};
+    const previewStructure=snapshot({source_closed_at:BASE+800,levels:[{structural_level:0,origin:'native_segments',
+      centers:[],center_previews:[oldPreview]}]});
+    assert.doesNotThrow(()=>cm._strictRenderGroups(previewStructure,scopeContext(cm)));
+    const rejected=[
+      {...legacy,leaving_segment:{...lifecycleLeave,end_tick:lifecycleLeave.end_tick+1}},
+      {...legacy,leaving_segment:{unit_id:'invented'},frame_leave_unit_id:'invented',
+        lifecycle_leaving_segment:{unit_id:'invented'}},
+      {...legacy,establishment_leaving_segment:lifecycleLeave},
+      {...legacy,establishment_leaving_segment:null},
+      {...legacy,establishment_segments:legacy.establishment_segments.slice(0,4)},
+    ];
+    for (const invalid of rejected) {
+      legacyStructure.levels[0].centers=[invalid];
+      assert.throws(()=>cm._strictRenderGroups(legacyStructure,scopeContext(cm)),
+        /leaving evidence|entry or leave|establishment entry\/leave|five consecutive/,
+        'compatibility must not repair forged evidence or explicit new role fields');
+    }
+    const point={structural_level:0,source_kind:'segment',price_basis_revision:'raw-test',
+      available_at:BASE+700,points:[{time:BASE+700,price:units[6].end_tick/100}],
+      render_kind:'point_confirmed',render_id:'direction-point',point_id:'direction-point',
+      point_type:reverse?'3buy':'3sell',side:reverse?'buy':'sell'};
+    const structure=snapshot({source_closed_at:BASE+800,levels:[{structural_level:0,origin:'native_segments',
+      centers:[completed],points:[point]}]});
+    cm.cl_show_config={center_all:true,point_all:true,center_L0:true,point_L0:true};
+    const items=[...cm._strictRenderGroups(structure,scopeContext(cm)).values()].flat();
+    assert.ok(items.some(value=>value.point_id===point.point_id && value.point_type===point.point_type),
+      'an opposite final departure must not remove or postpone the confirmed point');
   }
 });
 
