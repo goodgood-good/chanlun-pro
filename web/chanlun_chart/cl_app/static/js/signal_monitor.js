@@ -68,6 +68,8 @@
   }
   function statusDetails(row) {
     const details=[];
+    if(row.data_freshness&&row.data_freshness!=='ready')details.push(
+      row.data_freshness==='limited'?'数据受限，当前状态待复核':row.data_freshness==='updating'?'最新收盘K线尚待复核':'等待有效数据核验');
     if(row.signal_type==='holding_risk')details.push(`持仓参考 ${points[row.reference_point_type]||'买点'} · 结构止损 ${row.stop_price??'—'}`);
     if(row.stage==='left'&&row.exit_reasons?.length){
       const reasons={STRUCTURAL_STOP_TRIGGERED:'触发结构止损参考',ANCHOR_DISTANCE_EXCEEDED:'距拐点超过筛选上限',
@@ -138,7 +140,7 @@
     const summary=data?.holding_summary,element=$('holding-focus-summary');
     if(element&&summary){
       const periods=data.monitor_frequencies?.length?` · ${data.monitor_frequencies.join(' / ')}`:'';
-      const text=`我的持仓 ${summary.count} 只${periods} · 当前信号 ${summary.signals} 条 · 检查通过 ${summary.ready} 只${summary.limited?` · 数据受限 ${summary.limited} 只`:''}${summary.pending?` · 待核验 ${summary.pending} 只`:''}${summary.source_current===false?' · 持仓名单暂待核验':''}`;
+      const text=`我的持仓 ${summary.count} 只${periods} · 当前信号 ${summary.signals} 条 · 已更新 ${summary.ready} 只${summary.updating?` · 待更新 ${summary.updating} 只`:''}${summary.limited?` · 数据受限 ${summary.limited} 只`:''}${summary.pending?` · 待核验 ${summary.pending} 只`:''}${summary.source_current===false?' · 持仓名单暂待核验':''}`;
       if(element.textContent!==text)element.textContent=text;
     }
     const riskSummary=$('holding-risk-summary');
@@ -153,7 +155,7 @@
   function pool() {
     const page=listPage('pool',data?.seed?.symbols||[]);
     $('pool').replaceChildren(...page.rows.map(row=>{
-      const link=chart(row),label={limited:'数据受限',pending:'待核验'}[row.coverage_state];
+      const link=chart(row),label={limited:'数据受限',pending:'待核验',updating:'待最新K线复核'}[row.coverage_state];
       if(label)link.append(node('small',' · '+label));return link;
     }));
     $('pool-empty').textContent=page.total?'':page.filtered?'没有匹配的监听标的。':'尚无选股候选或自选标的。';
@@ -161,7 +163,7 @@
   function render(result) {
     data=result; const manual=result.screening_job||{},live=result.monitor_job||{},seed=result.seed;
     const poolCount=seed?.count??seed?.codes?.length??0;
-    if(!initialized){$('morning-after-close').value=result.settings.morning_after_close||'11:35';$('after-close').value=result.settings.after_close;$('daily-workers').value=String(result.settings.screening?.workers||12);$('interval').value=String(result.settings.interval_seconds);$('daily-scope').value=result.settings.daily_scope;initialized=true;}
+    if(!initialized){$('morning-after-close').value=result.settings.morning_after_close||'11:35';$('after-close').value=result.settings.after_close;$('daily-workers').value=String(result.settings.screening?.workers||16);if($('monitor-workers'))$('monitor-workers').value=String(result.settings.monitor_workers||16);$('interval').value=String(result.settings.interval_seconds);$('daily-scope').value=result.settings.daily_scope;initialized=true;}
     $('enabled-label').textContent=result.enabled?(result.runtime_running?'自动任务已开启':'后台服务尚未就绪'):'自动任务已暂停';
     $('enable').disabled=busy;$('enable').textContent=result.enabled?'保存并保持开启':'启动自动任务';
     $('pause').disabled=busy||!result.enabled;$('check-now').disabled=busy||!result.enabled||!poolCount||active(live)||active(manual);
@@ -172,7 +174,7 @@
     $('live-detail').textContent=`监听周期：${periods.join('、')||'待配置'}。新 K 线收盘后优先检查；常规检查间隔 ${result.settings.interval_seconds} 秒，已完成标的即时更新。最近处理 ${date(result.last_check_at)}，最近整批完成 ${date(result.last_batch_completed_at)}。${result.pending_symbols_count?`仍有 ${result.pending_symbols_count} 只等待检查。`:''}${live.error||''}`;
     const markets={a:'A 股',us:'美股',hk:'港股',fx:'外汇',ny_futures:'国际期货',futures:'国内期货',currency_spot:'数字货币现货',currency:'数字货币合约'};
     const coverage=Object.entries(result.pool_markets||{}).map(([m,n])=>`${markets[m]||m} ${n} 只`).join('，');
-    $('pool-source').textContent=seed?`选股候选 ${seed.screening_count??seed.screening_symbols?.length??poolCount} 只${seed.screening_recheck_count?` + 待复核 ${seed.screening_recheck_count} 只`:''} + 自选 ${seed.watchlist_count||0} 只，去重共 ${poolCount} 只，其中持仓 ${seed.holding_count||0} 只。${coverage}。${result.coverage?`检查通过 ${result.coverage.ready} 只 · 数据受限 ${result.coverage.limited} 只 · 待核验 ${result.coverage.pending} 只。`:''}${seed.error_count?'盘后选股存在数据问题，详见选股诊断。':''}`:'自选标的无需先出现买卖点即可进入监听名单。';
+    $('pool-source').textContent=seed?`选股候选 ${seed.screening_count??seed.screening_symbols?.length??poolCount} 只${seed.screening_recheck_count?` + 待复核 ${seed.screening_recheck_count} 只`:''} + 自选 ${seed.watchlist_count||0} 只，去重共 ${poolCount} 只，其中持仓 ${seed.holding_count||0} 只。${coverage}。${result.coverage?`已更新 ${result.coverage.ready} 只 · 待更新 ${result.coverage.updating||0} 只 · 数据受限 ${result.coverage.limited} 只 · 待核验 ${result.coverage.pending} 只。`:''}${seed.error_count?'盘后选股存在数据问题，详见选股诊断。':''}`:'自选标的无需先出现买卖点即可进入监听名单。';
     progress('daily-progress',manual);progress('live-progress',live);
     $('pool-count').textContent=poolCount;$('signal-count').textContent=result.pagination?.signals.overall??result.signals.length;
     $('event-count').textContent=result.pagination?.events.overall??result.events.length;$('error-count').textContent=result.errors?.length||0;
@@ -260,7 +262,7 @@
       }
     }
   }
-  $('monitor-form').addEventListener('submit',event=>{event.preventDefault();void control('start',{morning_after_close:$('morning-after-close').value,after_close:$('after-close').value,screening_workers:Number($('daily-workers').value),interval_seconds:Number($('interval').value),daily_scope:$('daily-scope').value});});
+  $('monitor-form').addEventListener('submit',event=>{event.preventDefault();void control('start',{morning_after_close:$('morning-after-close').value,after_close:$('after-close').value,screening_workers:Number($('daily-workers').value),monitor_workers:Number($('monitor-workers')?.value||16),interval_seconds:Number($('interval').value),daily_scope:$('daily-scope').value});});
   $('pause').addEventListener('click',()=>void control('pause'));
   $('dingtalk-enabled').addEventListener('change',()=>void control('dingtalk',{enabled:$('dingtalk-enabled').checked}));
   $('check-now').addEventListener('click',()=>void control('check'));
@@ -307,7 +309,7 @@
         const selectionKey=`${row.market}:${row.code}`;
         const card=node('article',undefined,'monitor-risk-card');card.append(node('strong',`${row.name||row.code} · ${row.code}`));
         if(!row.plans?.length)card.append(node('p','风险参考未设置；买卖点与盘整背驰仍按监听规则提醒。','monitor-risk-unbound'));
-        for(const period of row.periods||[])card.append(node('small',`${period.frequency} · ${{ready:'已核验',limited:'部分检查受限',pending:'等待核验'}[period.status]||period.status} · 行情截止 ${date(period.cutoff)}`,'muted'));
+        for(const period of row.periods||[])card.append(node('small',`${period.frequency} · ${{ready:'已更新到最新收盘',updating:'等待最新收盘复核',limited:'部分检查受限',pending:'等待核验'}[period.status]||period.status} · 行情截止 ${date(period.cutoff)}`,'muted'));
         for(const plan of row.plans||[]){
           const labels={active:'跟踪中',waiting:'等待复核',requires_review:'需要重新核验',stop_triggered:'结构止损已触发',reverse_confirmed:'反向信号已确认'};
           card.append(node('p',`${plan.frequency} ${points[plan.point_type]} · 止损参考 ${plan.stop_label||money(plan.stop_price)} · ${labels[plan.status]||plan.status}`));

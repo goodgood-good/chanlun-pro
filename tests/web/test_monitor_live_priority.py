@@ -31,6 +31,7 @@ def mixed(tmp_path, monkeypatch):
         {"market": "us", "code": "LIVE.US", "name": "live", "origin": "watchlist"}
     )
     state = service._load()
+    state['settings']['monitor_workers'] = 4
     state.update(
         enabled=True,
         force=True,

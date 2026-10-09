@@ -160,7 +160,7 @@ def validate_settings(body, *, max_codes=100):
             raise ValueError("最低操作周期必须是本轮实际计算的单一物理周期")
         result["minimum_operating_frequency"] = minimum
     for field, default, limit in (("recent_sessions", 5, 20), ("max_anchor_sessions", 20, 60),
-                                  ("workers", 12, 12)):
+                                  ("workers", 16, 16)):
         value = body.get(field, default)
         if type(value) is not int or not 1 <= value <= limit:
             raise ValueError(f"{field} 必须是 1–{limit} 的整数")
@@ -964,6 +964,8 @@ class ScreeningManager:
             directory = self.root / run_id
             request = {"run_id": run_id, "observed_at": self._now().isoformat(),
                        "settings": settings}
+            from chanlun.screening.compute_capacity import budget_request
+            request['compute_budget'] = budget_request()
             if self._reuse_workers:
                 from .screening_worker_runtime import runtime_request
                 request['worker_runtime'] = runtime_request()

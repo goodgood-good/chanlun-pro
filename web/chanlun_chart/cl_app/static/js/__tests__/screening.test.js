@@ -346,7 +346,7 @@ test('a delayed poll cannot overwrite a run started from the latest-results page
   await ui.get('screen-form').listeners.submit({preventDefault() {}});
   resolveOld(response(result('old','30m').status));await pendingPoll;await settle();
   assert.equal(submitted.max_anchor_gain_pct,8);
-  assert.equal(submitted.workers,12);
+  assert.equal(submitted.workers,16);
   assert.deepEqual(submitted.frequencies,['5m']);
   assert.deepEqual(submitted.point_types,['1buy','2buy','3buy','1sell','2sell','3sell']);
   assert.match(ui.get('diagnostics').textContent,/new/);

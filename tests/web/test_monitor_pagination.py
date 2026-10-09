@@ -35,7 +35,7 @@ def sample(count=125):
             "settings": {"frequencies": ["5m"]},
         },
         "selection_checks": {
-            f"a:{r['code']}:5m": {"revision": "current", "error": i == 0}
+            f"a:{r['code']}:5m": {"revision": "current", "error": i == 0, "cutoff":1000}
             for i, r in enumerate(symbols)
         },
     }
@@ -49,6 +49,7 @@ def test_remote_pagination_searches_all_rows_and_keeps_full_counts_without_evide
         {"signals_page": "2", "events_size": "25", "pool_q": "stock 124"},
         "current",
         True,
+        expected_cutoffs={key:1000 for key in state['selection_checks']},
     )
     assert len(result["signals"]) == 50 and len(result["events"]) == 25
     assert (
@@ -59,6 +60,7 @@ def test_remote_pagination_searches_all_rows_and_keeps_full_counts_without_evide
     assert result["coverage"] == {
         "total": 125,
         "ready": 124,
+        "updating": 0,
         "limited": 1,
         "pending": 0,
     }

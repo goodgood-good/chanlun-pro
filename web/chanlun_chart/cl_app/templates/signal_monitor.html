@@ -38,7 +38,8 @@
       <div class="screen-controls">
         <label>上午收盘后选股（北京时间）<input id="morning-after-close" type="time" min="11:35" max="12:59" value="11:35" required></label>
         <label>下午收盘后选股（北京时间）<input id="after-close" type="time" min="15:01" max="23:59" value="15:10" required></label>
-        <label>选股计算进程<input id="daily-workers" type="number" min="1" max="12" value="12" required></label>
+        <label>选股计算进程<input id="daily-workers" type="number" min="1" max="16" value="16" required></label>
+        <label>监听计算进程<input id="monitor-workers" type="number" min="1" max="16" value="16" required></label>
         <label>常规检查间隔<select id="interval"><option value="30">30 秒</option><option value="60" selected>60 秒</option><option value="120">2 分钟</option><option value="300">5 分钟</option></select></label>
         <label>盘后选股范围<select id="daily-scope"><option value="all_a_watchlist">A 股 + 自选分组（各市场）</option><option value="watchlist">仅自选分组（各市场）</option><option value="latest">沿用最近一次选股条件</option></select></label>
       </div>
@@ -46,6 +47,7 @@
     </form>
     </details>
     <details class="monitor-policy"><summary>调度与行情更新说明</summary>
+    <p class="muted">选股与监听共享最多 16 个计算进程；同时运行时会给实时监听保留资源。我的持仓始终检查一、二、三类买卖点，普通标的沿用选股的类型筛选。</p>
     <p class="muted">监听最近一轮选股候选及自选组中的标的；自选标的无需先入选或出现信号。各所选 K 线周期独立计算已确认中枢与买卖点，随对应市场的新收盘 K 线更新。提醒在本页保留，可开启钉钉推送，关闭网页后后台任务仍继续。</p>
     <p class="muted">“我的持仓”分组同时接收盘整背驰提前预警及确认通知。提前预警结合未完成线段的力度减弱、已收盘行情的动能收缩与局部转折，后续可能确认或失效。数据异常时等待复核，失效预警保留在变化记录中。启用前的历史信号不补发；移出持仓分组后停止该标的的盘整背驰提醒。</p>
     <p class="muted">A 股在午间 11:30 和下午 15:00 收盘后各选股一次，分别使用当时最新已收盘 K 线；其他市场按自身完整交易时段取数。实时监听随各市场新 K 线更新。缺少行情、价格基准或交易时段的标的会列入诊断，不当作无信号。</p>

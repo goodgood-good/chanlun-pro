@@ -17,6 +17,8 @@ LABELS = {
 }
 ROW_FIELDS = {
     "holding",
+    "data_freshness",
+    "expected_closed_at",
     "id",
     "code",
     "market",
@@ -126,12 +128,29 @@ def _page(rows, name, options):
     }
 
 
-def paged_state(raw, options, revision, source_current):
+def period_check_state(check, revision, expected):
+    if check.get('error'):
+        return 'limited'
+    if (not check or revision and check.get('revision') != revision
+            or expected is None or check.get('cutoff') is None):
+        return 'pending'
+    return 'ready' if check['cutoff'] == expected else 'updating'
+
+
+def paged_state(raw, options, revision, source_current, *, expected_cutoffs=None):
     state = deepcopy({k: v for k, v in raw.items() if k in STATE_FIELDS})
     checks = raw.get("selection_checks", {})
     held = set(raw.get("holding_symbols", []))
+    expected_cutoffs = expected_cutoffs or {}
+    def freshness(market, code, frequency):
+        if not revision and source_current is not True:
+            return 'pending'
+        key=f'{market}:{code}:{frequency}'
+        return period_check_state(checks.get(key,{}),revision,expected_cutoffs.get(key))
     signals = [
-        {**row, "holding": f"{row.get('market', 'a')}:{row['code']}" in held}
+        {**row, "holding": f"{row.get('market', 'a')}:{row['code']}" in held,
+         'data_freshness':freshness(row.get('market','a'),row['code'],row['frequency']),
+         'expected_closed_at':expected_cutoffs.get(f"{row.get('market','a')}:{row['code']}:{row['frequency']}")}
         for row in raw["signals"].values()
         if row.get("stage") != "invalidated"
         and (
@@ -163,18 +182,13 @@ def paged_state(raw, options, revision, source_current):
     pool = []
     for symbol in symbols:
         key = f"{symbol.get('market', 'a')}:{symbol['code']}"
-        periods = [checks.get(f"{key}:{frequency}", {}) for frequency in frequencies]
-        current = [
-            row
-            for row in periods
-            if row and (not revision or row.get("revision") == revision)
-        ]
+        periods = [freshness(symbol.get('market','a'),symbol['code'],frequency) for frequency in frequencies]
         health = (
             "limited"
-            if key in failed_symbols or any(row.get("error") for row in current)
-            else "ready"
-            if periods and len(current) == len(periods)
-            else "pending"
+            if key in failed_symbols or 'limited' in periods
+            else 'pending' if not periods or 'pending' in periods
+            else 'updating' if 'updating' in periods
+            else 'ready'
         )
         coverage[health] += 1
         pool.append({**symbol, "coverage_state": health, "holding": key in held})
@@ -192,14 +206,14 @@ def paged_state(raw, options, revision, source_current):
             risk_attention.add(symbol)
     state['holding_summary'] = {
         'count': len(held), 'signals': sum(row['holding'] for row in signals),
-        **{key: holding_coverage[key] for key in ('ready','limited','pending')},
+        **{key: holding_coverage[key] for key in ('ready','updating','limited','pending')},
         'source_current': raw.get('holding_source_current', True),
         'risk_bound_symbols': len(risk_bound), 'risk_unbound_symbols': len(held - risk_bound),
         'risk_attention_symbols': len(risk_attention),
     }
     state["coverage"] = {
         "total": len(pool),
-        **{key: coverage[key] for key in ("ready", "limited", "pending")},
+        **{key: coverage[key] for key in ("ready", "updating", "limited", "pending")},
     }
     state["pool_markets"] = dict(Counter(row["market"] for row in symbols))
     state["pagination"] = {}

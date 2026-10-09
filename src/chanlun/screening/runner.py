@@ -778,9 +778,17 @@ def _external_calendar_context(market, code, observed, frequency, recent_session
 
 
 def _scan_worker_symbol(stock, settings, contexts, run_dir, revision, request):
+    from .compute_capacity import compute_slot
+    with compute_slot(request, run_dir):
+        return _scan_worker_symbol_with_capacity(stock, settings, contexts, run_dir, revision, request)
+
+
+def _scan_worker_symbol_with_capacity(stock, settings, contexts, run_dir, revision, request):
     cache_options = {"force_rebuild": True} if request.get("force_rebuild") is True else {}
     try:
         symbol_settings={**settings,'frequencies':stock.get('_monitor_periods',settings['frequencies'])}
+        if request.get('holding_snapshot') is not None and stock.get('holding') is True:
+            symbol_settings['point_types'] = list(POINT_TYPES)
         symbol_contexts = dict(contexts)
         if stock.get('_monitor_periods') and stock.get('market','a')=='a':
             observed=datetime.fromisoformat(request['observed_at'])
@@ -1025,7 +1033,8 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
                                          "watchlist": "人工关注组（各市场）", "symbols": "选股候选（跨市场）"}.get(settings["scope"], "指定股票")})
         write_json(run_dir / "universe.json", stocks)
         publish_status()
-        workers = min(settings.get("workers", 12), max(1, (os.cpu_count() or 2) - 2), 12)
+        from .compute_capacity import worker_capacity, MAX_WORKERS
+        workers = worker_capacity(settings.get('workers', MAX_WORKERS), monitor=worker_pool is not None)
         state["effective_workers"] = workers
         state["catalog_elapsed_seconds"] = round(time.time() - state["started_at"], 1)
         scan_started = time.time()

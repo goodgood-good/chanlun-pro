@@ -13,10 +13,11 @@ def test_holdings_are_first_and_filtering_precedes_server_pagination():
     state = sample(125)
     state['holding_symbols'] = ['a:SH.000000', 'a:SH.000001']
     state['holding_source_current'] = True
-    result = paged_state(state, {'signals_size':25}, 'current', True)
+    result = paged_state(state, {'signals_size':25}, 'current', True,
+                         expected_cutoffs={key:1000 for key in state['selection_checks']})
     assert list(result['signals'])[:2] == ['1', '0']
     assert all(row['holding'] for row in list(result['signals'].values())[:2])
-    assert result['holding_summary'] == {'count':2,'signals':2,'ready':1,'limited':1,'pending':0,'source_current':True,
+    assert result['holding_summary'] == {'count':2,'signals':2,'ready':1,'updating':0,'limited':1,'pending':0,'source_current':True,
                                          'risk_bound_symbols':0,'risk_unbound_symbols':2,'risk_attention_symbols':0}
     selected = paged_state(state, {'signals_scope':'holdings','signals_page':99}, 'current', True)
     assert set(selected['signals']) == {'0','1'}

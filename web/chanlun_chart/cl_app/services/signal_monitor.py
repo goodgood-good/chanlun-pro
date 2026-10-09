@@ -19,7 +19,8 @@ import threading
 import time
 
 from chanlun import config
-from chanlun.screening.rules import CN
+from chanlun.screening.rules import CN, POINT_TYPES
+from chanlun.screening.compute_capacity import cpu_capacity, worker_capacity, MAX_WORKERS
 from chanlun.screening.runner import write_json
 from chanlun.screening.markets import closed_bar_cutoff, holding_symbols, watchlist_symbols
 from .screening import ScreeningManager, MonitorResultsReadError, manager as screening_manager, read_state_json, validate_settings, all_periods_failed
@@ -33,7 +34,6 @@ from .screening_pool_recovery import independent_members, pending_members, suspe
 ACTIVE = {"starting", "running"}
 MONITOR_BATCH_SIZE = 64
 MONITOR_DURING_SCREENING_BATCH_SIZE = 16
-MONITOR_DURING_SCREENING_WORKERS = 2
 MONITOR_BACKGROUND_WAVES = 2
 MONITOR_MAX_FAILURES = 3
 MONITOR_READ_ATTEMPTS = 3
@@ -275,6 +275,8 @@ class SignalMonitor:
         self._control_version = 0
         # Versions distinguish new requests from work already being launched.
         self._check_requests = {}
+        self._notification_rechecks = {}
+        self._notification_retry_after = {}
         self._startup_retries = {}
         self._notifications = notifications
         self._analytics = None
@@ -333,8 +335,11 @@ class SignalMonitor:
         revision = source.get('current_source_revision') or (
             source.get('source_revision') if source.get('source_current') is True else None)
         version_known = bool(revision) or source.get('source_current') is True
+        with self._lock:
+            scan_types=set((self._load().get('seed') or {}).get('settings',{}).get('point_types',[]))
         fresh_holdings = None
-        if any(event.get("signal_type") in {"consolidation_divergence","holding_risk"} for event in events):
+        if any(event.get("signal_type") in {"consolidation_divergence","holding_risk"}
+               or event.get('holding') or event.get('point_type') not in scan_types for event in events):
             try:
                 fresh_holdings = {_symbol_key(symbol) for symbol in holding_symbols()}
             except Exception:
@@ -394,8 +399,18 @@ class SignalMonitor:
                     pending.append(event)
                     continue
             elif event.get("point_type") not in seed.get("settings", {}).get("point_types", []):
-                continue
+                if event.get('point_type') not in POINT_TYPES:
+                    continue
+                if not holding_current or fresh_holdings is None:
+                    if key in state['holding_symbols'] or event.get('holding'):
+                        pending.append(event)
+                    continue
+                if key not in fresh_holdings:
+                    continue
             if not version_known or event.get("id") in uncertain:
+                expected=expected_cutoffs.get((key,frequency))
+                if expected is not None:
+                    self._request_notification_recheck(event,expected,revision)
                 pending.append(event)
                 continue
             item = current.get(event.get("id"))
@@ -419,12 +434,42 @@ class SignalMonitor:
             if (not check or check.get("error") or check.get("revision") != revision
                     or (check.get("cutoff") or 0) < expected
                     or item.get("source_closed_at") != check.get("cutoff")):
+                self._request_notification_recheck(event, expected, revision)
                 pending.append(event)
                 continue
             if not consolidation and item["id"] not in check.get("identities", []):
                 continue
             valid.append(deepcopy({**event, **item}))
         return valid, pending
+
+    def _request_notification_recheck(self, event, cutoff, revision):
+        """A pending valid notification requests a bounded, fresh recheck."""
+        recorded=event.get('recorded_at')
+        if not isinstance(recorded,(int,float)) or not 0<=self.now().timestamp()-recorded<1800:
+            return
+        key=(_symbol_key(event),event['frequency'])
+        value={'cutoff':cutoff,'revision':revision,'expires':recorded+1800}
+        previous=self._notification_rechecks.get(key)
+        if previous and previous['revision']==revision:
+            value['cutoff']=max(cutoff,previous['cutoff'])
+            value['expires']=max(value['expires'],previous['expires'])
+        if self._notification_rechecks.get(key)!=value:
+            self._notification_rechecks[key]=value
+            self._wake.set()
+
+    def _pending_notification_symbols(self, state, now):
+        pool=set((state.get('seed') or {}).get('codes',[]))
+        periods=set((state.get('seed') or {}).get('settings',{}).get('frequencies',[]))
+        for key, request in list(self._notification_rechecks.items()):
+            symbol, frequency=key
+            check=state['selection_checks'].get(f'{symbol}:{frequency}',{})
+            complete=(not check.get('error') and check.get('revision')==request['revision']
+                      and (check.get('cutoff') or 0)>=request['cutoff'])
+            if symbol not in pool or frequency not in periods or request['expires']<=now or complete:
+                self._notification_rechecks.pop(key,None)
+        urgent={symbol for symbol,_ in self._notification_rechecks}
+        self._notification_retry_after={key:value for key,value in self._notification_retry_after.items() if key in urgent}
+        return urgent
 
     def _load(self):
         if self._state is None:
@@ -485,6 +530,12 @@ class SignalMonitor:
             self._state.setdefault("consolidation_enabled_at", int(self.now().timestamp()))
             self._state.setdefault("consolidation_warning_enabled_at", int(self.now().timestamp()))
             self._state["settings"].setdefault("morning_after_close", MORNING_AFTER_CLOSE)
+            self._state['settings'].setdefault('monitor_workers',MAX_WORKERS)
+            if self._state.get('compute_budget_version') != 1:
+                # Upgrade the old default once; smaller explicit budgets survive.
+                if self._state['settings'].get('screening',{}).get('workers') == 12:
+                    self._state['settings']['screening']['workers'] = MAX_WORKERS
+                self._state['compute_budget_version'] = 1
             daily = self._state.setdefault("daily", {})
             if "afternoon" not in daily and (daily.get("run_id") or daily.get("completed_session")):
                 daily["afternoon"] = {k: daily[k] for k in ("run_id", "status", "attempts", "retry_at") if k in daily}
@@ -513,6 +564,19 @@ class SignalMonitor:
         revision = monitor_status.get("current_source_revision") or manual_status.get("current_source_revision")
         if not revision and monitor_status.get("source_current") is not False:
             revision = monitor_status.get("source_revision")
+        expected_cutoffs={}
+        if page_options is not None:
+            with self._lock:
+                seed=self._load().get('seed') or {}
+                identities=[(s.get('market','a'),s['code']) for s in seed.get('symbols',[])]
+                periods=tuple(seed.get('settings',{}).get('frequencies',[]))
+            observed=self.now()
+            # Calendar work must not hold the monitor's shared state lock.
+            for market, code in identities:
+                for period in periods:
+                    try:value=closed_bar_cutoff(market,code,observed,period)
+                    except (ValueError,OSError,TypeError):value=None
+                    expected_cutoffs[f'{market}:{code}:{period}']=value
         with self._lock:
             raw=self._load()
             activity={key:raw.get(key) for key in ('enabled','dingtalk_enabled','last_check_at','last_check_notifications')}
@@ -538,7 +602,8 @@ class SignalMonitor:
                 state = deepcopy({k:v for k,v in self._load().items() if k not in _PRIVATE_SNAPSHOT_FIELDS})
             else:
                 from .monitor_view import paged_state
-                state = paged_state(self._load(), page_options, revision, monitor_status.get('source_current'))
+                state = paged_state(self._load(), page_options, revision, monitor_status.get('source_current'),
+                                    expected_cutoffs=expected_cutoffs)
         if revision and page_options is None:
             # A deployment invalidates every old-version signal, including
             # symbols outside the batch currently being recomputed. Project
@@ -668,8 +733,11 @@ class SignalMonitor:
             progress=[]
             for frequency in sorted(set(periods)|{p['frequency'] for p in owned}):
                 check=checks.get(f'{symbol}:{frequency}',{})
+                from .monitor_view import period_check_state
+                try:target=closed_bar_cutoff(market,code,self.now(),frequency)
+                except (ValueError,OSError,TypeError):target=None
                 progress.append({'frequency':frequency,'cutoff':check.get('cutoff'),'checked_at':check.get('checked_at'),
-                                 'status':'limited' if check.get('error') else 'ready' if check and (not revision or check.get('revision')==revision) else 'pending'})
+                                 'status':period_check_state(check,revision,target)})
             output.append({'market':market,'code':code,'name':next((r.get('name') for r in records.values() if _symbol_key(r)==symbol),code),
                            'choices':candidates,'plans':owned,'periods':progress,'message':'；'.join(sorted(set(errors)))})
         result={'holdings':output,'holding_source_current':bool(current),'monitor_enabled':enabled}
@@ -973,7 +1041,7 @@ class SignalMonitor:
 
     def enable(self, body, *, page_options=None):
         validate_page_options(page_options)
-        if not isinstance(body, dict) or set(body) - {"morning_after_close", "after_close", "interval_seconds", "daily_scope", "screening_workers", "frequencies"}:
+        if not isinstance(body, dict) or set(body) - {"morning_after_close", "after_close", "interval_seconds", "daily_scope", "screening_workers", "monitor_workers", "frequencies"}:
             raise ValueError("自动任务设置不合法")
         morning = body.get("morning_after_close", self._load()["settings"].get("morning_after_close", MORNING_AFTER_CLOSE))
         if not isinstance(morning, str) or not re.fullmatch(r"(?:11:(?:3[5-9]|[4-5][0-9])|12:[0-5][0-9])", morning):
@@ -988,12 +1056,15 @@ class SignalMonitor:
         if scope not in {"all_a_watchlist", "watchlist", "latest"}:
             raise ValueError("请选择盘后选股范围")
         base = dict(self._load()["settings"].get("screening") or self.screening.status().get("settings") or {"scope": "all_a"})
-        base["workers"] = body.get("screening_workers", base.get("workers", 12))
+        base["workers"] = body.get("screening_workers", base.get("workers", MAX_WORKERS))
+        monitor_workers=body.get('monitor_workers',self._load()['settings'].get('monitor_workers',MAX_WORKERS))
+        if type(monitor_workers) is not int or not 1<=monitor_workers<=MAX_WORKERS:
+            raise ValueError('监听计算进程必须是 1–16 的整数')
         if scope != "latest":
             base.update(scope=scope, codes=[])
             base.pop("symbols", None)
         settings = {"morning_after_close": morning, "after_close": after, "interval_seconds": interval,
-                    "daily_scope": scope, "screening": validate_settings(base)}
+                    "daily_scope": scope, "screening": validate_settings(base), 'monitor_workers':monitor_workers}
         # Validate before taking ownership or changing any live state.
         if 'frequencies' in body:
             trial = {'settings': deepcopy(settings)}
@@ -1347,7 +1418,7 @@ class SignalMonitor:
                 kept = {key: item for key, item in state[name].items()
                         if _symbol_key(item) in pool and item.get("frequency") in frequencies
                         and (_symbol_key(item) in held_keys if item.get("signal_type") == "consolidation_divergence"
-                             else item.get("point_type") in point_types)}
+                             else item.get("point_type") in (set(POINT_TYPES) if _symbol_key(item) in held_keys else point_types))}
                 scope_pruned |= len(kept) != len(state[name])
                 state[name] = kept
             checks = {key: item for key, item in state["selection_checks"].items()
@@ -1622,6 +1693,7 @@ class SignalMonitor:
                     state["force"] = True
             waiting_interval = (not state["force"] and not state.get("pending_symbols_count")
                                 and now.timestamp() < state.get("next_check_at", 0))
+            urgent=self._pending_notification_symbols(state,now.timestamp())
             cutoffs, errors, pending, retries, recent = {}, [], [], set(), set()
             previous_calendar_errors = {_symbol_key(error) for error in state.get("schedule_errors", [])}
             for symbol in seed["symbols"]:
@@ -1642,14 +1714,19 @@ class SignalMonitor:
                 due = (retry.get("cutoff") == closed and retry.get("retry_at") is not None
                        and retry.get("failures", 0) < MONITOR_MAX_FAILURES
                        and now.timestamp() >= retry["retry_at"])
+                retry_blocked=(retry.get('cutoff')==closed and (
+                    retry.get('failures',0)>=MONITOR_MAX_FAILURES
+                    or (retry.get('retry_at') or 0)>now.timestamp()))
+                urgent_due=(key in urgent and not retry_blocked
+                            and now.timestamp()>=self._notification_retry_after.get(key,0))
                 # Inspect the cached session clock even during the idle wait.
                 # New candles and already-due retries take priority over idle
                 # polling. Another batch cannot extend a symbol's backoff.
-                if waiting_interval and not (due or is_recent and (attempted is None or closed > attempted)):
+                if waiting_interval and not (due or urgent_due or is_recent and (attempted is None or closed > attempted)):
                     continue
                 fresh = (state["force"] or key in previous_calendar_errors or key in state.get("force_pending_symbols", [])
                          or attempted != closed)
-                if fresh or due:
+                if fresh or due or urgent_due:
                     pending.append(symbol)
                     cutoffs[key] = closed
                     if not fresh:
@@ -1682,8 +1759,9 @@ class SignalMonitor:
             # Live clocks precede historical rebuilds. Within each class keep
             # holdings/watchlist priority, bounded retries and queue rotation.
             pending.sort(key=lambda symbol: (_symbol_key(symbol) not in recent,
-                                             _symbol_key(symbol) in retries,
                                              _symbol_key(symbol) not in state["holding_symbols"],
+                                             _symbol_key(symbol) not in urgent,
+                                             _symbol_key(symbol) in retries,
                                              symbol.get("origin") != "watchlist",
                                              state["attempted_cutoffs"].get(_symbol_key(symbol), 0)))
             backlog = len(pending)
@@ -1693,9 +1771,12 @@ class SignalMonitor:
             forced |= {_symbol_key(symbol) for symbol in pending} & previous_calendar_errors
             batch_size = (min(MONITOR_BATCH_SIZE, MONITOR_DURING_SCREENING_BATCH_SIZE)
                           if screening_active else MONITOR_BATCH_SIZE)
-            workers = min(6, max(2, seed["settings"].get("workers", 4)))
+            workers = min(cpu_capacity(), state['settings'].get('monitor_workers', MAX_WORKERS))
             if screening_active:
-                workers = min(workers, MONITOR_DURING_SCREENING_WORKERS)
+                manual_workers=manual.get('effective_workers')
+                if type(manual_workers) is not int:
+                    manual_workers=worker_capacity(manual.get('settings',{}).get('workers',MAX_WORKERS))
+                workers=min(workers,max(1,cpu_capacity()-manual_workers))
             live_pending=[symbol for symbol in pending if _symbol_key(symbol) in recent]
             mode='live' if live_pending else 'background'
             if live_pending:
@@ -1713,7 +1794,9 @@ class SignalMonitor:
             runtime_periods={_symbol_key(symbol):sorted({p['frequency'] for p in state['holding_risk_plans'].values()
                 if p.get('active') and f"{p['market']}:{p['code']}"==_symbol_key(symbol)}) for symbol in pending}
             runtime_periods={k:v for k,v in runtime_periods.items() if set(v)-set(seed['settings']['frequencies'])}
-            catalog_args={'holding_snapshot':list(state['holding_symbols'])} if state.get('holding_source_current') else {}
+            # A cached membership snapshot still bounds computation while the
+            # database recovers; publication separately requires current membership.
+            catalog_args={'holding_snapshot':list(state['holding_symbols'])}
             launch={
                 'control_version':control_version,'seed':seed['run_id'],
                 'expected_run':expected_run,'expected_processed':expected_processed,
@@ -1722,6 +1805,7 @@ class SignalMonitor:
                 'cutoffs':cutoffs,'retries':retries,'forced':forced,
                 'pending_before':set(state.get('force_pending_symbols',[])),
                 'waiting':pending_keys-set(cutoffs),'mode':mode,'scheduled_at':now.timestamp(),
+                'notification_rechecks':set(cutoffs)&urgent,
                 'interval':state['settings']['interval_seconds'],'check_requests':dict(self._check_requests),
             }
         self._dispatch_monitor(launch)
@@ -1760,6 +1844,8 @@ class SignalMonitor:
                     for key in cutoffs.keys()-launch['retries']:
                         state['retry_symbols'].pop(key,None)
                     state['attempted_cutoffs'].update(cutoffs)
+                    for key in launch.get('notification_rechecks',[]):
+                        self._notification_retry_after[key]=self.now().timestamp()+10
                     pending=set(state.get('force_pending_symbols',[]))
                     changed={key for key in pending
                              if key not in launch['pending_before']
@@ -1954,9 +2040,13 @@ class SignalMonitor:
                                       "error": "复核行情截止早于上次成功检查，等待新行情恢复"})
             if regressed:
                 result = {**result, "errors": [*result.get("errors", []), *regressed]}
+            scan_types=set((state.get('seed') or {}).get('settings',{}).get('point_types',POINT_TYPES))
             signals = {_signal(r)["id"]: _signal(r) for r in [*result.get("selected", []), *result.get("observations", [])]
                        if _symbol_key(r) in pool and _symbol_key(r) in checked
                        and r.get("frequency") in frequencies
+                       and r.get('point',{}).get('point_type') in (
+                           set(POINT_TYPES) if _symbol_key(r) in state['holding_symbols']
+                           else scan_types)
                        and (_symbol_key(r), r.get("frequency")) in verified}
             consolidation_choices = {}
             prior = {**state["unverified_signals"], **state["signals"]}

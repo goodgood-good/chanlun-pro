@@ -23,11 +23,11 @@ def test_invalid_screen_scope_is_rejected_before_process_launch(body):
         screening.validate_settings(body)
 
 
-def test_screening_allows_twelve_workers_on_sixteen_logical_processors():
-    assert screening.validate_settings({"scope": "all_a"})["workers"] == 12
+def test_screening_allows_sixteen_workers_and_preserves_explicit_smaller_limits():
+    assert screening.validate_settings({"scope": "all_a"})["workers"] == 16
     assert screening.validate_settings({"scope": "all_a", "workers": 12})["workers"] == 12
     with pytest.raises(ValueError, match="workers"):
-        screening.validate_settings({"scope": "all_a", "workers": 13})
+        screening.validate_settings({"scope": "all_a", "workers": 17})
 
 
 def test_direct_center_alerts_use_only_the_physical_period():

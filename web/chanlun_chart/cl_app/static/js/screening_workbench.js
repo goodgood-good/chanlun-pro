@@ -693,7 +693,7 @@
           if(s.strategy===STRATEGY||s.strategy==='direct_structural')
             for(const input of document.querySelectorAll('#screen-form [name=point]'))input.checked=s.point_types.includes(input.value);
           $('recent').value=s.recent_sessions;$('anchor').value=s.max_anchor_sessions;
-          $('workers').value=status.source_current===false?12:(s.workers??12);
+          $('workers').value=status.source_current===false?16:(s.workers??16);
           $('max-gain').value=s.max_anchor_gain_pct??10;$('exclude-st').checked=s.exclude_st!==false;
           $('weak-second').checked=s.include_weak_second===true;
           updateScope();updateScreenMode();

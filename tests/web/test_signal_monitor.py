@@ -343,7 +343,7 @@ def test_changing_daily_parallelism_keeps_live_notifications_enabled(setup):
     assert configured["dingtalk_enabled"] is True
     assert configured["settings"]["screening"]["workers"] == 12
     with pytest.raises(ValueError, match="workers"):
-        service.enable({"screening_workers": 13})
+        service.enable({"screening_workers": 17})
 
 
 def test_monitor_deduplicates_after_restart_and_waits_for_new_closed_bar(setup, monkeypatch):
@@ -714,7 +714,7 @@ def test_full_screening_keeps_the_previous_pool_live_with_bounded_workers(setup,
     service.check_now()
     service.tick()
     assert len(live.started) == 2
-    assert live.started[-1]["workers"] == 2
+    assert live.started[-1]["workers"] == 4
     assert len(live.started[-1]["symbols"]) == 16
     assert live.started[-1]["symbols"][0] == holding
     assert service.snapshot()["seed"]["run_id"] == old_seed
@@ -727,7 +727,7 @@ def test_full_screening_keeps_the_previous_pool_live_with_bounded_workers(setup,
     service.tick()
     assert len(live.started) == 3
     assert len(live.started[-1]["symbols"]) == 14
-    assert live.started[-1]["workers"] == 2
+    assert live.started[-1]["workers"] == 4
     live.finish(cutoff)
     service.tick()
     assert service.snapshot()["pending_symbols_count"] == 0
@@ -739,7 +739,7 @@ def test_full_screening_keeps_the_previous_pool_live_with_bounded_workers(setup,
     service.tick()
     assert len(live.started) == 4
     assert len(live.started[-1]["symbols"]) == 30
-    assert live.started[-1]["workers"] == 6
+    assert live.started[-1]["workers"] == 16
     assert service.snapshot()["seed"]["run_id"] == manual.state["run_id"]
 
 
