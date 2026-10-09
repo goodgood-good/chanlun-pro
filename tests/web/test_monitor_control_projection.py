@@ -43,6 +43,19 @@ def control(tmp_path, monkeypatch):
     return app.test_client(), service, jobs, notifications, calls
 
 
+def test_status_endpoint_filters_current_holdings_before_pagination(control):
+    client, service, *_ = control
+    service._load()['holding_symbols']=['a:SH.000000','a:SH.000001']
+    response=client.get('/monitor/status?view=paged&signals_scope=holdings&signals_page=99')
+    assert response.status_code==200
+    body=response.get_json()
+    assert {row['code'] for row in body['signals']}=={'SH.000000','SH.000001'}
+    assert body['pagination']['signals']['scope']=='holdings'
+    assert body['pagination']['signals']['page']==1
+    assert body['holding_summary']['count']==2
+    assert client.get('/monitor/status?view=paged&signals_scope=unknown').status_code==400
+
+
 @pytest.mark.parametrize("action", ["start", "pause", "check", "dingtalk"])
 @pytest.mark.parametrize("paged", [False, True])
 def test_control_materializes_only_the_requested_response_once(control, action, paged):

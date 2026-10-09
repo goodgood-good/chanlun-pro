@@ -17,7 +17,7 @@ def warning():
 
 def test_concise_preview_has_named_price_ratio_clock_and_no_page_link():
     row=warning();text=signal_content([row],1791031813)
-    assert text.startswith('【提前预警】BTC/USDT · 5m')
+    assert text.startswith('【我的持仓·提前预警】BTC/USDT · 5m')
     assert 'currency_spot:' not in text and '2637.724204452031' not in text
     assert '29.9%' in text and '候选拐点：84,921.7' in text
     assert '最新5m收盘：85,000.0' in text

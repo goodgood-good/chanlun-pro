@@ -24,7 +24,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import requests
 
 from chanlun.screening.rules import CN
-from .notification_text import signal_content, signal_status_lines as formatted_status_lines, heading, illustrated_signal
+from .notification_text import signal_content, signal_status_lines as formatted_status_lines, heading, illustrated_signal, event_priority, queued_priority
 
 
 POINTS = {"1buy": "一买", "2buy": "二买", "3buy": "三买", "1sell": "一卖", "2sell": "二卖", "3sell": "三卖"}
@@ -176,6 +176,7 @@ class DingTalkOutbox:
         db = sqlite3.connect(self.path, timeout=timeout)
         try:
             db.row_factory = sqlite3.Row
+            db.create_function('holding_priority', 1, queued_priority)
             db.executescript("""
             CREATE TABLE IF NOT EXISTS markers (id TEXT PRIMARY KEY, created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox (
@@ -341,7 +342,7 @@ class DingTalkOutbox:
                     inline_events.append(event)
                     groups.append([(pair[0],event)])
                     continue
-                buckets.setdefault((event.get("market"), event.get("frequency"), event.get("stage")), []).append(pair)
+                buckets.setdefault((event.get("market"), event.get("frequency"), event.get("stage"), event_priority([event])), []).append(pair)
             for bucket in buckets.values():
                 group = []
                 for pair in bucket:
@@ -522,7 +523,13 @@ class DingTalkOutbox:
             # A deferred validity check must yield to work already waiting.
             # Sorting only by creation time lets two old uncertain groups
             # alternate retries forever ahead of a later ready signal.
-            row = db.execute("SELECT * FROM outbox WHERE status IN ('pending','retry','sending') AND next_try<=? ORDER BY CASE WHEN kind='chart' THEN 1 ELSE 0 END,next_try,created,rowid LIMIT 1", (stamp,)).fetchone()
+            # Holding alerts and their images precede ordinary messages. Work
+            # waiting for evidence/image generation yields to ready messages.
+            row = db.execute("SELECT o.* FROM outbox o LEFT JOIN signal_payloads p ON p.outbox_id=o.id "
+                             "WHERE o.status IN ('pending','retry','sending') AND o.next_try<=? "
+                             "ORDER BY CASE WHEN o.error IN ('等待信号有效性复核','等待图文消息生成') THEN 0 "
+                             "ELSE holding_priority(p.events) END DESC, "
+                             "CASE WHEN o.kind='chart' THEN 1 ELSE 0 END,o.next_try,o.created,o.rowid LIMIT 1", (stamp,)).fetchone()
             if row is None:
                 next_due = db.execute("SELECT MIN(next_try) FROM outbox WHERE status IN ('pending','retry','sending')").fetchone()[0]
                 if next_due is not None:

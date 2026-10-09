@@ -37,6 +37,24 @@ test('phone requests 25 rows and keeps signal labels available without a table h
   assert.equal(app.get('monitor-settings').open,false);assert.equal(app.get('monitor-history').open,false);
   assert.equal(app.get('signals').children[0].children[1]['data-label'],'信号');
 });
+
+test('holdings scope queries the server, resets the page and shows holdings identity and coverage',async()=>{
+  const data=payload();data.signals[0].holding=true;
+  data.holding_summary={count:1,signals:1,ready:1,limited:0,pending:0,source_current:true};
+  data.monitor_frequencies=['1m','5m'];
+  const app=fixture(async url=>{
+    const selected=new URL(url,'http://local').searchParams.get('signals_scope')==='holdings';
+    return {ok:true,json:async()=>({...data,signals:selected?[data.signals[0]]:data.signals,
+      pagination:{...data.pagination,signals:{...data.pagination.signals,page:selected?1:2,total:selected?1:125,scope:selected?'holdings':'all'}}})};
+  });
+  await wait();
+  assert.equal(app.get('signals').children[0].children[0].children[1].textContent,'我的持仓');
+  assert.match(app.get('holding-focus-summary').textContent,/我的持仓 1 只 · 1m \/ 5m · 当前信号 1 条/);
+  app.get('signals-scope').value='holdings';app.get('signals-scope').handlers.change();await wait();
+  const request=new URL(app.requests.at(-1).url,'http://local');
+  assert.equal(request.searchParams.get('signals_scope'),'holdings');assert.equal(request.searchParams.get('signals_page'),'1');
+  assert.equal(app.get('signals').children.length,1);
+});
 test('remote pages are not sliced twice and full totals and layout links survive',async()=>{
   const app=fixture(async()=>({ok:true,json:async()=>payload()}));await wait();
   assert.equal(app.get('signals').children.length,25);

@@ -15,7 +15,7 @@ import threading
 import time
 from decimal import Decimal
 
-from .notification_text import public_base
+from .notification_text import public_base, queued_priority
 
 
 class _ChartExpired(Exception):
@@ -187,6 +187,7 @@ class NotificationCharts:
         db = sqlite3.connect(self.root / "chart_jobs.sqlite3",timeout=timeout)
         try:
             db.row_factory=sqlite3.Row
+            db.create_function('holding_priority', 1, queued_priority)
             db.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,event TEXT,status TEXT,created REAL,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0,error TEXT DEFAULT '',updated REAL)")
             if 'updated' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
                 try:
@@ -334,7 +335,9 @@ class NotificationCharts:
     def process_one(self):
         now=self.outbox.now()
         with self._db() as db:
-            row=db.execute("SELECT * FROM jobs WHERE status IN ('pending','running') AND next_try<=? ORDER BY next_try,created,rowid LIMIT 1",(now,)).fetchone()
+            row=db.execute("SELECT * FROM jobs WHERE status IN ('pending','running') AND next_try<=? "
+                           "ORDER BY CASE WHEN error='等待信号有效性复核' THEN 0 ELSE holding_priority(event) END DESC, "
+                           "next_try,created,rowid LIMIT 1",(now,)).fetchone()
             if row is None:
                 return
             db.execute("UPDATE jobs SET status='running',attempts=attempts+1,next_try=? WHERE id=?",(now+60,row['id']))

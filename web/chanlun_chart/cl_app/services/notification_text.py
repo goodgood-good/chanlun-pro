@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import json
 import math
 import re
 from urllib.parse import urlsplit
@@ -85,10 +86,26 @@ def public_base():
     return raw
 
 
+def event_priority(events):
+    """Holding risks precede holdings, which precede ordinary watchlist events."""
+    return max((2 if row.get('signal_type') == 'holding_risk' else
+                1 if row.get('holding') is True or row.get('signal_type') == 'consolidation_divergence' else 0
+                for row in events if isinstance(row, dict)), default=0)
+
+
+def queued_priority(payload):
+    """SQLite sort helper; malformed old payloads must not block the queue."""
+    try:
+        events = json.loads(payload) if payload else []
+    except (ValueError, TypeError, RecursionError):
+        return 0
+    return event_priority([events] if isinstance(events, dict) else events) if isinstance(events, (dict, list)) else 0
+
+
 def heading(row):
     if row.get('signal_type')=='holding_risk':
         kind='结构止损触发' if row['point_type']=='risk_stop' else '反向信号确认'
-        return f"【持仓风险】{clean(row.get('name') or row['code'],28)} {clean(row['code'],80)} · {row['frequency']} · {kind}"
+        return f"【我的持仓·风险】{clean(row.get('name') or row['code'],28)} {clean(row['code'],80)} · {row['frequency']} · {kind}"
     state = row.get("point_status", row.get("stage"))
     tag = {"warning": "提前预警", "invalidated": "预警失效", "confirmed": "已确认"}.get(state, STAGES.get(state, "监听更新"))
     if state == 'warning' and row.get('warning_reactivated'):
@@ -97,7 +114,8 @@ def heading(row):
     name = clean(row.get("name") or code, 28)
     label = name if name == code else f"{name} {code}"
     kind = POINTS.get(row.get("point_type"), "上涨段盘整背驰" if row.get("point_type") == "consolidation_up" else "下跌段盘整背驰")
-    return f"【{tag}】{label} · {row['frequency']} · {kind}"
+    prefix = '我的持仓·' if event_priority([row]) else ''
+    return f"【{prefix}{tag}】{label} · {row['frequency']} · {kind}"
 
 
 def signal_status_lines(row):
@@ -184,7 +202,8 @@ def signal_body(row):
 
 
 def signal_content(events, stamp):
-    title = heading(events[0]) if len(events) == 1 else f"【监听更新】{len(events)} 条信号"
+    group = '我的持仓' if events and all(event_priority([row]) for row in events) else '监听更新'
+    title = heading(events[0]) if len(events) == 1 else f"【{group}】{len(events)} 条信号"
     lines = [title]
     for row in events:
         lines += ["", *([heading(row)] if len(events) > 1 else []), *signal_body(row)]

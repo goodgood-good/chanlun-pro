@@ -16,6 +16,7 @@ LABELS = {
     'risk_stop':'结构止损触发','risk_reverse':'反向信号确认',
 }
 ROW_FIELDS = {
+    "holding",
     "id",
     "code",
     "market",
@@ -76,7 +77,10 @@ def _page_options(name, options):
     query = str(options.get(name + "_q", "")).strip().casefold()
     if len(query) > 100:
         raise ValueError("搜索内容不能超过 100 个字符")
-    return page, size, query
+    scope = options.get(name + "_scope", "all")
+    if scope not in ("all", "holdings"):
+        raise ValueError("标的范围仅支持全部或我的持仓")
+    return page, size, query, scope
 
 
 def validate_page_options(options):
@@ -87,11 +91,12 @@ def validate_page_options(options):
 
 
 def _page(rows, name, options):
-    page, size, query = _page_options(name, options)
+    page, size, query, scope = _page_options(name, options)
     matched = [
         row
         for row in rows
-        if not query
+        if (scope != "holdings" or row.get("holding"))
+        and (not query
         or query
         in " ".join(
             str(v or "")
@@ -101,7 +106,7 @@ def _page(rows, name, options):
                 row.get("frequency"),
                 LABELS.get(row.get("point_type")),
             )
-        ).casefold()
+        ).casefold())
     ]
     total = len(matched)
     count = max(1, math.ceil(total / size))
@@ -117,14 +122,16 @@ def _page(rows, name, options):
         "total": total,
         "overall": len(rows),
         "query": query,
+        "scope": scope,
     }
 
 
 def paged_state(raw, options, revision, source_current):
     state = deepcopy({k: v for k, v in raw.items() if k in STATE_FIELDS})
     checks = raw.get("selection_checks", {})
+    held = set(raw.get("holding_symbols", []))
     signals = [
-        row
+        {**row, "holding": f"{row.get('market', 'a')}:{row['code']}" in held}
         for row in raw["signals"].values()
         if row.get("stage") != "invalidated"
         and (
@@ -138,6 +145,7 @@ def paged_state(raw, options, revision, source_current):
     ]
     signals.sort(
         key=lambda row: (
+            not row["holding"],
             -(row.get("selection_available_at") or row.get("available_at") or 0),
             row["code"],
             row["id"],
@@ -146,6 +154,7 @@ def paged_state(raw, options, revision, source_current):
     seed = raw.get("seed")
     symbols = seed.get("symbols", []) if seed else []
     frequencies = seed.get("settings", {}).get("frequencies", []) if seed else []
+    state['monitor_frequencies'] = list(raw.get('monitor_frequencies') or frequencies)
     coverage = Counter()
     failed_symbols = {
         f"{row.get('market', 'a')}:{row.get('code')}"
@@ -168,7 +177,14 @@ def paged_state(raw, options, revision, source_current):
             else "pending"
         )
         coverage[health] += 1
-        pool.append({**symbol, "coverage_state": health})
+        pool.append({**symbol, "coverage_state": health, "holding": key in held})
+    pool.sort(key=lambda row: not row["holding"])
+    holding_coverage = Counter(row['coverage_state'] for row in pool if row['holding'])
+    state['holding_summary'] = {
+        'count': len(held), 'signals': sum(row['holding'] for row in signals),
+        **{key: holding_coverage[key] for key in ('ready','limited','pending')},
+        'source_current': raw.get('holding_source_current', True),
+    }
     state["coverage"] = {
         "total": len(pool),
         **{key: coverage[key] for key in ("ready", "limited", "pending")},

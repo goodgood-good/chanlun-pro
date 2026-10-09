@@ -63,6 +63,9 @@
     if(row.stage==='left')return '退出候选';
     return row.point_status ? stages[row.point_status]||row.point_status : row.stage==='confirmed'?'已确认':'筛选条件待齐';
   }
+  function holdingBadge(row, label='我的持仓') {
+    return row.holding ? node('span',label,'monitor-holding-badge') : null;
+  }
   function statusDetails(row) {
     const details=[];
     if(row.signal_type==='holding_risk')details.push(`持仓参考 ${points[row.reference_point_type]||'买点'} · 结构止损 ${row.stop_price??'—'}`);
@@ -92,10 +95,11 @@
       const start=(remote.page-1)*remote.size,end=Math.min(start+rows.length,remote.total);
       $(id+'-page').textContent=remote.total?`${remote.page} / ${remote.pages} 页 · ${start+1}–${end} / ${remote.total} 条`:'0 条';
       $(id+'-prev').disabled=remote.page<=1;$(id+'-next').disabled=remote.page>=remote.pages;
-      return {rows,total:remote.total,filtered:!!remote.query};
+      return {rows,total:remote.total,filtered:!!remote.query||remote.scope==='holdings'};
     }
     const query=$(id+'-search').value.trim().toLocaleLowerCase();
-    const matching=query?rows.filter(row=>[row.code,row.name,row.frequency,points[row.point_type]].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)):rows;
+    const scoped=id==='signals'&&$('signals-scope')?.value==='holdings'?rows.filter(row=>row.holding):rows;
+    const matching=query?scoped.filter(row=>[row.code,row.name,row.frequency,points[row.point_type]].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)):scoped;
     const size=Number($(id+'-page-size').value)||50;
     const total=matching.length, count=Math.max(1,Math.ceil(total/size));
     pages[id]=Math.max(1,Math.min(pages[id],count));
@@ -104,12 +108,13 @@
     if($(id+'-page').textContent!==label)$(id+'-page').textContent=label;
     $(id+'-prev').disabled=pages[id]===1;
     $(id+'-next').disabled=pages[id]===count;
-    return {rows:matching.slice(start,end),total,filtered:!!query};
+    return {rows:matching.slice(start,end),total,filtered:!!query||scoped!==rows};
   }
   function events() {
     const page=listPage('events',data?.events||[]);
     $('events').replaceChildren(...page.rows.map(row=>{
       const item=node('article',undefined,'monitor-event');item.append(chart(row),node('span',` · ${row.frequency||'5m'} ${points[row.point_type]||row.point_type} · ${pointStatus(row)}`));
+      const badge=holdingBadge(row,'持仓提醒');if(badge)item.append(badge);
       for(const detail of statusDetails(row))item.append(node('small',detail));
       item.append(node('small',`${date(row.recorded_at)} 记录 · 行情截止 ${date(row.source_closed_at)} · ${row.change==='discovered'?'首次发现':row.change==='left'?'退出候选':'状态变化'}`));return item;
     }));
@@ -119,6 +124,7 @@
     const page=listPage('signals',data?.signals||[]);
     $('signals').replaceChildren(...page.rows.map(row=>{
       const tr=node('tr'),name=node('td');name.append(chart(row));tr.append(name);
+      const badge=holdingBadge(row);if(badge){name.append(badge);tr.className='monitor-held-signal';}
       tr.append(node('td',`${row.frequency} ${points[row.point_type]||row.point_type}`));
       const status=node('td');status.append(node('div',pointStatus(row)));
       for(const detail of statusDetails(row))status.append(node('div',detail,'muted'));
@@ -129,6 +135,12 @@
       return tr;
     }));
     $('signals-empty').textContent=page.total?'':page.filtered?'没有匹配的当前信号。':data?.last_check_at?'最近完成的一轮没有可展示信号；有行情问题时请查看诊断。':'尚待首轮监听完成。';
+    const summary=data?.holding_summary,element=$('holding-focus-summary');
+    if(element&&summary){
+      const periods=data.monitor_frequencies?.length?` · ${data.monitor_frequencies.join(' / ')}`:'';
+      const text=`我的持仓 ${summary.count} 只${periods} · 当前信号 ${summary.signals} 条 · 检查通过 ${summary.ready} 只${summary.limited?` · 数据受限 ${summary.limited} 只`:''}${summary.pending?` · 待核验 ${summary.pending} 只`:''}${summary.source_current===false?' · 持仓名单暂待核验':''}`;
+      if(element.textContent!==text)element.textContent=text;
+    }
   }
   function pool() {
     const page=listPage('pool',data?.seed?.symbols||[]);
@@ -187,6 +199,7 @@
   }
   function query(){
     const params=new URLSearchParams({view:'paged'});
+    params.set('signals_scope',$('signals-scope')?.value||'all');
     for(const id of ['signals','pool','events']){
       params.set(id+'_page',String(pages[id]));params.set(id+'_size',$(id+'-page-size').value||'50');params.set(id+'_q',$(id+'-search').value.trim());
     }
@@ -244,6 +257,7 @@
   $('dingtalk-enabled').addEventListener('change',()=>void control('dingtalk',{enabled:$('dingtalk-enabled').checked}));
   $('check-now').addEventListener('click',()=>void control('check'));
   $('reload').addEventListener('click',()=>void refresh());
+  $('signals-scope')?.addEventListener('change',()=>{pages.signals=1;void refresh(true);});
   for(const id of ['signals','pool','events']){
     $(id+'-search').addEventListener('input',()=>{pages[id]=1;clearTimeout(searchTimer);searchTimer=setTimeout(()=>void refresh(true),180);});
     $(id+'-page-size').addEventListener('change',()=>{pages[id]=1;void refresh(true);});

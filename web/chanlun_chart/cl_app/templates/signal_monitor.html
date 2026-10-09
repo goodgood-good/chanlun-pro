@@ -1,5 +1,6 @@
 {% macro list_controls(id, placeholder) -%}
 <div class="monitor-list-controls">
+  {% if id == 'signals' %}<label>标的范围<select id="signals-scope"><option value="all">全部 · 持仓优先</option><option value="holdings">只看我的持仓</option></select></label>{% endif %}
   <label class="monitor-search">搜索<input id="{{ id }}-search" type="search" placeholder="{{ placeholder }}" autocomplete="off"></label>
   <label>每页<select id="{{ id }}-page-size"><option value="25">25 条</option><option value="50" selected>50 条</option><option value="100">100 条</option></select></label>
 </div>
@@ -62,7 +63,10 @@
     <article class="panel"><small>02 · 跟踪候选</small><h2>实时监听</h2><strong id="live-status">正在读取…</strong><p id="live-detail" class="muted"></p><progress id="live-progress" hidden></progress><p id="pool-source" class="muted"></p></article>
   </section>
   <section class="summary"><article><small>监听标的</small><strong id="pool-count">0</strong></article><article><small>当前信号</small><strong id="signal-count">0</strong></article><article><small>变化记录</small><strong id="event-count">0</strong></article><article><small>本轮数据问题</small><strong id="error-count">0</strong></article></section>
-  <section class="panel monitor-signals"><header><h2>当前买卖点与持仓盘整背驰</h2><span id="signal-cutoff" class="muted"></span></header><p class="muted">点击标的查看当前行情图表。表中信号以显示的检查截止时刻为准。</p>{{ list_controls('signals', '代码、名称或信号类型') }}<div class="monitor-table"><table><thead><tr><th scope="col">标的</th><th scope="col">信号</th><th scope="col">状态</th><th scope="col">拐点价格</th><th scope="col">信号可用时间</th><th scope="col">行情截止</th></tr></thead><tbody id="signals"></tbody></table></div><p id="signals-empty" class="muted"></p>{{ list_pager('signals', '当前信号') }}</section>
+  <section class="panel monitor-signals"><header><h2>当前买卖点与持仓盘整背驰</h2><span id="signal-cutoff" class="muted"></span></header>
+    <p id="holding-focus-summary" class="monitor-holding-summary" role="status" aria-live="polite">正在核对我的持仓…</p>
+    <p class="muted">持仓信号优先展示。点击标的查看当前行情图表，信号以显示的检查截止时刻为准。</p>
+    {{ list_controls('signals', '代码、名称或信号类型') }}<div class="monitor-table"><table><thead><tr><th scope="col">标的</th><th scope="col">信号</th><th scope="col">状态</th><th scope="col">拐点价格</th><th scope="col">信号可用时间</th><th scope="col">行情截止</th></tr></thead><tbody id="signals"></tbody></table></div><p id="signals-empty" class="muted"></p>{{ list_pager('signals', '当前信号') }}</section>
   <details class="panel"><summary>完整监听名单 · 选股候选与自选标的</summary>{{ list_controls('pool', '代码或名称') }}<p id="pool-empty" class="muted"></p><div id="pool" class="monitor-pool"></div>{{ list_pager('pool', '监听名单') }}</details>
   <details class="panel" id="holding-risk-panel"><summary>持仓风险参考 · 绑定买点后持续跟踪</summary>
     <p class="muted">为实际持仓选择参考买点和周期。已收盘K线跌破对应结构止损、或之后出现同周期已确认卖点时提醒；买点退出选股窗口后继续跟踪。替换或解除参考会结束旧参考的跟踪。</p>
