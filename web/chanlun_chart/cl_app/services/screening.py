@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from copy import deepcopy
-from contextlib import nullcontext
 from datetime import datetime
 import hashlib
 import json
@@ -964,8 +963,9 @@ class ScreeningManager:
                 raise ValueError('监听待更新周期不合法')
             settings['symbols']=[{**s,'_monitor_periods':sorted(set(due_periods[f"{s['market']}:{s['code']}"]))}
                                  for s in settings['symbols']]
-        dispatch_lock = (interprocess_file_lock(self.root / 'worker_dispatch.lock', timeout_seconds=15)
-                         if self._reuse_workers else nullcontext())
+        # Web scheduling and an official local rerun may use separate managers.
+        # Share the same admission lock before reading or publishing latest.json.
+        dispatch_lock = interprocess_file_lock(self.root / 'worker_dispatch.lock', timeout_seconds=15)
         with self._lock, dispatch_lock:
             if self.status()["status"] in {"starting", "running"}:
                 raise RuntimeError("已有选股任务在执行，请等待完成或取消")

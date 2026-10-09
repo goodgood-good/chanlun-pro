@@ -1,5 +1,7 @@
 """Recover historical symbol membership without publishing old-rule signals."""
 
+import re
+
 from chanlun.screening.confirmation import (
     confirmation_catalog,
     native_selection_lifetime_reasons,
@@ -8,12 +10,23 @@ from chanlun.screening.evidence import load_evidence
 from chanlun.core.strict_structure.native_center_signals import NATIVE_SIGNAL_RULE_BASIS
 
 
+def _historical_rule_versions():
+    """Only audited envelopes from the same version family can seed a recheck.
+
+    The returned membership has no trading point or current-proof assertion.
+    Saved-file hashes, point/center equality, and the historical selection
+    window are still verified below before any symbol can be recovered.
+    """
+    current = re.fullmatch(r"user_declared_native_center_macd_v([1-9][0-9]*)", NATIVE_SIGNAL_RULE_BASIS)
+    if current is None:
+        return frozenset()
+    return frozenset(f"user_declared_native_center_macd_v{n}"
+                     for n in range(1, int(current.group(1)) + 1))
+
+
 def historical_native_period(directory, row, revision):
     candidates = row.get("selected") or []
-    versions = {
-        NATIVE_SIGNAL_RULE_BASIS,
-        *(f"user_declared_native_center_macd_v{n}" for n in (1, 2, 3)),
-    }
+    versions = _historical_rule_versions()
     if (
         not revision
         or not candidates
