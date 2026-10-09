@@ -9,3 +9,9 @@
 .monitor-held-signal {border-left:3px solid var(--cp-accent)}
 .cp-mobile .monitor-signals .monitor-search {order:2;grid-column:1/-1}
 .cp-mobile .monitor-signals .monitor-list-controls>label:last-child {order:1}
+.monitor-risk-shortcut{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0}
+#holding-risk-panel{scroll-margin-top:calc(var(--app-nav-height) + 8px)}
+.monitor-risk-preview{padding:10px;margin:8px 0;border:1px solid var(--cp-border);border-radius:6px;background:var(--cp-surface-strong);overflow-wrap:anywhere}
+.monitor-risk-unbound{color:var(--cp-muted);font-size:12px}
+.cp-mobile .monitor-risk-preview{padding:8px}
+.monitor-risk-card strong{overflow-wrap:anywhere}

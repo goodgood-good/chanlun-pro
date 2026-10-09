@@ -703,7 +703,10 @@ class SignalMonitor:
                 if body.get('source_closed_at')!=record['source_closed_at']:
                     raise ValueError('行情已更新，请刷新参考点后再绑定')
                 existing=deepcopy(state['holding_risk_plans'].get(key))
-                unchanged=existing and existing.get('active') and existing['signal_id']==selected['signal_id']
+                unchanged=(existing and existing.get('active') and existing['signal_id']==selected['signal_id']
+                           and existing.get('status')!='requires_review'
+                           and (not record.get('price_basis_revision')
+                                or existing.get('price_basis_revision')==record['price_basis_revision']))
             if unchanged:
                 return self.holding_risks()
             plan=bind(self.monitor.root,record,selected['signal_id'],self.now().timestamp())

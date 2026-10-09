@@ -16,7 +16,8 @@ def test_holdings_are_first_and_filtering_precedes_server_pagination():
     result = paged_state(state, {'signals_size':25}, 'current', True)
     assert list(result['signals'])[:2] == ['1', '0']
     assert all(row['holding'] for row in list(result['signals'].values())[:2])
-    assert result['holding_summary'] == {'count':2,'signals':2,'ready':1,'limited':1,'pending':0,'source_current':True}
+    assert result['holding_summary'] == {'count':2,'signals':2,'ready':1,'limited':1,'pending':0,'source_current':True,
+                                         'risk_bound_symbols':0,'risk_unbound_symbols':2,'risk_attention_symbols':0}
     selected = paged_state(state, {'signals_scope':'holdings','signals_page':99}, 'current', True)
     assert set(selected['signals']) == {'0','1'}
     assert selected['pagination']['signals']['page'] == 1
@@ -36,6 +37,21 @@ def test_holdings_leave_stale_evidence_hidden_and_report_membership_uncertainty(
     assert not result['signals']
     assert result['holding_summary']['source_current'] is False
     assert result['holding_summary']['pending'] == 1
+
+
+def test_risk_reference_coverage_counts_symbols_and_ignores_removed_or_inactive_plans():
+    state=sample(2)
+    state['holding_symbols']=['a:SH.000000','a:SH.000001']
+    state['holding_risk_plans']={
+        'first':{'market':'a','code':'SH.000000','frequency':'1m','active':True,'status':'active'},
+        'second':{'market':'a','code':'SH.000000','frequency':'5m','active':True,'status':'requires_review'},
+        'inactive':{'market':'a','code':'SH.000001','frequency':'5m','active':False,'status':'detached'},
+        'removed':{'market':'us','code':'OLD.US','frequency':'5m','active':True,'status':'active'},
+    }
+    summary=paged_state(state,{},'current',True)['holding_summary']
+    assert summary['risk_bound_symbols']==1
+    assert summary['risk_unbound_symbols']==1
+    assert summary['risk_attention_symbols']==1
 
 
 def test_holding_messages_are_separate_and_sent_before_ordinary_messages(tmp_path):

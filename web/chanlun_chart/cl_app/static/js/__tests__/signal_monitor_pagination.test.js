@@ -270,6 +270,26 @@ test('risk binding requires an explicit reference and submits its frozen cutoff'
   assert.deepEqual(JSON.parse(post.options.body),{action:'bind',signal_id:'reference',source_closed_at:1000});
 });
 
+test('the holdings shortcut opens reference setup and selecting a point previews it without binding',async()=>{
+  const risk={holding_source_current:true,monitor_enabled:true,holdings:[{market:'a',code:'SH.600000',name:'held',plans:[],choices:[
+    {signal_id:'reference',frequency:'5m',point_type:'3buy',available_at:900,source_closed_at:1000,anchor_price:12,stop_price:10}]}]};
+  const data={...payload(),holding_summary:{count:1,signals:0,ready:1,limited:0,pending:0,risk_bound_symbols:0,risk_unbound_symbols:1,risk_attention_symbols:0}};
+  const app=fixture(async url=>({ok:true,json:async()=>url.startsWith('/monitor/holding-risk')?risk:data}));
+  await wait();assert.match(app.get('holding-risk-summary').textContent,/已设置 0 只 · 未设置 1 只/);
+  app.get('holding-risk-open').handlers.click();assert.equal(app.get('holding-risk-panel').open,true);
+  app.get('holding-risk-panel').handlers.toggle();await wait();
+  const card=app.get('holding-risk-list').children[0],select=card.children.find(el=>el.tag==='label').children[0];
+  const bind=card.children.find(el=>el.tag==='button');assert.equal(bind.disabled,true);
+  select.value='0';select.handlers.change();
+  const preview=card.children.find(el=>el.className==='monitor-risk-preview');
+  assert.equal(preview.children[0].textContent,'参考买点：5m 三买 · 12');
+  assert.equal(preview.children[1].textContent,'结构止损参考：10');
+  assert.match(preview.children[2].textContent,/数据截止/);
+  assert.match(preview.children.at(-1).href,/frequency=5m/);
+  assert.equal(bind.disabled,false);
+  assert.equal(app.requests.filter(r=>r.options.method==='POST').length,0);
+});
+
 const riskResponse=value=>({ok:true,json:async()=>value});
 const settle=async()=>{for(let i=0;i<4;i++)await wait();};
 const riskFixture=()=>({holding_source_current:true,monitor_enabled:true,holdings:[{

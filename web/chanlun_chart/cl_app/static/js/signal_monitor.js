@@ -141,6 +141,14 @@
       const text=`我的持仓 ${summary.count} 只${periods} · 当前信号 ${summary.signals} 条 · 检查通过 ${summary.ready} 只${summary.limited?` · 数据受限 ${summary.limited} 只`:''}${summary.pending?` · 待核验 ${summary.pending} 只`:''}${summary.source_current===false?' · 持仓名单暂待核验':''}`;
       if(element.textContent!==text)element.textContent=text;
     }
+    const riskSummary=$('holding-risk-summary');
+    if(riskSummary){
+      riskSummary.hidden=!Number.isInteger(summary?.risk_bound_symbols);
+      if(!riskSummary.hidden){
+        const text=`风险参考：已设置 ${summary.risk_bound_symbols} 只 · 未设置 ${summary.risk_unbound_symbols} 只${summary.risk_attention_symbols?` · 需关注 ${summary.risk_attention_symbols} 只`:''}`;
+        if(riskSummary.textContent!==text)riskSummary.textContent=text;
+      }
+    }
   }
   function pool() {
     const page=listPage('pool',data?.seed?.symbols||[]);
@@ -257,6 +265,11 @@
   $('dingtalk-enabled').addEventListener('change',()=>void control('dingtalk',{enabled:$('dingtalk-enabled').checked}));
   $('check-now').addEventListener('click',()=>void control('check'));
   $('reload').addEventListener('click',()=>void refresh());
+  $('holding-risk-open')?.addEventListener('click',()=>{
+    const panel=$('holding-risk-panel');if(!panel)return;
+    if(panel.open)void riskView();else panel.open=true;
+    panel.scrollIntoView?.({block:'start'});
+  });
   $('signals-scope')?.addEventListener('change',()=>{pages.signals=1;void refresh(true);});
   for(const id of ['signals','pool','events']){
     $(id+'-search').addEventListener('input',()=>{pages[id]=1;clearTimeout(searchTimer);searchTimer=setTimeout(()=>void refresh(true),180);});
@@ -293,6 +306,7 @@
       const cards=(result.holdings||[]).map(row=>{
         const selectionKey=`${row.market}:${row.code}`;
         const card=node('article',undefined,'monitor-risk-card');card.append(node('strong',`${row.name||row.code} · ${row.code}`));
+        if(!row.plans?.length)card.append(node('p','风险参考未设置；买卖点与盘整背驰仍按监听规则提醒。','monitor-risk-unbound'));
         for(const period of row.periods||[])card.append(node('small',`${period.frequency} · ${{ready:'已核验',limited:'部分检查受限',pending:'等待核验'}[period.status]||period.status} · 行情截止 ${date(period.cutoff)}`,'muted'));
         for(const plan of row.plans||[]){
           const labels={active:'跟踪中',waiting:'等待复核',requires_review:'需要重新核验',stop_triggered:'结构止损已触发',reverse_confirmed:'反向信号已确认'};
@@ -314,15 +328,31 @@
           select.addEventListener('change',()=>{
             const choice=select.value===''?null:options[Number(select.value)];
             if(choice)riskSelections.set(selectionKey,choice.signal_id);else riskSelections.delete(selectionKey);
+            renderPreview();
           });
           label.append(select);card.append(label);
+          const preview=node('div',undefined,'monitor-risk-preview');preview.setAttribute('aria-live','polite');card.append(preview);
           const bind=node('button','绑定并跟踪');bind.type='button';bind.addEventListener('click',()=>{
+            if(!result.holding_source_current){message('持仓名单暂不可核验，请稍后刷新参考点。');return;}
             if(select.value===''){message('请先选择参考买点。');return;}
             const choice=options[Number(select.value)];
             if(!choice){message('参考买点已更新，请重新选择。');return;}
             riskSelections.set(selectionKey,choice.signal_id);
             void riskView({action:'bind',signal_id:choice.signal_id,source_closed_at:choice.source_closed_at});
           });card.append(bind);
+          function renderPreview(){
+            const choice=select.value===''?null:options[Number(select.value)];
+            bind.disabled=!choice||!result.holding_source_current;
+            if(!choice){preview.textContent='选择参考买点后，在这里核对绑定内容。';return;}
+            const previous=(row.plans||[]).find(plan=>plan.frequency===choice.frequency);
+            const link=chart({...row,frequency:choice.frequency});link.textContent=`查看当前 ${choice.frequency} 图表`;
+            preview.replaceChildren(
+              node('p',`参考买点：${choice.frequency} ${points[choice.point_type]||choice.point_type} · ${choice.anchor_label||money(choice.anchor_price)}`),
+              node('p',`结构止损参考：${choice.stop_label||money(choice.stop_price)}`),
+              node('small',`确认时间 ${date(choice.available_at)} · 数据截止 ${date(choice.source_closed_at)}`,'muted'),
+              node('p',previous?`将更新本标的 ${choice.frequency} 周期的风险参考；其他周期参考保留。`:'点击绑定后，按此参考持续跟踪后续收盘K线。','muted'),link);
+          }
+          renderPreview();
         }else{if(!result.retry_needed)riskSelections.delete(selectionKey);card.append(node('p','当前暂无可核验且止损尚未触发的参考买点。','muted'));}
         if(row.message)card.append(node('p',row.message,'muted'));
         return card;
@@ -359,7 +389,10 @@
       }
     }catch(error){$('analytics-description').textContent=error.message;}finally{analyticsBusy=false;}
   }
-  $('holding-risk-panel')?.addEventListener('toggle',()=>{if($('holding-risk-panel').open)void riskView();});
+  $('holding-risk-panel')?.addEventListener('toggle',()=>{
+    $('holding-risk-open')?.setAttribute('aria-expanded',String($('holding-risk-panel').open));
+    if($('holding-risk-panel').open)void riskView();
+  });
   $('holding-risk-refresh')?.addEventListener('click',()=>void riskView());
   $('analytics-panel')?.addEventListener('toggle',()=>{if($('analytics-panel').open)void analyticsView();});
   $('analytics-refresh')?.addEventListener('click',()=>void analyticsView());

@@ -105,6 +105,7 @@ def test_real_recorded_reference_is_replayed_before_binding_and_requires_fresh_d
         "name": "fixture",
         "frequency": "30m",
         "source_closed_at": snap["source_closed_at"],
+        "price_basis_revision": snap["price_basis_revision"],
         "evidence": manifest,
         "evidence_run_id": directory.name,
         "revision": "test",
@@ -151,11 +152,24 @@ def test_real_recorded_reference_is_replayed_before_binding_and_requires_fresh_d
     assert bound["active"] and bound["stop_price"] == choice["stop_price"]
     service.configure_holding_risk(body)
     assert state["holding_risk_plans"][key]["binding_id"] == bound["binding_id"]
+    state['holding_risk_plans'][key]['price_basis_revision']='outdated-basis'
+    service.configure_holding_risk(body)
+    assert state['holding_risk_plans'][key]['binding_id']!=bound['binding_id']
+    assert state['holding_risk_plans'][key]['price_basis_revision']==snap['price_basis_revision']
+    bound=deepcopy(state['holding_risk_plans'][key])
+    state['holding_risk_plans'][key]['status']='requires_review'
+    state['holding_risk_plans'][key]['detail']='价格基准已变化，请重新绑定参考点'
+    service.configure_holding_risk(body)
+    rebound=state['holding_risk_plans'][key]
+    assert rebound['binding_id']!=bound['binding_id']
+    assert rebound['status']=='active'
+    assert rebound['signal_id']==bound['signal_id']
+    assert rebound['stop_price']==choice['stop_price']
     clock[0] += 1800
     assert not service.holding_risks()["holdings"][0]["choices"]
     with pytest.raises(ValueError):
         service.configure_holding_risk(body)
     service.configure_holding_risk(
-        {"action": "unbind", "binding_id": bound["binding_id"]}
+        {"action": "unbind", "binding_id": rebound["binding_id"]}
     )
     assert not state["holding_risk_plans"][key]["active"]

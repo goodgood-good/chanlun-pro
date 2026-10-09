@@ -180,10 +180,22 @@ def paged_state(raw, options, revision, source_current):
         pool.append({**symbol, "coverage_state": health, "holding": key in held})
     pool.sort(key=lambda row: not row["holding"])
     holding_coverage = Counter(row['coverage_state'] for row in pool if row['holding'])
+    risk_bound, risk_attention = set(), set()
+    for plan in raw.get('holding_risk_plans', {}).values():
+        if not isinstance(plan, dict) or not plan.get('active'):
+            continue
+        symbol = f"{plan.get('market', 'a')}:{plan.get('code')}"
+        if symbol not in held:
+            continue
+        risk_bound.add(symbol)
+        if plan.get('status') != 'active' or plan.get('reverse_check_pending'):
+            risk_attention.add(symbol)
     state['holding_summary'] = {
         'count': len(held), 'signals': sum(row['holding'] for row in signals),
         **{key: holding_coverage[key] for key in ('ready','limited','pending')},
         'source_current': raw.get('holding_source_current', True),
+        'risk_bound_symbols': len(risk_bound), 'risk_unbound_symbols': len(held - risk_bound),
+        'risk_attention_symbols': len(risk_attention),
     }
     state["coverage"] = {
         "total": len(pool),

@@ -65,12 +65,13 @@
   <section class="summary"><article><small>监听标的</small><strong id="pool-count">0</strong></article><article><small>当前信号</small><strong id="signal-count">0</strong></article><article><small>变化记录</small><strong id="event-count">0</strong></article><article><small>本轮数据问题</small><strong id="error-count">0</strong></article></section>
   <section class="panel monitor-signals"><header><h2>当前买卖点与持仓盘整背驰</h2><span id="signal-cutoff" class="muted"></span></header>
     <p id="holding-focus-summary" class="monitor-holding-summary" role="status" aria-live="polite">正在核对我的持仓…</p>
+    <div class="monitor-risk-shortcut"><span id="holding-risk-summary" class="muted" hidden></span><button id="holding-risk-open" type="button" aria-controls="holding-risk-panel" aria-expanded="false">设置持仓风险参考</button></div>
     <p class="muted">持仓信号优先展示。点击标的查看当前行情图表，信号以显示的检查截止时刻为准。</p>
     {{ list_controls('signals', '代码、名称或信号类型') }}<div class="monitor-table"><table><thead><tr><th scope="col">标的</th><th scope="col">信号</th><th scope="col">状态</th><th scope="col">拐点价格</th><th scope="col">信号可用时间</th><th scope="col">行情截止</th></tr></thead><tbody id="signals"></tbody></table></div><p id="signals-empty" class="muted"></p>{{ list_pager('signals', '当前信号') }}</section>
   <details class="panel"><summary>完整监听名单 · 选股候选与自选标的</summary>{{ list_controls('pool', '代码或名称') }}<p id="pool-empty" class="muted"></p><div id="pool" class="monitor-pool"></div>{{ list_pager('pool', '监听名单') }}</details>
   <details class="panel" id="holding-risk-panel"><summary>持仓风险参考 · 绑定买点后持续跟踪</summary>
-    <p class="muted">为实际持仓选择参考买点和周期。已收盘K线跌破对应结构止损、或之后出现同周期已确认卖点时提醒；买点退出选股窗口后继续跟踪。替换或解除参考会结束旧参考的跟踪。</p>
-    <button type="button" id="holding-risk-refresh">刷新参考点</button><p id="holding-risk-message" class="muted"></p><div id="holding-risk-list"></div>
+    <p class="muted">先选择并核对参考买点与周期，再点击绑定。绑定后，已收盘K线跌破对应结构止损、或之后出现同周期已确认卖点时提醒；买点退出选股窗口后继续跟踪。替换或解除参考会结束旧参考的跟踪。这里不会自动下单。</p>
+    <button type="button" id="holding-risk-refresh">刷新参考点</button><p id="holding-risk-message" class="muted" role="status" aria-live="polite"></p><div id="holding-risk-list"></div>
   </details>
   <details class="panel" id="analytics-panel"><summary>运行诊断与信号统计</summary>
     <p id="business-health" class="muted"></p><button type="button" id="analytics-refresh">刷新统计</button><p id="analytics-description" class="muted"></p>
