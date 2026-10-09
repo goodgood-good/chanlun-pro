@@ -91,6 +91,22 @@ def _request(qmt, frequency="1m", *, args=None, start="2026-09-04", end="2026-09
     )
 
 
+def test_screening_local_reader_preserves_prices_and_disables_server_history(qmt,monkeypatch):
+    raw=_raw(_closes('5m'));reads=[]
+    def local(**kwargs):
+        reads.append(kwargs)
+        return ((['301004.SZ'],list(range(len(raw['time'].columns)))),
+                {key:frame.to_numpy() for key,frame in raw.items()})
+    monkeypatch.setattr(exchange_qmt.xtdata,'get_market_data_ori',local)
+    local_frame=_request(qmt,'5m',args={'exact_end':True,'skip_download':True,'local_only':True})
+    qmt.responses.append(raw)
+    normal_frame=_request(qmt,'5m',args={'exact_end':True,'skip_download':True})
+    pd.testing.assert_frame_equal(local_frame,normal_frame)
+    assert local_frame.attrs==normal_frame.attrs
+    assert reads[0]['enable_read_from_server'] is False
+    assert reads[0]['dividend_type']=='front_ratio'
+
+
 @pytest.mark.parametrize("frequency", ["1m", "5m", "30m"])
 def test_weekend_complete_local_grid_avoids_download_lane(qmt, frequency):
     times = _closes(frequency)

@@ -16,6 +16,9 @@ def echo_worker(connection):
         while (message := connection.recv()) is not None:
             task = inputs.load(message)
             stock = task['stock']
+            if stock.get('block_once_marker') and not Path(stock['block_once_marker']).exists():
+                Path(stock['block_once_marker']).write_text(str(os.getpid()))
+                multiprocessing.Event().wait(120)
             if stock.get('blocked'):
                 if stock.get('started_file'):
                     Path(stock['started_file']).write_text(str(os.getpid()), encoding='utf-8')
@@ -64,6 +67,40 @@ def test_completed_child_reused_with_wholly_new_job_parameters(pool, tmp_path):
     assert second['contexts'] == {'30m': {'cutoff': 200}} and second['request'] == {}
     assert second['holding'] is False and second['run_dir'] == str(tmp_path/'second')
     assert pool.snapshot()['started_processes'] == 1
+
+
+def test_memory_pressure_releases_idle_workers_and_resumes_without_losing_stocks(pool,tmp_path,monkeypatch):
+    from chanlun.screening import compute_capacity
+    results(scan(pool,tmp_path/'warm'))
+    calls=[];capacities=[]
+    def pressure(_budget,**_options):
+        calls.append(True)
+        return {'limit':0 if len(calls)<4 else 3}
+    monkeypatch.setattr(compute_capacity,'update_resource_budget',pressure)
+    rows=results(scan(pool,tmp_path/'limited',
+        [{'code':'SH.600001','name':'one'},{'code':'SH.600002','name':'two'}],
+        request={'compute_budget':{'limit':16}},capacity_callback=lambda n,p:capacities.append((n,p['waiting']))))
+    assert [row['code'] for row in rows]==['SH.600001','SH.600002']
+    assert capacities[0]==(0,True) and any(n==1 and not waiting for n,waiting in capacities)
+    assert pool.started_processes==2
+
+
+def test_critical_memory_requeues_unpublished_work_without_a_false_failure(pool,tmp_path,monkeypatch):
+    from chanlun.screening import compute_capacity
+    marker=tmp_path/'first_attempt';pressure_polls=[]
+    def pressure(_budget,**_options):
+        if marker.exists() and len(pressure_polls)<3:
+            pressure_polls.append(True)
+            return {'limit':0}
+        return {'limit':3}
+    monkeypatch.setattr(compute_capacity,'update_resource_budget',pressure)
+    rows=results(scan(pool,tmp_path/'requeue',[
+        {'code':'SH.600001','name':'one','block_once_marker':str(marker)},
+        {'code':'SH.600002','name':'two'}],request={'compute_budget':{'limit':16}},timeout_seconds=15))
+    assert [row['code'] for row in rows]==['SH.600001','SH.600002']
+    assert all(row['rows']==[] for row in rows)
+    assert len(pressure_polls)==3 and pool.completed_tasks==2
+    assert rows[0]['pid']!=int(marker.read_text())
 
 
 def test_timeout_recycles_only_failed_child_and_reports_every_requested_period(pool, tmp_path):

@@ -131,3 +131,35 @@ def test_unsaved_display_is_retried_after_a_transient_file_lock(tmp_path):
     merge(view,state,[row('SH.600001')])
     saved=json.loads(gzip.decompress((tmp_path/FILENAME).read_bytes()))
     assert saved['rows'][0]['code']=='SH.600001' and not view.dirty
+
+
+def test_late_baseline_cache_updates_while_preserving_current_replacements(tmp_path):
+    view=RollingDisplay(tmp_path)
+    merge(view,run(tmp_path,A,'completed',started_at=100),[row('SH.600001'),row('SH.600003')])
+    prior=tmp_path/B;prior.mkdir()
+    (prior/'status.json').write_text(json.dumps({'run_id':B,'status':'completed','started_at':200}))
+    result=run(tmp_path,C,started_at=300,results_through=1,_workbench_verified=[('a','SH.600003','5m')])
+    first,_=merge(view,result,[row('SH.600003',identity='current')])
+    assert {r['id'] for r in first}=={'current','SH.6000015m'}
+    (prior/'verified_results.json.gz').write_bytes(gzip.compress(json.dumps({
+        'schema':'screening-verified-results-v1','payload':{'run_id':B,'fixture_rows':[row('SH.600002'),row('SH.600003')]}}).encode()))
+    updated,_=merge(view,result,[row('SH.600003',identity='current')])
+    assert {r['id'] for r in updated}=={'current','SH.6000025m'}
+    restored,_=merge(RollingDisplay(tmp_path),result,[row('SH.600003',identity='current')])
+    assert restored==updated
+
+
+def test_late_empty_baseline_drops_older_rows_and_waits_for_reader_recovery(tmp_path):
+    view=RollingDisplay(tmp_path)
+    merge(view,run(tmp_path,A,'completed',started_at=100),[row('SH.600001')])
+    prior=tmp_path/B;prior.mkdir()
+    (prior/'status.json').write_text(json.dumps({'run_id':B,'status':'completed','started_at':200}))
+    result=run(tmp_path,C,started_at=300,results_through=3)
+    merge(view,result,[row('SH.600003')])
+    (prior/'verified_results.json.gz').write_bytes(gzip.compress(json.dumps({
+        'schema':'screening-verified-results-v1','payload':{'run_id':B,'fixture_rows':[]}}).encode()))
+    restoring={**result,'results_through':0,'results_loading':True,'results_available':False}
+    restored,_=merge(view,restoring)
+    assert {r['code'] for r in restored}=={'SH.600001','SH.600003'}
+    current,count=merge(view,result,[row('SH.600003')])
+    assert [r['code'] for r in current]==['SH.600003'] and count==0

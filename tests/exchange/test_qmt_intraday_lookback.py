@@ -33,6 +33,16 @@ def test_exact_cutoff_screening_can_reuse_the_existing_minute_subscription(monke
     assert ensure.call_count==1
 
 
+def test_an_existing_subscription_without_callback_does_not_repeat_startup_wait(monkeypatch):
+    from unittest.mock import Mock
+    ex=ExchangeQMT();ready=Mock();ready.wait.return_value=False;ready.is_set.return_value=False
+    monkeypatch.setattr(exchange_qmt.threading,'Event',lambda:ready)
+    subscribe=Mock(return_value=12)
+    monkeypatch.setattr(exchange_qmt.xtdata,'subscribe_quote2',subscribe)
+    for _ in range(3):assert ex.ensure_live_kline_subscription('SH.600001','1m') is False
+    assert ready.wait.call_count==1 and ready.is_set.call_count==2 and subscribe.call_count==1
+
+
 def test_qmt_batch_prewarm_forwards_bounded_request_counts(monkeypatch):
     ex = ExchangeQMT()
     observed: list[tuple[str, int | None]] = []

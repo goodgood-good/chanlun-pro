@@ -945,7 +945,7 @@ def test_stale_history_refresh_starts_at_actual_tail_not_a_fixed_recent_window(s
     exchange.klines.side_effect = [old, frame]
     monkeypatch.setattr(runner, "_exchange", lambda:exchange)
     assert runner.fetch_frame("SH.600000", "5m", context) is frame
-    assert exchange.klines.call_args.kwargs["args"] == {"exact_end":True,"download_start_date":"20260827"}
+    assert exchange.klines.call_args.kwargs["args"] == {"exact_end":True,"local_only":True,"download_start_date":"20260827"}
 
 
 def test_point_subtypes_are_explicit_screening_settings(sample):
@@ -1114,7 +1114,7 @@ def test_fetch_repairs_interior_gap_and_uses_trading_day_history(sample, monkeyp
     first, second = exchange.klines.call_args_list
     assert first.kwargs["start_date"] <= context["history_from"].replace("-", "")
     assert first.kwargs["args"]["skip_download"] is True
-    assert second.kwargs["args"] == {"exact_end": True}
+    assert second.kwargs["args"] == {"exact_end": True,"local_only":True}
 
 
 def test_live_monitor_input_prepares_subscription_and_still_repairs_stale_data(sample,monkeypatch):
@@ -1129,6 +1129,18 @@ def test_live_monitor_input_prepares_subscription_and_still_repairs_stale_data(s
     assert exchange.klines.call_count==2
     assert exchange.klines.call_args_list[0].kwargs['args']['skip_download'] is True
     assert exchange.klines.call_args_list[-1].kwargs['args']['exact_end'] is True
+
+
+def test_fresh_local_monitor_input_never_waits_for_a_subscription(sample,monkeypatch):
+    from unittest.mock import Mock
+    from chanlun.screening import runner
+    frame,_,context=sample;exchange=Mock()
+    exchange.get_start_date_by_frequency.return_value='20260901000000'
+    exchange.klines.return_value=frame
+    monkeypatch.setattr(runner,'_exchange',lambda:exchange)
+    assert runner.fetch_frame('SH.600000','5m',{**context,'live_updates':True}) is frame
+    exchange.ensure_live_kline_subscription.assert_not_called()
+    assert exchange.klines.call_args.kwargs['args']['local_only'] is True
 
 
 def test_fetch_history_does_not_roll_forward_at_midnight_without_new_closed_bars(sample, monkeypatch):

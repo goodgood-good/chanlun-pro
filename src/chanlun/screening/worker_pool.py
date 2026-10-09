@@ -1,5 +1,6 @@
 """Bounded, cancellable worker reuse across independent monitor batches."""
 from multiprocessing.connection import wait as wait_connections
+from collections import deque
 import multiprocessing
 import os
 from pathlib import Path
@@ -81,7 +82,7 @@ class ReusableWorkerPool:
                 'worker_pids': [s['process'].pid for s in self.slots if s['process'].is_alive()]}
 
     def scan(self, stocks, settings, contexts, run_dir, workers, revision, *, request,
-             timeout_seconds=SYMBOL_TIMEOUT_SECONDS):
+             timeout_seconds=SYMBOL_TIMEOUT_SECONDS, capacity_callback=None):
         if self.closed or self.busy:
             raise RuntimeError('Worker pool is closed or already serving a batch')
         if revision != self.revision or self.revision_reader() != self.revision:
@@ -93,9 +94,7 @@ class ReusableWorkerPool:
             return
         inputs = store_job(stocks, settings, contexts, run_dir, revision, request)
         self.busy = True
-        pending = iter(enumerate(stocks))
-        exhausted = False
-        batch = uuid4().hex
+        pending = deque(enumerate(stocks))
         cleanup_pending = []
         try:
             for slot in list(self.slots):
@@ -108,14 +107,34 @@ class ReusableWorkerPool:
                     raise RuntimeError('Screening source changed during a reusable batch')
                 if (run_dir / 'cancel').exists():
                     return
-                for index in range(workers):
+                target=workers;pressure={'limit':workers}
+                if request.get('compute_budget'):
+                    from .compute_capacity import update_resource_budget,role_capacity
+                    monitor=request.get('worker_runtime') is not None
+                    pressure=update_resource_budget(request['compute_budget'],monitor=monitor)
+                    target=min(workers,role_capacity(pressure['limit'],monitor=monitor))
+                    if (monitor and pressure['limit']<request['compute_budget']['limit']
+                            and pressure.get('background_until',0)>time.time()):
+                        target=min(target,2)
+                if target==0:
+                    # Waiting children still consume RAM. Requeue unpublished
+                    # work before retiring them, so a zero budget can recover.
+                    for slot in list(reversed(self.slots)):
+                        if slot['stock'] is not None:
+                            pending.appendleft((slot['ordinal'],slot['stock']))
+                        self._discard(slot)
+                for slot in list(reversed(self.slots)):
+                    if slot['stock'] is None and len(self.slots)>target:
+                        self._discard(slot)
+                busy=sum(slot['stock'] is not None for slot in self.slots)
+                if capacity_callback:
+                    capacity_callback(max(target,busy),{**pressure,'waiting':target==0})
+                for index in range(target):
+                    if busy>=target or not pending:
+                        break
                     slot = self.slots[index] if index < len(self.slots) else None
                     if slot is not None and slot['stock'] is not None:
                         continue
-                    item = next(pending, None) if not exhausted else None
-                    if item is None:
-                        exhausted = True
-                        break
                     if slot is not None and (not slot['process'].is_alive() or slot['tasks'] >= self.max_tasks):
                         _stop_worker(slot)
                         self.slots.pop(index)
@@ -124,11 +143,12 @@ class ReusableWorkerPool:
                     if slot is None:
                         slot = self._start()
                         self.slots.append(slot)
-                    ordinal, stock = item
-                    ticket = f'{batch}_{ordinal}'
+                    ordinal, stock = pending.popleft()
+                    ticket = f'{uuid4().hex}_{ordinal}'
                     task = bounded_message({'ticket': ticket, 'index': ordinal,
                                             'inputs': inputs, 'revision': revision})
-                    slot.update(stock=stock, ticket=ticket, started=time.monotonic())
+                    slot.update(stock=stock, ordinal=ordinal, ticket=ticket, started=time.monotonic())
+                    busy+=1
                     try:
                         slot['connection'].send(task)
                     except (OSError, EOFError, ValueError):
@@ -139,10 +159,13 @@ class ReusableWorkerPool:
                         continue
                 active = [slot for slot in self.slots if slot['stock'] is not None]
                 if not active:
-                    if exhausted:
+                    if not pending:
                         return
+                    time.sleep(.2)
+                    yield None, []
                     continue
-                ready = wait_connections([slot['connection'] for slot in active], timeout=min(2, timeout_seconds))
+                ready = wait_connections([slot['connection'] for slot in active],
+                    timeout=min(.2 if request.get('compute_budget') else 2, timeout_seconds))
                 if self.revision_reader() != self.revision:
                     raise RuntimeError('Screening source changed before committing a worker result')
                 now = time.monotonic()

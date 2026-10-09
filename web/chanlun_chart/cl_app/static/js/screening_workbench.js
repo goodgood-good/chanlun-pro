@@ -266,7 +266,7 @@
         throw error;
       }
     }
-    const version = s => [s.run_id,s.status,s.completed,s.cancel_requested,s.source_current,s.frozen_native_review,s.current_source_revision,s.result_reader_revision,s.cutoff_current,s.freshness_state,JSON.stringify(s.market_freshness||{}),s.evidence_version,s.selection_policy_version,s.higher_context_version,s.live_recheck_version].join(':');
+    const version = s => [s.run_id,s.status,s.completed,s.cancel_requested,s.source_current,s.frozen_native_review,s.current_source_revision,s.result_reader_revision,s.cutoff_current,s.freshness_state,JSON.stringify(s.market_freshness||{}),s.evidence_version,s.selection_policy_version,s.higher_context_version,s.live_recheck_version,s.resource_mode,s.effective_workers].join(':');
     function pointLabel(p={}) {
       const label=POINTS[p.point_type]||'人工关注';
       if(p.evidence_scope==='native_center_signal')return `${label} · 本周期中枢信号`;
@@ -310,6 +310,7 @@
       const nativeSignals=!status.run_id || settings.alert_mode==='native_center_signals'
         || candidates.some(row=>row.point?.evidence_scope==='native_center_signal');
       $('run-detail').textContent=[status.total ? `已处理 ${status.completed||0} / ${status.total} 只` : '',
+        activeRun(status.status)&&status.resource_mode==='waiting'?'内存保护：暂缓新计算，已完成结果保留':activeRun(status.status)&&status.resource_mode==='limited'?'内存保护：计算并发已下调':'',
         status.previous_result_count?`本轮结果 ${status.current_result_count||0} 条 · 保留上次结果 ${status.previous_result_count} 条，逐步更新`:'',
         status.results_through!==undefined?`已核验 ${status.results_through} 只${status.results_partial?'，候选持续更新':''}`:'',
         status.effective_workers?`并行 ${status.effective_workers} 进程`:settings.workers?`设定 ${settings.workers} 进程`:'',
@@ -803,7 +804,7 @@
           if(state.data?.source===(status.run_id||'idle')&&[
             'source_current','current_source_revision','result_reader_revision','live_recheck_version'
           ].some(key=>status[key]!==state.data.status[key]))newerProofStatus=status;
-          if(version(status)===state.version&&!state.data?.status.previous_result_count){
+          if(version(status)===state.version&&!state.data?.status.previous_result_count&&!state.data?.status.previous_results_loading){
             if(state.reviewsLoadedSource!==state.data?.source)await loadReviews(state.data.source,serial);
             if(serial===state.serial)message('');
             return;

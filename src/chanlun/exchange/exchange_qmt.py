@@ -297,6 +297,7 @@ class ExchangeQMT(Exchange):
         if period not in {"1m", "5m"}:
             return False
         key = (qmt_code, period, dividend_type)
+        created = False
         with self._live_kline_subscription_lock:
             existing = self._live_kline_subscriptions.pop(key, None) if force_refresh else (
                 self._live_kline_subscriptions.get(key)
@@ -349,9 +350,10 @@ class ExchangeQMT(Exchange):
                     return False
                 existing = (sequence, ready, on_quote)
                 self._live_kline_subscriptions[key] = existing
+                created = True
         return existing[1].wait(
             timeout=_QMT_LIVE_SUBSCRIPTION_INITIAL_CALLBACK_WAIT_SECONDS
-        )
+        ) if created else existing[1].is_set()
 
     def refresh_live_kline_subscription(
         self,
@@ -703,6 +705,7 @@ class ExchangeQMT(Exchange):
                 "exact_end",
                 "dividend_type",
                 "skip_download",
+                "local_only",
                 "prefer_local",
                 "incremental_refresh_days",
                 "download_start_date",
@@ -715,6 +718,8 @@ class ExchangeQMT(Exchange):
                 raise ValueError("req_counts must be a positive exact int")
             if "skip_download" in args and type(args["skip_download"]) is not bool:
                 raise ValueError("skip_download must be an exact bool")
+            if 'local_only' in args and type(args['local_only']) is not bool:
+                raise ValueError('local_only must be an exact bool')
             if "prefer_local" in args and type(args["prefer_local"]) is not bool:
                 raise ValueError("prefer_local must be an exact bool")
             if "incremental_refresh_days" in args and (
@@ -883,7 +888,7 @@ class ExchangeQMT(Exchange):
                         end_time=download_query_end,
                         incrementally=True,
                     )
-                raw_data = xtdata.get_market_data(
+                read_args = dict(
                     field_list=field_list,
                     stock_list=[qmt_code],
                     period=qmt_read_period,
@@ -893,6 +898,14 @@ class ExchangeQMT(Exchange):
                     dividend_type=dividend_type,
                     fill_data=False,
                 )
+                if args and args.get('local_only'):
+                    # Same SDK field matrices and price basis, without loading
+                    # full screening histories into MiniQMT's server cache.
+                    index, fields = xtdata.get_market_data_ori(**read_args, enable_read_from_server=False)
+                    raw_data = {field: pd.DataFrame(values, index=index[0], columns=index[1])
+                                for field, values in fields.items()}
+                else:
+                    raw_data = xtdata.get_market_data(**read_args)
                 if (
                     dividend_type != "none"
                     and isinstance(raw_data, Mapping)

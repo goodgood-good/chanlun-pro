@@ -284,6 +284,29 @@ def test_morning_and_afternoon_scans_use_distinct_completed_bars_once_per_sessio
     assert len(manual.started) == 2
 
 
+def test_a_source_interruption_can_recover_an_exhausted_daily_run_once_per_revision(setup):
+    service,manual,live,clock=setup
+    clock[0]=clock[0].replace(hour=15,minute=11)
+    service.tick()
+    for expected in [2,2]:
+        manual.state.update(status='failed',source_current=False,source_revision='old',current_source_revision='new',
+                            error='RuntimeError: Screening source changed before worker initialization')
+        service._load()['daily']['afternoon']['attempts']=3
+        service.tick()
+        assert len(manual.started)==expected
+    assert service._load()['daily']['afternoon']['source_recovery_revision']=='new'
+
+
+def test_ordinary_data_failure_does_not_reset_the_daily_retry_limit(setup):
+    service,manual,live,clock=setup
+    clock[0]=clock[0].replace(hour=15,minute=11)
+    service.tick()
+    manual.state.update(status='failed',source_current=False,source_revision='old',current_source_revision='new',error='provider unavailable')
+    service._load()['daily']['afternoon']['attempts']=3
+    service.tick()
+    assert len(manual.started)==1
+
+
 def test_morning_scan_waits_for_11_30_cutoff_after_late_service_start(setup):
     service, manual, _, clock = setup
     clock[0] = clock[0].replace(hour=12, minute=5)

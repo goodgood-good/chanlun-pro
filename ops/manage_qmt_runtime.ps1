@@ -476,8 +476,8 @@ try {
         )
         if ($launcher.Count -eq 0) {
             Write-QmtLog "starting QMT launcher: $resolvedExe"
-            # QMT 是交互式终端，窗口需要留给已登录用户；这里不接触凭据或账户接口。
-            Start-Process -FilePath $resolvedExe -WorkingDirectory $qmtDir -ErrorAction Stop | Out-Null
+            # 后台维护启动已配置的终端；这里不接触凭据或账户接口。
+            Start-Process -FilePath $resolvedExe -WorkingDirectory $qmtDir -WindowStyle Hidden -ErrorAction Stop | Out-Null
             $started = $true
         } else {
             Write-QmtLog 'existing QMT launcher is still starting; wait for main process'

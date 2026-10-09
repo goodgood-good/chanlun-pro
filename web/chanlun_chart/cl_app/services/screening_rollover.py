@@ -27,6 +27,14 @@ def _period(row):
     return row.get('market', 'a'), row['code'], row['frequency']
 
 
+def _stamp(path):
+    try:
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
 def _valid_snapshot(saved):
     return (isinstance(saved, dict) and saved.get('schema') == SCHEMA
         and isinstance(saved.get('run_id'), str) and RUN_ID.fullmatch(saved['run_id'])
@@ -58,7 +66,12 @@ class RollingDisplay:
         self.snapshot = None
         self.loaded = False
         self.baseline_checked = None
+        self.pending_baseline = None
         self.dirty = False
+
+    def waiting_for_baseline(self, source):
+        with self.lock:
+            return self.baseline_checked != source or self.pending_baseline is not None
 
     def _bootstrap(self, result, project):
         """Read saved, previously verified output as labelled history only."""
@@ -75,17 +88,26 @@ class RollingDisplay:
             if result.get('started_at') and started >= result['started_at']:
                 continue
             candidates.append((started, directory))
+        self.pending_baseline = None
         for _, directory in sorted(candidates, key=lambda item: item[0], reverse=True):
-            saved = _read(directory / 'verified_results.json.gz')
+            path = directory / 'verified_results.json.gz'
+            stamp = _stamp(path)
+            saved = _read(path)
             if not isinstance(saved, dict):
+                if self.pending_baseline is None:
+                    self.pending_baseline = path, stamp
                 continue
             payload = saved.get('payload', {})
             if (saved.get('schema') != 'screening-verified-results-v1' or not isinstance(payload, dict)
                     or payload.get('run_id') != directory.name):
+                if self.pending_baseline is None:
+                    self.pending_baseline = path, stamp
                 continue
             try:
                 rows = project(payload, directory.name)
             except (KeyError, TypeError, ValueError):
+                if self.pending_baseline is None:
+                    self.pending_baseline = path, stamp
                 continue
             return {'run_id': directory.name, 'rows': rows, 'through': payload.get('results_through', 0),
                     'started_at': (_read(directory / 'status.json') or {}).get('started_at', 0)}
@@ -103,14 +125,18 @@ class RollingDisplay:
                 self.loaded = True
             through = result.get('results_through', result.get('completed', 0)) or 0
             finished = result.get('status') == 'completed' and not result.get('results_loading')
-            if not finished and self.baseline_checked != source:
+            saved = self.snapshot or {}
+            caught_up = saved.get('run_id') != source or through >= saved.get('through', 0)
+            ready_later = self.pending_baseline and _stamp(self.pending_baseline[0]) != self.pending_baseline[1]
+            if not finished and caught_up and (self.baseline_checked != source or ready_later):
                 self.baseline_checked = source
-                if not self.snapshot or self.snapshot.get('run_id') != source:
-                    baseline = self._bootstrap(result, project)
-                    saved_state = _read(self.root / (self.snapshot or {}).get('run_id', '') / 'status.json') or {}
-                    saved_started = (self.snapshot or {}).get('started_at') or saved_state.get('started_at', 0)
-                    if baseline and (self.snapshot is None or baseline['started_at'] > saved_started):
-                        self.snapshot = baseline
+                baseline = self._bootstrap(result, project)
+                prior_source = saved.get('baseline_run_id') if saved.get('run_id') == source else saved.get('run_id')
+                saved_state = _read(self.root / (prior_source or '') / 'status.json') or {}
+                saved_started = (saved.get('baseline_started_at', 0) if saved.get('run_id') == source
+                                 else saved.get('started_at', 0)) or saved_state.get('started_at', 0)
+                if baseline and (self.snapshot is None or baseline['started_at'] > saved_started):
+                    self.snapshot = baseline
             saved = self.snapshot or {}
             restoring = result.get('results_loading') and (not result.get('results_available') or through < saved.get('through', 0))
             prior = saved.get('rows', []) if saved.get('run_id') != source or restoring else [
@@ -135,6 +161,8 @@ class RollingDisplay:
             merged.sort(key=lambda row: (bool(row.get('refresh_state')),
                 -(row.get('selection_available_at') or row['point'].get('available_at') or 0), row['code'], row['frequency']))
             snapshot = {'schema': SCHEMA, 'run_id': source, 'through': through, 'rows': merged,
+                        'baseline_run_id': saved.get('baseline_run_id') if saved.get('run_id') == source else saved.get('run_id'),
+                        'baseline_started_at': saved.get('baseline_started_at', 0) if saved.get('run_id') == source else saved.get('started_at', 0),
                         'started_at': result.get('started_at', saved.get('started_at', 0) if saved.get('run_id') == source else 0)}
             # Slow requests may finish after a newer batch/prefix was published.
             latest = _read(self.root / 'latest.json') or {}

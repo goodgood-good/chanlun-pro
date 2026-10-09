@@ -1543,6 +1543,17 @@ class SignalMonitor:
                 return
             if manual["status"] in ACTIVE:
                 return
+            revision=manual.get('current_source_revision')
+            if (manual.get('status') in {'failed','interrupted'}
+                    and phase_state.get('run_id')==manual.get('run_id')
+                    and revision and manual.get('source_revision') and manual['source_revision']!=revision
+                    and str(manual.get('error','')).startswith('RuntimeError: Screening source changed')
+                    and phase_state.get('source_recovery_revision')!=revision):
+                # A deployment interruption is not a failed data attempt. Give
+                # the new code one normal retry budget, once per revision.
+                phase_state.update(attempts=0,retry_at=0,source_recovery_revision=revision)
+                daily[phase]=phase_state
+                self._save()
             attempts = phase_state.get("attempts", 0)
             if attempts >= 3 or now.timestamp() < phase_state.get("retry_at", 0):
                 return
@@ -1575,7 +1586,9 @@ class SignalMonitor:
                 raise TaskStartError('daily',error) from error
             with self._lock:
                 state=self._load()
-                state['daily'][phase] = {"run_id": launched["run_id"], "status": "started",
+                state['daily'][phase] = {**({'source_recovery_revision':phase_state['source_recovery_revision']}
+                                           if phase_state.get('source_recovery_revision') else {}),
+                                        "run_id": launched["run_id"], "status": "started",
                                                 "attempts": attempts + 1, "retry_at": now.timestamp() + 900}
                 self._clear_start_failure('daily',state)
                 self._save()

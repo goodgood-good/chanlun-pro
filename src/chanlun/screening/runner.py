@@ -193,22 +193,22 @@ def fetch_frame(code, frequency, context, *, repair_from=None):
     if repair_from is not None:
         start = min(start, datetime.fromtimestamp(repair_from, CN).strftime("%Y%m%d"))
         frame = exchange.klines(code, frequency, start_date=start, end_date=end,
-                                args={"exact_end": True})
+                                args={"exact_end": True, 'local_only':True})
         return _resolve_suspensions(frame, code, context)
-    if context.get('live_updates'):
-        # Reused shards keep their bounded set of minute subscriptions alive.
-        # Reading and validation still use this run's exact closed-bar cutoff.
-        exchange.ensure_live_kline_subscription(code, frequency)
-    args = {"exact_end": True, "skip_download": True}
+    args = {"exact_end": True, "skip_download": True, 'local_only':True}
     frame = exchange.klines(code, frequency, start_date=start, end_date=end, args=args)
     errors = validate_frame(frame, context)
+    if ('STALE_DATA' in errors and context.get('live_updates')
+            and exchange.ensure_live_kline_subscription(code, frequency) is True):
+        frame = exchange.klines(code, frequency, start_date=start, end_date=end, args=args)
+        errors = validate_frame(frame, context)
     if not errors:
         frame = _resolve_suspensions(frame, code, context)
         quality = frame_quality(frame, context)
         if not quality["errors"] or "DATA_GAPS" not in quality["errors"]:
             return frame
     if errors or quality["errors"]:
-        args = {"exact_end": True}
+        args = {"exact_end": True, 'local_only':True}
         if (set(errors) <= {"STALE_DATA", "NO_VOLUME"} and "STALE_DATA" in errors
                 and frame is not None and len(frame) >= 200):
             previous = {**context, "cutoff": int(frame.date.iloc[-1].timestamp())}
@@ -852,7 +852,7 @@ def _stop_worker(slot):
 
 
 def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,
-                 timeout_seconds=SYMBOL_TIMEOUT_SECONDS, worker_target=None):
+                 timeout_seconds=SYMBOL_TIMEOUT_SECONDS, worker_target=None, capacity_callback=None):
     """A one-run pool shares the same bounded transport as live monitoring."""
     if Path(run_dir, "cancel").exists():
         return
@@ -860,10 +860,10 @@ def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,
     request_path = Path(run_dir, "request.json")
     request = json.loads(request_path.read_text(encoding="utf-8")) if request_path.is_file() else {}
     options = {"worker_target": worker_target, "revision_reader": lambda: revision} if worker_target else {}
-    pool = ReusableWorkerPool(revision, max_tasks=max(1, len(stocks)), **options)
+    pool = ReusableWorkerPool(revision, max_tasks=min(64,max(1,len(stocks))), **options)
     try:
         yield from pool.scan(stocks, settings, contexts, run_dir, workers, revision,
-                             request=request, timeout_seconds=timeout_seconds)
+                             request=request, timeout_seconds=timeout_seconds, capacity_callback=capacity_callback)
     finally:
         pool.close()
 
@@ -1045,9 +1045,14 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
         state["effective_workers"] = workers
         state["catalog_elapsed_seconds"] = round(time.time() - state["started_at"], 1)
         scan_started = time.time()
-        stream = (bounded_scan(stocks, settings, contexts, run_dir, workers, state["source_revision"])
+        def capacity_changed(effective, pressure):
+            state['effective_workers']=effective
+            state['resource_limit']=pressure['limit']
+            state['resource_mode']='waiting' if pressure.get('waiting') else 'limited' if pressure['limit']<request.get('compute_budget',{}).get('limit',workers) else 'normal'
+            state['available_memory_mb']=pressure.get('available_mb')
+        stream = (bounded_scan(stocks, settings, contexts, run_dir, workers, state["source_revision"],capacity_callback=capacity_changed)
                   if worker_pool is None else worker_pool.scan(
-                      stocks, settings, contexts, run_dir, workers, state["source_revision"], request=request))
+                      stocks, settings, contexts, run_dir, workers, state["source_revision"], request=request,capacity_callback=capacity_changed))
         for result, current_codes in stream:
             if result is not None:
                 with (run_dir / "results.jsonl").open("a", encoding="utf-8") as result_file:

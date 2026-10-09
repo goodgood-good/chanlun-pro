@@ -156,6 +156,35 @@ test('pending evidence loads show progress and poll until the same run is ready'
   assert.equal(ui.get('queue-empty').hidden,true);
 });
 
+test('memory throttling updates the running status without clearing displayed results',async()=>{
+  let latest=withCandidate();latest.status={...latest.status,status:'running',resource_mode:'normal',effective_workers:14};
+  const ui=page(async url=>dispatch(latest,url));await settle();
+  latest={...latest,status:{...latest.status,resource_mode:'waiting',effective_workers:0}};
+  await ui.timers[0]();await settle();
+  assert.match(ui.get('run-detail').textContent,/内存保护.*暂缓新计算/);
+  assert.equal(ui.get('signal-list').children.length,1);
+  assert.equal(ui.get('cancel').disabled,false);
+  latest={...latest,status:{...latest.status,resource_mode:'normal',effective_workers:4}};
+  await ui.timers[0]();await settle();
+  assert.doesNotMatch(ui.get('run-detail').textContent,/内存保护/);
+  assert.equal(ui.get('signal-list').children.length,1);
+});
+
+test('an empty page continues checking a late previous cache even without new scan progress',async()=>{
+  let latest=result('next','5m','running'),reads=0;
+  latest.status.previous_results_loading=true;
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/workbench'))reads++;
+    return dispatch(latest,url);
+  });await settle();
+  const count=reads;
+  latest={...latest,candidates:[{...withCandidate().candidates[0],refresh_state:'pending',result_source:'old'}],
+    status:{...latest.status,previous_results_loading:false,previous_result_count:1}};
+  await ui.timers[0]();await settle();
+  assert.equal(reads,count+1);
+  assert.equal(ui.get('signal-list').children.length,1);
+});
+
 test('running partial results retain counts and candidate detail while more evidence is loading',async()=>{
   let latest=withCandidate(),details=0;
   latest.status={...latest.status,status:'running',total:5000,completed:10,results_loading:true,

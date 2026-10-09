@@ -213,7 +213,8 @@ def dashboard(*, background=False, compact=False):
     rows, removed, live_version, unverified = _live_rows(result.get("_workbench_rows", _current_rows(result, source)),
                                             source, result.get("current_source_revision"))
     from .screening_rollover import display_for
-    rows, previous_count = display_for(str(manager.root)).merge(result, rows, project=_current_rows,
+    display = display_for(str(manager.root))
+    rows, previous_count = display.merge(result, rows, project=_current_rows,
         live_filter=partial(_live_rows, preserve_unverified=True))
     rows = _compact_rows(rows, compact)
     status = {k: v for k, v in result.items() if k not in (
@@ -229,6 +230,8 @@ def dashboard(*, background=False, compact=False):
     status["live_recheck_version"] = live_version
     status['previous_result_count'] = previous_count
     status['current_result_count'] = len(rows) - previous_count
+    status['previous_results_loading'] = bool(source != 'idle' and (result.get('status') != 'completed' or result.get('results_loading'))
+                                             and display.waiting_for_baseline(source))
     for row in rows:
         key = (row["market"], row["code"], row.get("source_closed_at"))
         row["higher_context"] = context["rows"].get(key) or {
