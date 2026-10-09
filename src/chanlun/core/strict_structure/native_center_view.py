@@ -1,7 +1,8 @@
 """Causal operational decomposition of native segment centers.
 
-The frozen first-core scan remains the comparison view. A narrower, disjoint
-three-member seed may become the operational view only after its independent
+The frozen first-core scan remains the comparison view. Every formal center
+requires five consecutive overlapping roles: entry, three core members, exit.
+A narrower five-role seed may become the operational view only after its own
 same-level departure/return completes, before the original center closes.
 This is an explicit engineering selection policy, not a unique source rule.
 Local source discussion of legitimate alternative decompositions:
@@ -16,10 +17,10 @@ from datetime import datetime
 
 from chanlun.core.strict_structure.center_machine import (
     _event,
-    _supersede_center,
-    calculate_three_core_segment_centers,
-    establish_three_core_segment_center,
-    replay_three_core_segment_center,
+    _GEOMETRY_STOP_ERRORS,
+    advance_center,
+    calculate_centers,
+    establish_center,
 )
 from chanlun.core.strict_structure.identity import stable_structure_id
 from chanlun.core.strict_structure.models import (
@@ -27,10 +28,11 @@ from chanlun.core.strict_structure.models import (
     CenterLevelResult,
     CenterState,
     ConstituentUnit,
+    SourceKind,
     TrendCenter,
 )
 
-POLICY = "completed_inner_view_v1"
+POLICY = "completed_inner_five_role_view_v1"
 
 
 def _closed_at(center: TrendCenter) -> datetime | None:
@@ -44,13 +46,16 @@ def _closed_at(center: TrendCenter) -> datetime | None:
 def _completed_inner_candidate(original, units, positions, inherited_at=None):
     """Find the first causally available alternative, including old closed views."""
     closed_at = _closed_at(original)
-    first = max(positions[u.unit_id] for u in original.initial_units) + 2
+    first = max(positions[u.unit_id] for u in original.initial_units)
+    original_core_ids = {u.unit_id for u in original.initial_units}
     best = None
-    for start in range(first, len(units) - 2):
-        core = units[start:start + 3]
-        if not all(u.locked for u in core):
+    for start in range(first, len(units) - 4):
+        roles = units[start:start + 5]
+        if not all(u.locked for u in roles):
             break
-        seed = establish_three_core_segment_center(core, original.structural_level)
+        if original_core_ids.intersection(u.unit_id for u in roles[1:4]):
+            continue
+        seed = establish_center(roles, original.structural_level, SourceKind.SEGMENT)
         if seed is None or not (
             original.zd_tick < seed.zd_tick <= seed.zg_tick < original.zg_tick
         ):
@@ -61,13 +66,19 @@ def _completed_inner_candidate(original, units, positions, inherited_at=None):
         limit = min((clock for clock in clocks if clock is not None), default=None)
         if limit is not None and seed.available_at >= limit:
             continue
-        locked_tail = []
-        for unit in units[start:]:
+        candidate = seed
+        for unit in units[start + 5:]:
             if not unit.locked or (limit is not None and unit.available_at >= limit):
                 break
-            locked_tail.append(unit)
-        candidate = replay_three_core_segment_center(tuple(locked_tail), original.structural_level)
-        if candidate is None or not candidate.third_class_confirmed:
+            try:
+                candidate, _ = advance_center(candidate, unit)
+            except ValueError as exc:
+                if str(exc) not in _GEOMETRY_STOP_ERRORS:
+                    raise
+                break
+            if candidate.state is CenterState.COMPLETED:
+                break
+        if not candidate.third_class_confirmed:
             continue
         known_at = max(candidate.available_at, original.established_at)
         if inherited_at is not None:
@@ -96,10 +107,15 @@ def _retarget_predecessor(previous, successor, units, positions):
     start = max(positions[u.unit_id] for u in owned) + 1
     stop = positions[successor.initial_units[0].unit_id]
     bridge = units[start:stop]
-    reopened = replace(previous, state=CenterState.ONGOING,
-                       superseded_by_center_id=None, superseded_at=None,
-                       supersession_bridge_units=())
-    return _supersede_center(reopened, successor, bridge)
+    # Keep the established exit in its lifecycle role throughout the update.
+    # Reopening then clearing the old bridge can temporarily orphan that exit.
+    updated = replace(previous, superseded_by_center_id=successor.center_id,
+                      superseded_at=successor.established_at,
+                      supersession_bridge_units=bridge,
+                      available_at=max(previous.available_at, successor.available_at,
+                                       *(u.available_at for u in bridge)))
+    return updated, _event(updated, CenterEventKind.SUPERSEDED,
+                           successor.established_market_time, updated.available_at)
 
 
 def calculate_native_center_views(
@@ -110,7 +126,7 @@ def calculate_native_center_views(
     positions = {unit.unit_id: offset for offset, unit in enumerate(values)}
 
     def scan(start=0, inherited_at=None, inherited_view_id=None):
-        baseline = calculate_three_core_segment_centers(values[start:], structural_level)
+        baseline = calculate_centers(values[start:], structural_level, SourceKind.SEGMENT)
         for offset, original in enumerate(baseline.centers):
             choice = _completed_inner_candidate(original, values, positions, inherited_at)
             if choice is None:
@@ -122,7 +138,8 @@ def calculate_native_center_views(
                 original.center_id, candidate.center_id, leave.unit_id, ret.unit_id,
             )
             selected = _stamp(candidate, known_at, view_id)
-            resume = positions[ret.unit_id]
+            # The completed leave serves as the next five-role window's entry.
+            resume = positions[ret.unit_id] - 1
             if resume <= start:
                 raise ValueError("operational selection must advance its source cursor")
             following = scan(resume, known_at, view_id)
@@ -148,14 +165,25 @@ def calculate_native_center_views(
             )
             record = {
                 "policy": POLICY, "view_id": view_id,
+                "formation_rule": "five_role",
                 "original_center_id": original.center_id,
                 "original_core_unit_ids": tuple(u.unit_id for u in original.initial_units),
+                "original_entry_unit_id": original.entry_unit.unit_id,
+                "original_establishment_leave_unit_id": original.establishment_leave_unit.unit_id,
+                "original_establishment_unit_ids": tuple(u.unit_id for u in original.establishment_units),
                 "original_zd_tick": original.zd_tick, "original_zg_tick": original.zg_tick,
                 "selected_center_id": selected.center_id,
                 "selected_core_unit_ids": tuple(u.unit_id for u in selected.initial_units),
+                "selected_entry_unit_id": selected.entry_unit.unit_id,
+                "selected_establishment_leave_unit_id": selected.establishment_leave_unit.unit_id,
+                "selected_establishment_unit_ids": tuple(u.unit_id for u in selected.establishment_units),
+                "selected_five_overlap_low_tick": max(u.low_tick for u in selected.establishment_units),
+                "selected_five_overlap_high_tick": min(u.high_tick for u in selected.establishment_units),
+                "shared_original_entry_unit_ids": tuple(u.unit_id for u in original.initial_units
+                                                        if u.unit_id == selected.entry_unit.unit_id),
                 "leave_unit_id": leave.unit_id, "return_unit_id": ret.unit_id,
                 "connection_unit_ids": tuple(u.unit_id for u in values[
-                    max(positions[u.unit_id] for u in original.initial_units) + 1:seed_offset]),
+                    max(positions[u.unit_id] for u in original.initial_units):seed_offset + 1]),
                 "available_at": int(known_at.timestamp()),
             }
             return CenterLevelResult(

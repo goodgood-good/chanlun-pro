@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd
-from chanlun.cl_utils.strict_chart import build_center_snapshot
+from chanlun.cl_utils.strict_chart import build_center_snapshot, build_native_center_snapshot
 from chanlun.cl_utils.tv_chart import cl_data_to_tv_chart
 from chanlun.core.strict_structure.center_machine import calculate_centers
 from chanlun.core.strict_structure.models import SourceKind
@@ -105,7 +105,7 @@ def test_live_and_frozen_native_exit_references_agree_for_all_six_signal_classes
     ("SH.600519_5m.parquet", "SH.600519", "5m"),
     ("SZ.002299_1m.parquet", "SZ.002299", "1m"),
 ])
-def test_three_core_consolidation_comparisons_survive_frozen_evidence_validation(name, code, frequency):
+def test_five_role_consolidation_comparisons_survive_frozen_evidence_validation(name, code, frequency):
     from chanlun.screening.runner import snapshot_for
     from chanlun.screening.rules import native_consolidation_source_valid
 
@@ -116,7 +116,8 @@ def test_three_core_consolidation_comparisons_survive_frozen_evidence_validation
     centers = {center["center_id"]: center for center in snapshot["levels"][0]["centers"]}
     departures = [alert for alert in alerts if alert["comparison_form"] == "entry_departure"]
     assert departures
-    assert all(centers[alert["center_id"]]["entry_unit_id"] is None for alert in departures)
+    assert all(centers[alert["center_id"]]["entry_unit_id"] is not None
+               and len(centers[alert["center_id"]]["establishment_segments"]) == 5 for alert in departures)
     assert all(native_consolidation_source_valid(snapshot, alert) for alert in alerts)
 
 
@@ -164,8 +165,9 @@ def _snapshot_for_units(units):
         _strict_as_of=lambda: cutoff, _strict_price_quantum=lambda: Decimal("0.01"),
         _strict_price_basis_revision=lambda: TEST_PRICE_BASIS,
         _strict_config_revision=lambda: "test", get_strict_evidence=lambda: evidence,
+        get_native_centers=lambda: result, get_segment_units=lambda: units,
     )
-    return build_center_snapshot(cd, interval="1m", display_bar_closed_at=(int(cutoff.timestamp()),))
+    return build_native_center_snapshot(cd, interval="1m", display_bar_closed_at=(int(cutoff.timestamp()),))
 
 
 def test_five_locked_roles_establish_center_after_short_previews():
@@ -175,7 +177,7 @@ def test_five_locked_roles_establish_center_after_short_previews():
     live = _snapshot_for_units((*units[:4], replace(units[4], locked=False, confirmed_at=None)))["levels"][0]
     locked = _snapshot_for_units(units)["levels"][0]
     assert three["centers"] == four["centers"] == live["centers"] == []
-    assert four["center_previews"][0]["preview_status"] == "awaiting_leave"
+    assert three["center_previews"] == four["center_previews"] == []
     assert live["center_previews"][0]["preview_status"] == "awaiting_segment_confirmation"
     center, = locked["centers"]
     assert center["formation_rule"] == "five_role"

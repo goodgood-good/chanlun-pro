@@ -77,19 +77,20 @@ def recorded_frame():
     return pd.read_parquet(Path(__file__).parents[2] / "fixtures" / "SH.513100_5m_center_20261009.parquet")
 
 
-def test_saved_center_cannot_drop_its_outside_connector_or_claim_an_incomplete_scan(recorded_frame):
+def test_saved_native_center_requires_five_roles_and_complete_processing(recorded_frame):
     from chanlun.screening.runner import snapshot_for
     from chanlun.screening.rules import _native_center_body_source_valid
 
     snapshot = snapshot_for(recorded_frame, "SH.513100", "5m", include_consolidation=True)
-    center = next(c for c in snapshot["levels"][0]["centers"] if c["excursion_unit_ids"])
+    center = snapshot["levels"][0]["centers"][-1]
     units = snapshot["screening_segments"]
     by_id = {u["unit_id"]: u for u in units}
     positions = {u["unit_id"]: i for i, u in enumerate(units)}
     def valid(value):
         return _native_center_body_source_valid(snapshot, value, by_id, positions, snapshot["source_closed_at"])
     assert valid(center)
-    assert not valid({**center, "excursion_unit_ids": [], "excursion_segments": []})
+    assert not valid({**center, "formation_rule": "three_core", "entry_unit_id": None})
+    assert not valid({**center, "establishment_segments": center["establishment_segments"][1:4]})
     assert not valid({**center, "processing_complete": False})
 
 
@@ -113,16 +114,11 @@ def test_frozen_first_core_view_keeps_real_contact_evidence(recorded_frame, cuto
     assert center.formation_rule == "three_core"
     assert (center.zd_tick, center.zg_tick) == (2150, 2270)
     assert center.display_range_end_market_time == pd.Timestamp(expected_end, tz="Asia/Shanghai")
-    snapshot = build_native_center_snapshot(cd, interval="5m",
-                                           display_bar_closed_at=tuple(int(t.timestamp()) for t in frame.date))
-    assert snapshot["center_processing"]["complete"] is True
-    assert snapshot["levels"][0]["centers"][-1]["processing_complete"] is True
+    with pytest.raises(ValueError, match="requires five-role"):
+        build_native_center_snapshot(cd, interval="5m",
+                                     display_bar_closed_at=tuple(int(t.timestamp()) for t in frame.date))
     assert not center.third_class_confirmed
     if cutoff >= "2026-08-07":
         excursion, = center.excursion_units
         assert (excursion.low_tick, excursion.high_tick) == (2035, 2141)
         assert excursion.market_start == pd.Timestamp("2026-07-23 13:35", tz="Asia/Shanghai")
-    if cutoff >= "2026-09-22":
-        preview = snapshot["levels"][0]["center_previews"][-1]
-        assert preview["owner_center_id"] == center.center_id
-        assert [role["unit_id"] for role in preview["establishment_segments"]] == preview["core_unit_ids"]

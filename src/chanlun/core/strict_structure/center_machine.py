@@ -97,6 +97,11 @@ def _core(core_units: tuple[ConstituentUnit, ...]) -> tuple[int, int]:
     )
 
 
+def _five_role_overlap(values: tuple[ConstituentUnit, ...]) -> bool:
+    """The five physical roles must share one interval; the core stays three."""
+    return max(item.low_tick for item in values) <= min(item.high_tick for item in values)
+
+
 def _is_leave_candidate(center: TrendCenter, item: ConstituentUnit) -> bool:
     """返回一个重叠单元是否最终收在任一核心边界之外。"""
     return _touches_core(
@@ -247,6 +252,8 @@ def establish_center(initial_units, structural_level: int, source_kind: SourceKi
     price_basis_revision = _validate_seed_context(values, structural_level, source_kind)
     if any((not item.locked for item in values)):
         return None
+    if not _five_role_overlap(values):
+        return None
     seed_entry = values[0]
     core_units = values[1:4]
     establishment_leave = values[4]
@@ -305,6 +312,8 @@ def establish_center_preview(initial_units, structural_level: int, source_kind: 
         elif unlocked_seen:
             return None
     if not unlocked_seen:
+        return None
+    if not _five_role_overlap(values):
         return None
     (zd_tick, zg_tick) = _core(core_units)
     if zd_tick > zg_tick:
@@ -827,6 +836,8 @@ def forming_preview(candidate, structural_level: int, source_kind: SourceKind, o
     body = values[1:4]
     core_ready = len(values) >= 4
     establishment_leave = values[4] if len(values) == 5 else None
+    if establishment_leave is not None and not _five_role_overlap(values):
+        return None
     evidence = values
     pending_leave = None
     zd_tick = None
@@ -1017,6 +1028,7 @@ def _calculate_physical_centers(
     previews: list[CenterPreview] = []
     i = 0
     replay_from = 0
+    unprocessed_unit_ids: tuple[str, ...] = ()
     while i + width - 1 < len(formal):
         center = establish_center(
             formal[i : i + width], structural_level, source_kind, entry_unit=None
@@ -1081,6 +1093,8 @@ def _calculate_physical_centers(
         centers.append(center)
         events.extend(candidate_events)
         replay_from = i
+        if center.state is CenterState.ONGOING and geometry_stop_at is not None:
+            unprocessed_unit_ids = tuple(item.unit_id for item in formal[geometry_stop_at:])
         if center.state is CenterState.COMPLETED:
             i = max(i + 1, _next_scan_start_after_completion(j, source_kind))
             continue
@@ -1092,7 +1106,7 @@ def _calculate_physical_centers(
         break
     latest_live_preview = None
     post_completion_resume = None
-    if locked_count < len(values) and len(values) >= width:
+    if locked_count < len(values) and len(values) >= width and not unprocessed_unit_ids:
         if centers and centers[-1].state is CenterState.COMPLETED:
             completion_return = centers[-1].completion_return_unit
             if completion_return is None:
@@ -1154,7 +1168,7 @@ def _calculate_physical_centers(
                 ):
                     if successor not in previews:
                         previews.append(successor)
-    if latest_live_preview is None:
+    if latest_live_preview is None and not unprocessed_unit_ids:
         tail_start = max(
             0,
             len(values) - width,
@@ -1196,6 +1210,7 @@ def _calculate_physical_centers(
         events=tuple(events),
         locked_unit_count=locked_count,
         replay_from=replay_from,
+        unprocessed_unit_ids=unprocessed_unit_ids,
     )
 
 def _recursive_establish_center(initial_units, structural_level: int, source_kind: SourceKind, oscillatory_ids: frozenset[str]=frozenset(), *, entry_unit: ConstituentUnit | None=None, formation_rule: str | None=None) -> TrendCenter | None:

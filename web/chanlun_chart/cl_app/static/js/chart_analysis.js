@@ -16,13 +16,58 @@
     const key = String(value || '');
     return /^\d+$/.test(key) ? key + 'm' : key;
   }
+  function nativeFiveRoleEvidence(center, preview) {
+    const roles = center?.establishment_segments;
+    const ids = center?.core_unit_ids;
+    const core = center?.core;
+    const expected = [center?.entry_unit_id, ...(Array.isArray(ids) ? ids : []), center?.establishment_leave_unit_id];
+    if (center?.source_kind !== 'segment' || center.formation_rule === 'three_core'
+        || center.render_kind !== (preview ? 'center_preview' : 'formal_center')
+        || !Array.isArray(ids) || ids.length !== 3 || expected.length !== 5
+        || expected.some(id => typeof id !== 'string' || !id) || new Set(expected).size !== 5
+        || center.minimum_lifecycle_role_count !== 5 || center.establishment_component_count !== 5
+        || center.core_component_count !== 3 || !(center.lifecycle_role_count >= 5)
+        || !Number.isInteger(center.available_at)
+        || !Array.isArray(center.initial_unit_ids) || center.initial_unit_ids.length !== 3
+        || !center.initial_unit_ids.every((id, i) => id === ids[i])
+        || center.initial_exit_unit_id !== expected[4]
+        || !Array.isArray(center.establishment_segment_ids)
+        || center.establishment_segment_ids.length !== 5
+        || !center.establishment_segment_ids.every((id, i) => id === expected[i])
+        || !Array.isArray(roles) || roles.length !== 5
+        || !Number.isInteger(core?.zd_tick) || !Number.isInteger(core?.zg_tick)) return false;
+    let unlocked = false;
+    if (roles.some((unit, i) => {
+      if (!unit || unit.unit_id !== expected[i] || !['up', 'down'].includes(unit.direction)
+          || ![unit.low_tick, unit.high_tick, unit.start_tick, unit.end_tick, unit.start_time, unit.end_time].every(Number.isInteger)
+          || unit.low_tick > Math.min(unit.start_tick, unit.end_tick)
+          || unit.high_tick < Math.max(unit.start_tick, unit.end_tick) || unit.start_time >= unit.end_time
+          || (unit.direction === 'up' ? unit.start_tick >= unit.end_tick : unit.start_tick <= unit.end_tick)) return true;
+      if (unit.locked !== true) { unlocked = true; if (!preview) return true; }
+      else if (unlocked || !Number.isInteger(unit.confirmed_at) || unit.confirmed_at > center.available_at) return true;
+      return i > 0 && (unit.direction === roles[i - 1].direction
+        || unit.start_time !== roles[i - 1].end_time || unit.start_tick !== roles[i - 1].end_tick);
+    })) return false;
+    // Five-role admission and the displayed middle-three core are different intervals.
+    const legacyClosedContact = core.zd_tick === core.zg_tick
+      && center.runtime_overlap_policy === 'physical_closed_interval_contact'
+      && center.overlap_component_count === 0 && roles.every(unit => unit.locked === true
+        && unit.low_tick <= core.zd_tick && unit.high_tick >= core.zd_tick);
+    return (center.overlap_component_count >= 5 || legacyClosedContact)
+      && core.zd_tick === Math.max(...roles.slice(1, 4).map(unit => unit.low_tick))
+      && core.zg_tick === Math.min(...roles.slice(1, 4).map(unit => unit.high_tick))
+      && Math.max(...roles.map(unit => unit.low_tick)) <= Math.min(...roles.map(unit => unit.high_tick))
+      && (roles[4].direction === 'up' ? roles[4].end_tick > core.zg_tick : roles[4].end_tick < core.zd_tick);
+  }
   function summarizeChartData(data) {
     const snapshot = data?.strict_structure;
     const valid = data?.strict_structure_mode === 'replace'
       && ['native_centers', 'centers_and_signals'].includes(snapshot?.analysis_scope)
       && snapshot.levels?.length >= 1;
-    const centers = valid ? (snapshot.levels[0].centers || []) : [];
-    const previews = valid ? (snapshot.levels[0].center_previews || []) : [];
+    const admitted = (center, preview) => snapshot.analysis_scope !== 'native_centers'
+      && center?.source_kind !== 'segment' || nativeFiveRoleEvidence(center, preview);
+    const centers = valid ? (snapshot.levels[0].centers || []).filter(center => admitted(center, false)) : [];
+    const previews = valid ? (snapshot.levels[0].center_previews || []).filter(center => admitted(center, true)) : [];
     return {bars: data?.bars?.length || 0, strokes: data?.bis?.length || 0,
       segments: data?.xds?.length || 0, centers, previews, ready: valid,
       ...(valid && snapshot.segment_construction ? {segmentConstruction: snapshot.segment_construction} : {}),
@@ -106,7 +151,7 @@
           : summary.userView && !pending
           && !summary.qualifiedPhysicalIds.has(center.center_id)
           ? '结构已出现 / 独立离返待确认'
-          : pending ? (center.preview_status === 'awaiting_leave' ? '形成中 / 待离开段'
+          : pending ? (center.preview_status === 'awaiting_leave' ? '线段待确认'
           : center.preview_status === 'awaiting_completion_confirmation' ? '回试待确认' : '形成中 / 待线段确认')
           : center.third_class_confirmed ? '已结束' : center.state === 'divergence_closed' ? '背驰分界'
           : center.state === 'superseded' ? '后继中枢已成立'

@@ -1222,6 +1222,9 @@ def build_native_center_snapshot(
     cutoff = aware_datetime_to_epoch_seconds(as_of)
     quantum = cd._strict_price_quantum()
     center_result = cd.get_native_centers()
+    if any(center.formation_rule != "five_role" or len(center.establishment_units) != 5
+           for center in center_result.centers):
+        raise ValueError("native chart requires five-role physical centers")
     centers = []
     for center in center_result.centers:
         if center.available_at > as_of:
@@ -1235,10 +1238,17 @@ def build_native_center_snapshot(
     segment_units = tuple(cd.get_segment_units())
     units = {unit.unit_id: unit for unit in segment_units}
     center_by_id = {center["center_id"]: center for center in centers}
+    def drawable_five_role_preview(preview):
+        roles = (preview.entry_unit_id, *preview.unit_ids[:3], preview.establishment_leave_unit_id)
+        if (preview.formation_rule == "three_core" or len(roles) != 5 or None in roles
+                or len(set(roles)) != 5 or any(key not in units for key in roles)):
+            return False
+        return max(units[key].low_tick for key in roles) <= min(units[key].high_tick for key in roles)
     previews = [
         _with_prices(item, quantum)
         for preview in center_result.previews
         if preview.available_at <= as_of
+        if drawable_five_role_preview(preview)
         if (item := strict_center_preview_to_chart_dict(
             preview, units, center_by_id.get(preview.formal_center_id)
         )) is not None
@@ -1288,7 +1298,7 @@ def build_native_center_snapshot(
         })
     basis = cd._strict_price_basis_revision()
     revision = stable_structure_id(
-        "native-three-core-v2", cd.get_code(), interval, basis, cutoff,
+        "native-five-role-centers-v4", cd.get_code(), interval, basis, cutoff,
         centers, previews, alerts, bool(stroke_construction.get("unresolved_regions")),
         segment_construction,
         unresolved_segment_ranges,
@@ -1304,7 +1314,7 @@ def build_native_center_snapshot(
             "member_basis": "native_locked_segment",
             "role": "operational_subordinate_member",
             "recursive_type_proven": False,
-            "center_formation": "three_locked_overlapping_segments",
+            "center_formation": "five_locked_overlapping_segments_entry_core_exit",
         },
         "center_processing": {
             "complete": not center_result.unprocessed_unit_ids,

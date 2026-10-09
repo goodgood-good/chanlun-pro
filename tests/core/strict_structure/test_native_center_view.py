@@ -6,14 +6,14 @@ import pandas as pd
 import pytest
 
 from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd
-from chanlun.core.strict_structure.center_machine import calculate_three_core_segment_centers
-from chanlun.core.strict_structure.models import CenterState
+from chanlun.core.strict_structure.center_machine import calculate_centers
+from chanlun.core.strict_structure.models import CenterState, SourceKind
 from chanlun.core.strict_structure.native_center_view import calculate_native_center_views
 from tests.core.strict_structure.helpers import unit
 
 
 def nested_sequence(*, mirror=False):
-    prices = [220, 100, 200, 90, 180, 130, 170, 140, 190, 180, 240, 220]
+    prices = [50, 220, 100, 200, 90, 230, 130, 170, 140, 190, 180, 240, 220]
     values = tuple(unit(i, "up" if b > a else "down", a, b)
                    for i, (a, b) in enumerate(zip(prices, prices[1:])))
     if mirror:
@@ -27,36 +27,40 @@ def nested_sequence(*, mirror=False):
 @pytest.mark.parametrize("mirror", [False, True])
 def test_inner_view_requires_independent_locked_return_and_preserves_original_identity(mirror):
     values = nested_sequence(mirror=mirror)
-    before = calculate_native_center_views(values[:8])
+    before = calculate_native_center_views(values[:9])
     original = before.centers[0]
     assert before.view_selections == ()
-    assert original.initial_units == values[:3]
-    live = (*values[:8], replace(values[8], locked=False, confirmed_at=None))
+    assert original.initial_units == values[1:4]
+    live = (*values[:9], replace(values[9], locked=False, confirmed_at=None))
     assert calculate_native_center_views(live).view_selections == ()
 
-    after = calculate_native_center_views(values[:9])
+    after = calculate_native_center_views(values[:10])
     selected, = after.centers
     record, = after.view_selections
-    assert selected.initial_units == values[4:7]
+    assert selected.initial_units == values[5:8]
+    assert selected.establishment_units == values[4:9]
+    assert selected.formation_rule == "five_role"
     assert selected.state is CenterState.COMPLETED
-    assert selected.completion_leave_unit == values[7]
-    assert selected.completion_return_unit == values[8]
+    assert selected.completion_leave_unit == values[8]
+    assert selected.completion_return_unit == values[9]
     assert selected.center_id != original.center_id
     assert record["original_center_id"] == original.center_id
-    assert record["original_core_unit_ids"] == tuple(u.unit_id for u in values[:3])
-    assert record["connection_unit_ids"] == (values[3].unit_id,)
-    assert record["available_at"] == int(values[8].available_at.timestamp())
-    assert selected.view_available_at == values[8].available_at
+    assert record["original_core_unit_ids"] == tuple(u.unit_id for u in values[1:4])
+    assert record["connection_unit_ids"] == tuple(u.unit_id for u in values[3:5])
+    assert record["original_establishment_unit_ids"] == tuple(u.unit_id for u in values[:5])
+    assert record["selected_establishment_unit_ids"] == tuple(u.unit_id for u in values[4:9])
+    assert record["available_at"] == int(values[9].available_at.timestamp())
+    assert selected.view_available_at == values[9].available_at
     assert selected.view_id == record["view_id"]
     assert all(e.available_at >= selected.view_available_at for e in after.events)
-    assert calculate_three_core_segment_centers(values[:9], 0).centers[0].state is CenterState.ONGOING
+    assert calculate_centers(values[:10], 0, SourceKind.SEGMENT).centers[0].state is CenterState.ONGOING
 
 
 @pytest.mark.parametrize("mirror", [False, True])
 def test_later_original_completion_cannot_erase_prior_view_selection(mirror):
     values = nested_sequence(mirror=mirror)
-    before = calculate_native_center_views(values[:9])
-    baseline = calculate_three_core_segment_centers(values, 0)
+    before = calculate_native_center_views(values[:10])
+    baseline = calculate_centers(values, 0, SourceKind.SEGMENT)
     assert baseline.centers[0].state is CenterState.COMPLETED
     assert baseline.centers[0].completed_at > before.centers[0].completed_at
     later = calculate_native_center_views(values)
@@ -66,26 +70,68 @@ def test_later_original_completion_cannot_erase_prior_view_selection(mirror):
 
 def test_equal_core_boundary_is_not_a_strictly_nested_view():
     # Candidate lower boundary equals the original lower boundary.
-    prices = [220, 100, 200, 90, 180, 100, 170, 100, 190, 180]
+    prices = [50, 220, 100, 200, 90, 230, 100, 170, 100, 190, 180]
     values = tuple(unit(i, "up" if b > a else "down", a, b)
                    for i, (a, b) in enumerate(zip(prices, prices[1:])))
     result = calculate_native_center_views(values)
     assert result.view_selections == ()
-    assert result == calculate_three_core_segment_centers(values, 0)
+    assert result == calculate_centers(values, 0, SourceKind.SEGMENT)
 
 
 def test_inner_view_does_not_ignore_a_return_internal_extreme():
     values = list(nested_sequence())
-    values[8] = replace(values[8], low_tick=160)
-    result = calculate_native_center_views(tuple(values[:9]))
+    values[9] = replace(values[9], low_tick=160)
+    result = calculate_native_center_views(tuple(values[:10]))
     assert result.view_selections == ()
-    assert result.centers[0].initial_units == tuple(values[:3])
+    assert result.centers[0].initial_units == tuple(values[1:4])
 
 
 def test_unchanged_empty_and_short_input_preserve_base_scan():
     values = nested_sequence()
-    for size in range(4):
-        assert calculate_native_center_views(values[:size]) == calculate_three_core_segment_centers(values[:size], 0)
+    for size in range(6):
+        result = calculate_native_center_views(values[:size])
+        assert result == calculate_centers(values[:size], 0, SourceKind.SEGMENT)
+        if size < 5:
+            assert result.centers == ()
+
+
+def test_five_role_successor_resumes_from_completed_leave_as_entry():
+    values = (*nested_sequence()[:10], unit(10, "up", 180, 220),
+              unit(11, "down", 220, 185), unit(12, "up", 185, 230),
+              unit(13, "down", 230, 225))
+    result = calculate_native_center_views(values)
+    first, second = result.centers
+    assert first.completion_leave_unit == second.entry_unit == values[8]
+    assert first.completion_return_unit == second.initial_units[0] == values[9]
+    assert second.establishment_units == values[8:13]
+    assert second.view_available_at >= first.view_available_at
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_five_role_superseded_predecessor_bridge_retargets_new_entry(mirror):
+    prices = [292, 377, 286, 305, 293, 324, 301, 326, 318, 343, 303, 324,
+              312, 323, 267, 288, 270, 284, 276, 297, 285, 294, 282, 326,
+              288, 320, 291, 293, 289, 290]
+    values = tuple(unit(i, "up" if b > a else "down", a, b)
+                   for i, (a, b) in enumerate(zip(prices, prices[1:])))
+    values = (*values[:19], replace(values[19], low_tick=281), *values[20:])
+    if mirror:
+        values = tuple(replace(u, direction="down" if u.direction == "up" else "up",
+                               start_tick=700-u.start_tick, end_tick=700-u.end_tick,
+                               low_tick=700-u.high_tick, high_tick=700-u.low_tick)
+                       for u in values)
+    result = calculate_native_center_views(values)
+    selected = next(c for c in result.centers if c.entry_unit == values[23])
+    previous = result.centers[result.centers.index(selected) - 1]
+    assert previous.state is CenterState.SUPERSEDED
+    assert previous.supersession_bridge_units == values[20:24]
+    assert previous.supersession_bridge_units[-1] == selected.entry_unit
+    assert previous.superseded_by_center_id == selected.center_id
+    assert previous.superseded_at == selected.established_at
+    assert previous.view_available_at == selected.view_available_at
+    assert previous.view_id == selected.view_id
+    assert selected.establishment_units == values[23:28]
+    assert selected.completion_return_unit == values[28]
 
 
 @pytest.fixture(scope="module")
@@ -113,6 +159,14 @@ def test_recorded_inner_view_closes_at_real_return_without_moving_its_extreme(re
     selected = next(c for c in result.centers if c.center_id == record["selected_center_id"])
     assert (selected.zd_tick, selected.zg_tick) == (2154, 2232)
     assert selected.initial_units == values[33:36]
+    assert selected.entry_unit == values[32]
+    assert selected.establishment_leave_unit == values[36]
+    assert selected.establishment_units == values[32:37]
+    assert record["selected_establishment_unit_ids"] == tuple(u.unit_id for u in values[32:37])
+    assert record["original_establishment_unit_ids"] == tuple(u.unit_id for u in values[29:34])
+    assert record["shared_original_entry_unit_ids"] == (values[32].unit_id,)
+    assert record["connection_unit_ids"] == (values[32].unit_id,)
+    assert (record["selected_five_overlap_low_tick"], record["selected_five_overlap_high_tick"]) == (2154, 2232)
     assert selected.completion_return_unit == values[41]
     ret = selected.completion_return_unit
     assert (ret.end_tick, ret.high_tick) == (2141, 2153)
@@ -122,23 +176,21 @@ def test_recorded_inner_view_closes_at_real_return_without_moving_its_extreme(re
     assert selected.available_at >= selected.view_available_at
     assert selected.state is CenterState.COMPLETED
     assert all(c.center_id != record["original_center_id"] for c in result.centers)
-    assert any(c.initial_units == values[45:48] for c in result.centers)
+    assert any(c.establishment_units == values[44:49] for c in result.centers)
+    for center in result.centers:
+        assert center.formation_rule == "five_role"
+        assert len(center.establishment_units) == 5
+        assert max(u.low_tick for u in center.establishment_units) <= min(u.high_tick for u in center.establishment_units)
 
 
-def test_recorded_superseded_predecessor_points_to_selected_successor(recorded_frame):
+def test_recorded_completed_predecessors_remain_unchanged(recorded_frame):
     values = _recorded_units(recorded_frame)
+    baseline = calculate_centers(values, 0, SourceKind.SEGMENT)
     result = calculate_native_center_views(values)
     record = _target_selection(result)
     selected_offset = next(i for i, c in enumerate(result.centers) if c.center_id == record["selected_center_id"])
-    previous = result.centers[selected_offset - 1]
-    selected = result.centers[selected_offset]
-    assert previous.state is CenterState.SUPERSEDED
-    assert previous.superseded_by_center_id == selected.center_id
-    assert previous.superseded_at == selected.established_at
-    assert previous.supersession_bridge_units[-1] == values[32]
-    assert previous.view_available_at == selected.view_available_at
-    assert previous.view_id == selected.view_id
-    assert previous.available_at >= selected.view_available_at
+    assert result.centers[:selected_offset] == baseline.centers[:selected_offset]
+    assert all(c.state is CenterState.COMPLETED for c in result.centers[:selected_offset])
 
 
 def test_recorded_full_and_bar_prefix_selection_clocks_agree(recorded_frame):

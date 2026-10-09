@@ -57,6 +57,23 @@ def test_selected_center_ends_and_subsequent_prices_belong_to_distinct_centers(s
     assert all(native_consolidation_source_valid(snapshot, a) for a in snapshot["native_consolidation_alerts"])
 
 
+def test_every_published_center_and_preview_has_five_contiguous_overlapping_roles(snapshot):
+    positions = {u["unit_id"]: i for i, u in enumerate(snapshot["screening_segments"])}
+    level = snapshot["levels"][0]
+    for center in (*level["centers"], *level["center_previews"]):
+        roles = center["establishment_segments"]
+        assert center["formation_rule"] == "five_role"
+        assert len(roles) == len({u["unit_id"] for u in roles}) == 5
+        assert [u["unit_id"] for u in roles] == [center["entry_unit_id"], *center["core_unit_ids"], center["establishment_leave_unit_id"]]
+        assert all(positions[b["unit_id"]] == positions[a["unit_id"]] + 1 for a, b in zip(roles, roles[1:]))
+        assert max(u["low_tick"] for u in roles) <= min(u["high_tick"] for u in roles)
+        assert (center["core"]["zd_tick"], center["core"]["zg_tick"]) == (
+            max(u["low_tick"] for u in roles[1:4]), min(u["high_tick"] for u in roles[1:4]))
+        if center["render_kind"] == "formal_center":
+            assert all(u["locked"] for u in roles)
+    assert all((c["core"]["zd_tick"], c["core"]["zg_tick"]) != (2094, 2141) for c in level["centers"])
+
+
 @pytest.mark.parametrize("cutoff, exists", [
     ("2026-07-23 13:50", False), ("2026-07-28 13:50", False),
     ("2026-07-28 13:55", True), ("2026-08-31 15:00", True),

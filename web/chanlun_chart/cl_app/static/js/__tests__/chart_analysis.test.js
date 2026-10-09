@@ -1,6 +1,20 @@
 'use strict';
 const {test}=require('node:test');const assert=require('node:assert/strict');
 const Analysis=require('../chart_analysis.js');
+
+function nativeCenter(overrides={}) {
+ const ticks=[90,120,100,110,90,120];
+ const roles=ticks.slice(1).map((end,i)=>({unit_id:`u${i+1}`, direction:end>ticks[i]?'up':'down',
+  start_tick:ticks[i],end_tick:end,low_tick:Math.min(ticks[i],end),high_tick:Math.max(ticks[i],end),
+  start_time:100+i*100,end_time:200+i*100,locked:true,confirmed_at:200+i*100}));
+ return {center_id:'c1',source_kind:'segment',formation_rule:'physical_five',render_kind:'formal_center',
+  core:{zd_tick:100,zg_tick:110,zd_price:10,zg_price:11},available_at:600,
+  core_component_count:3,lifecycle_role_count:5,overlap_component_count:5,
+  minimum_lifecycle_role_count:5,establishment_component_count:5,
+  entry_unit_id:'u1',establishment_leave_unit_id:'u5',initial_exit_unit_id:'u5',
+  core_unit_ids:['u2','u3','u4'],initial_unit_ids:['u2','u3','u4'],
+  establishment_segment_ids:roles.map(unit=>unit.unit_id),establishment_segments:roles,...overrides};
+}
 test('empty and pending charts distinguish missing structures from zero centers',()=>{
  assert.equal(Analysis.summarizeChartData(null).ready,false);
  const pending=Analysis.summarizeChartData({bars:[{}],strict_structure_mode:'unavailable',strict_structure_error:{code:'strict_structure_pending'}});
@@ -9,10 +23,38 @@ test('empty and pending charts distinguish missing structures from zero centers'
  assert.equal(empty.ready,true);assert.equal(empty.centers.length,0);
 });
 test('native overview reads only the current native snapshot',()=>{
- const centers=[{center_id:'c1',core:{zd_price:10,zg_price:11}}];
+ const centers=[nativeCenter()];
  const payload={bars:[{},{},{}],bis:[{},{}],xds:[{}],strict_structure_mode:'replace',strict_structure:{analysis_scope:'native_centers',levels:[{centers}]}};
  assert.deepEqual(Analysis.summarizeChartData(payload),{bars:3,strokes:2,segments:1,centers,previews:[],ready:true,loading:false});
  assert.equal(Analysis.summarizeChartData({...payload,strict_structure_mode:'unavailable'}).centers.length,0);
+});
+
+test('native overview rejects three/four roles and unconfirmed formal centers, but keeps a fifth-role preview',()=>{
+ const good=nativeCenter();
+ const old=nativeCenter({formation_rule:'three_core'});
+ const incomplete=nativeCenter({establishment_leave_unit_id:null,establishment_component_count:4,
+  establishment_segments:good.establishment_segments.slice(0,4)});
+ const pending=nativeCenter({render_kind:'center_preview'});
+ pending.establishment_segments[4].locked=false;
+ const summarize=(centers,previews=[])=>Analysis.summarizeChartData({strict_structure_mode:'replace',
+  strict_structure:{analysis_scope:'native_centers',levels:[{centers,center_previews:previews}]}});
+ assert.deepEqual(summarize([good,old,incomplete,pending],[old,incomplete,pending]).centers,[good]);
+ assert.deepEqual(summarize([],[old,incomplete,pending]).previews,[pending]);
+ delete good.establishment_segments;
+ assert.deepEqual(summarize([good]).centers,[]);
+});
+
+test('native overview requires common five-role intersection while retaining the wider middle-three core',()=>{
+ const value=nativeCenter();
+ value.establishment_segments[0].start_tick=105;
+ value.establishment_segments[0].low_tick=105;
+ const summarize=()=>Analysis.summarizeChartData({strict_structure_mode:'replace',
+  strict_structure:{analysis_scope:'native_centers',levels:[{centers:[value]}]}});
+ assert.deepEqual(summarize().centers,[value]);
+ assert.equal(value.core.zd_tick,100,'frame must retain the three middle segments core');
+ value.establishment_segments[0].start_tick=115;
+ value.establishment_segments[0].low_tick=115;
+ assert.deepEqual(summarize().centers,[]);
 });
 test('archived selected center fields cannot override formal centers and previews',()=>{
  const formal={center_id:'formal'},preview={center_id:'preview'},old={center_id:'old',formation_rule:'three_core'};

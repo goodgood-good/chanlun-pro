@@ -642,37 +642,7 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
     ) throw new Error('strict center core contract is invalid');
 
     if (item.source_kind === 'segment' && item.formation_rule === 'three_core') {
-        const roles = item.establishment_segments;
-        const preview = allowPartialPhysical === true && item.render_kind === 'center_preview';
-        if (item.minimum_lifecycle_role_count !== 3 || item.establishment_component_count !== 3
-            || item.entry_unit_id !== null || item.establishment_leave_unit_id !== null
-            || item.core_formed !== true || typeof item.frame_qualified !== 'boolean'
-            || !strictSameIds(item.establishment_segment_ids, item.core_unit_ids)
-            || !Array.isArray(roles) || roles.length !== 3
-            || roles.some((unit, index) => unit.unit_id !== item.core_unit_ids[index]
-                || !Number.isInteger(unit.low_tick) || !Number.isInteger(unit.high_tick)
-                || (!preview && (unit.locked !== true || !Number.isInteger(unit.confirmed_at)
-                    || unit.confirmed_at > item.available_at)))
-            || item.core.zd_tick !== Math.max(...roles.map(unit => unit.low_tick))
-            || item.core.zg_tick !== Math.min(...roles.map(unit => unit.high_tick))
-            || item.core.zd_tick > item.core.zg_tick
-            || roles.slice(1).some((unit, index) => unit.direction === roles[index].direction
-                || unit.start_time !== roles[index].end_time || unit.start_tick !== roles[index].end_tick)) {
-            throw new Error('native center requires three connected overlapping source segments');
-        }
-        if (item.third_class_confirmed === true) {
-            const leave = item.lifecycle_leaving_segment;
-            const ret = item.completion_return_segment;
-            if (!leave || !ret || leave.locked !== true || ret.locked !== true
-                || item.core_unit_ids.includes(leave.unit_id) || item.core_unit_ids.includes(ret.unit_id)
-                || leave.unit_id === ret.unit_id || leave.end_time !== ret.start_time
-                || leave.end_tick !== ret.start_tick || leave.direction === ret.direction
-                || leave.start_time < roles[2].end_time || ret.confirmed_at > item.available_at
-                || !(leave.direction === 'up' ? ret.low_tick > item.core.zg_tick : ret.high_tick < item.core.zd_tick)) {
-                throw new Error('native third-class point requires independent confirmed leave and return');
-            }
-        }
-        return;
+        throw new Error('native center requires five consecutive overlapping source segments');
     }
 
     if (item.source_kind === 'trend_type') {
@@ -714,7 +684,7 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
 
     const entryId = item.entry_unit_id;
     const leaveId = item.establishment_leave_unit_id;
-    const partial = allowPartialPhysical === true
+    const partial = item.source_kind !== 'segment' && allowPartialPhysical === true
         && item.render_kind === 'center_preview'
         && item.state === 'forming'
         && leaveId === null;
@@ -727,6 +697,38 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
     ) throw new Error('physical center entry/leave contract is invalid');
     const expected = [entryId, ...item.core_unit_ids];
     if (!partial) expected.push(leaveId);
+    if (item.source_kind === 'segment') {
+        const roles = item.establishment_segments;
+        const preview = allowPartialPhysical === true && item.render_kind === 'center_preview';
+        const core = item.core;
+        let unlocked = false;
+        if (expected.length !== 5 || !Array.isArray(roles) || roles.length !== 5
+            || roles.some((unit, index) => {
+                if (!unit || unit.unit_id !== expected[index]
+                    || !['up', 'down'].includes(unit.direction)
+                    || ![unit.low_tick, unit.high_tick, unit.start_tick, unit.end_tick,
+                        unit.start_time, unit.end_time].every(Number.isInteger)
+                    || unit.low_tick > unit.high_tick || unit.start_time >= unit.end_time
+                    || unit.low_tick > Math.min(unit.start_tick, unit.end_tick)
+                    || unit.high_tick < Math.max(unit.start_tick, unit.end_tick)
+                    || (unit.direction === 'up' ? unit.start_tick >= unit.end_tick : unit.start_tick <= unit.end_tick)) return true;
+                if (unit.locked !== true) {
+                    unlocked = true;
+                    if (!preview) return true;
+                } else if (unlocked || !Number.isInteger(unit.confirmed_at)
+                    || unit.confirmed_at > item.available_at) return true;
+                const previous = roles[index - 1];
+                return index > 0 && (unit.direction === previous.direction
+                    || unit.start_time !== previous.end_time || unit.start_tick !== previous.end_tick);
+            })
+            || !Number.isInteger(core?.zd_tick) || !Number.isInteger(core?.zg_tick)
+            || core.zd_tick !== Math.max(...roles.slice(1, 4).map(unit => unit.low_tick))
+            || core.zg_tick !== Math.min(...roles.slice(1, 4).map(unit => unit.high_tick))
+            || !(roles[4].direction === 'up' ? roles[4].end_tick > core.zg_tick : roles[4].end_tick < core.zd_tick)
+            || Math.max(...roles.map(unit => unit.low_tick)) > Math.min(...roles.map(unit => unit.high_tick))) {
+            throw new Error('native center requires five consecutive overlapping source segments');
+        }
+    }
     // Older saved one-price centers counted only positive-width overlaps.
     // Accept their declared closed-contact policy only when all five saved
     // establishment roles independently cover the exact core tick.
@@ -918,15 +920,14 @@ function centerEvidenceTitle(item) {
         : item.state === 'superseded' ? '后继中枢已成立，原划分已固定'
         : awaitingReturn ? '回试已位于中枢区间外，相关线段待最终确认' : '中枢延伸或等待回试确认';
     const formation = item.source_kind === 'trend_type' ? '三个已完成下级结构重叠'
-        : item.formation_rule === 'three_core' ? '三段核心重叠'
-        : '进入、三核心与离开独立';
+        : '五段连续共同重叠；框体取中间三段核心，进入与离开段独立';
     return (item.source_frequency ? `${item.source_frequency}·` : '') + interval + '；' + formation + '；' + state
         + (!item.third_class_confirmed && item.tail_status
             ? '；' + centerPreviewLabel({preview_status: item.tail_status}) : '');
 }
 
 function centerPreviewLabel(item) {
-    return ({awaiting_leave: '形成中·待离开段', extending: '延伸中·待确认',
+    return ({awaiting_leave: '线段待确认', extending: '延伸中·待确认',
         awaiting_completion_confirmation: '回试待确认',
         awaiting_segment_confirmation: '形成中·待线段确认'})[item.preview_status] || '形成中';
 }

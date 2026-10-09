@@ -9,8 +9,8 @@ import pytest
 
 from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd
 from chanlun.core.strict_structure.center_relation import classify_center_relation
-from chanlun.core.strict_structure.models import CenterRelation
-from chanlun.core.strict_structure.center_machine import calculate_three_core_segment_centers
+from chanlun.core.strict_structure.models import CenterRelation, SourceKind
+from chanlun.core.strict_structure.center_machine import calculate_centers, calculate_three_core_segment_centers
 from chanlun.core.strict_structure.native_center_signals import build_native_center_signals
 from chanlun.core.strict_structure.strength import MacdStrengthProvider, StrengthSnapshot
 from tests.core.strict_structure.helpers import (
@@ -45,10 +45,10 @@ def test_failed_departures_remain_center_oscillation_and_cannot_create_a_false_t
         prices = [300 - price for price in prices]
     units = tuple(unit(index, "up" if end > start else "down", start, end)
                   for index, (start, end) in enumerate(zip(prices, prices[1:])))
-    centers = calculate_three_core_segment_centers(units, 0).centers
+    centers = calculate_centers(units, 0, SourceKind.SEGMENT).centers
     assert len(centers) == 2
     first, second = centers
-    assert [item.unit_id for item in first.failed_departure_units] == ["u-3", "u-4"]
+    assert [item.unit_id for item in first.failed_departure_units] == ["u-4"]
     assert classify_center_relation(first, second) is CenterRelation.UPGRADE
 
     class WeakLastDeparture:
@@ -68,10 +68,20 @@ def test_native_points_cannot_omit_failed_departures_from_the_actual_source_grap
     prices = [100, 80, 95, 85, 120, 60, 130, 110]
     units = tuple(unit(index, "up" if end > start else "down", start, end)
                   for index, (start, end) in enumerate(zip(prices, prices[1:])))
-    centers = calculate_three_core_segment_centers(units, 0).centers
+    centers = calculate_centers(units, 0, SourceKind.SEGMENT).centers
     assert build_native_center_signals(units, centers, None, as_of=units[-1].available_at)
-    damaged = tuple(item for item in units if item.unit_id != "u-3")
+    damaged = tuple(item for item in units if item.unit_id != "u-4")
     assert build_native_center_signals(damaged, centers, None, as_of=units[-1].available_at) == []
+
+
+def test_three_core_comparison_cannot_publish_native_buy_sell_signals():
+    prices = [100, 80, 95, 85, 120, 60, 130, 110]
+    units = tuple(unit(i, "up" if b > a else "down", a, b)
+                  for i, (a, b) in enumerate(zip(prices, prices[1:])))
+    comparison = calculate_three_core_segment_centers(units, 0)
+    assert comparison.centers and any(c.third_class_confirmed for c in comparison.centers)
+    assert build_native_center_signals(units, comparison.centers, FixedStrength(),
+                                      as_of=units[-1].available_at) == []
 
 
 def test_one_center_and_arbitrary_adjacent_macd_weakening_issue_no_first_or_second_point():

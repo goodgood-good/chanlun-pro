@@ -605,40 +605,64 @@ def _native_center_view_source_valid(snapshot, center, units, positions, known_a
         if len(records) != 1:
             return False
         record = records[0]
-        if (record["policy"] != "completed_inner_view_v1" or type(selected_at) is not int
+        if (record["policy"] != "completed_inner_five_role_view_v1"
+                or record.get("formation_rule") != "five_role" or type(selected_at) is not int
                 or selected_at != record["available_at"] or selected_at > known_at):
             return False
         original = [units[key] for key in record["original_core_unit_ids"]]
         core = [units[key] for key in record["selected_core_unit_ids"]]
+        original_roles = [units[key] for key in record["original_establishment_unit_ids"]]
+        roles = [units[key] for key in record["selected_establishment_unit_ids"]]
         leave, ret = units[record["leave_unit_id"]], units[record["return_unit_id"]]
-        if len(original) != 3 or len(core) != 3:
+        if len(original) != 3 or len(core) != 3 or len(original_roles) != 5 or len(roles) != 5:
             return False
-        for seed in (original, core):
+        if original_roles[1:4] != original or roles[1:4] != core:
+            return False
+        if (original_roles[0]["unit_id"] != record["original_entry_unit_id"]
+                or original_roles[4]["unit_id"] != record["original_establishment_leave_unit_id"]
+                or roles[0]["unit_id"] != record["selected_entry_unit_id"]
+                or roles[4]["unit_id"] != record["selected_establishment_leave_unit_id"]):
+            return False
+        for seed in (original_roles, roles):
             if any(positions[b["unit_id"]] != positions[a["unit_id"]] + 1 for a, b in zip(seed, seed[1:])):
                 return False
-        start = positions[core[0]["unit_id"]]
+            if max(u["low_tick"] for u in seed) > min(u["high_tick"] for u in seed):
+                return False
+            if any(a["direction"] == b["direction"] or a["end_time"] != b["start_time"]
+                   or a["end_tick"] != b["start_tick"] for a, b in zip(seed, seed[1:])):
+                return False
+        start = positions[roles[0]["unit_id"]]
         original_end = positions[original[-1]["unit_id"]]
-        if start < original_end + 2:
+        if start < original_end or set(record["original_core_unit_ids"]) & set(record["selected_core_unit_ids"]):
             return False
-        connection_ids = tuple(list(units)[original_end + 1:start])
+        connection_ids = tuple(list(units)[original_end:start + 1])
         if tuple(record.get("connection_unit_ids", ())) != connection_ids:
+            return False
+        shared_entry = (roles[0]["unit_id"],) if roles[0]["unit_id"] in record["original_core_unit_ids"] else ()
+        if tuple(record.get("shared_original_entry_unit_ids", ())) != shared_entry:
             return False
         original_zd, original_zg = max(u["low_tick"] for u in original), min(u["high_tick"] for u in original)
         zd, zg = max(u["low_tick"] for u in core), min(u["high_tick"] for u in core)
         if ((original_zd, original_zg) != (record["original_zd_tick"], record["original_zg_tick"])
                 or not original_zd < zd <= zg < original_zg):
             return False
+        if (record.get("selected_five_overlap_low_tick"), record.get("selected_five_overlap_high_tick")) != (
+                max(u["low_tick"] for u in roles), min(u["high_tick"] for u in roles)):
+            return False
+        for seed, low, high in ((original_roles, original_zd, original_zg), (roles, zd, zg)):
+            if not (seed[4]["end_tick"] > high if seed[4]["direction"] == "up" else seed[4]["end_tick"] < low):
+                return False
         from chanlun.core.strict_structure.identity import build_center_id, stable_structure_id
         def identity(seed, low, high):
             return build_center_id(price_basis_revision=snapshot["price_basis_revision"], structural_level=0,
-                source_kind="segment", entry_unit_id=None, initial_unit_ids=tuple(u["unit_id"] for u in seed),
-                establishment_leave_unit_id=None, zd_tick=low, zg_tick=high, formation_rule="three_core")
-        if (record["original_center_id"] != identity(original, original_zd, original_zg)
-                or record["selected_center_id"] != identity(core, zd, zg)
+                source_kind="segment", entry_unit_id=seed[0]["unit_id"], initial_unit_ids=tuple(u["unit_id"] for u in seed[1:4]),
+                establishment_leave_unit_id=seed[4]["unit_id"], zd_tick=low, zg_tick=high, formation_rule="five_role")
+        if (record["original_center_id"] != identity(original_roles, original_zd, original_zg)
+                or record["selected_center_id"] != identity(roles, zd, zg)
                 or view_id != stable_structure_id(record["policy"], snapshot["price_basis_revision"], 0,
                     record["original_center_id"], record["selected_center_id"], leave["unit_id"], ret["unit_id"])):
             return False
-        evidence = (*original, *(units[key] for key in connection_ids), *core, leave, ret)
+        evidence = (*original_roles, *(units[key] for key in connection_ids), *roles, leave, ret)
         return bool(
             all(_causally_locked_role(u, selected_at) and u.get("source_kind") == "segment"
                 and u.get("structural_level") == 0 and u.get("price_basis_revision") == snapshot["price_basis_revision"]
@@ -659,7 +683,7 @@ def _native_center_view_source_valid(snapshot, center, units, positions, known_a
 def _native_center_body_source_valid(snapshot, center, unit_by_id, unit_position, known_at):
     """Check the whole frozen center, including its immutable three-unit core."""
     try:
-        if center.get("processing_complete") is False:
+        if center.get("processing_complete") is False or center.get("formation_rule") != "five_role":
             return False
         if not _native_center_view_source_valid(snapshot, center, unit_by_id, unit_position, known_at):
             return False
@@ -675,14 +699,10 @@ def _native_center_body_source_valid(snapshot, center, unit_by_id, unit_position
                 or any(unit_position[left] >= unit_position[right]
                        for left, right in zip(body_ids, body_ids[1:]))):
             return False
-        if center.get("formation_rule") == "three_core":
-            role_ids = core_ids
-        elif center.get("formation_rule") == "five_role":
-            role_ids = [center["entry_unit_id"], *core_ids, center["establishment_leave_unit_id"]]
-        else:
-            return False
+        role_ids = [center["entry_unit_id"], *core_ids, center["establishment_leave_unit_id"]]
         roles = center["establishment_segments"]
-        if [role["unit_id"] for role in roles] != role_ids:
+        if (len(roles) != 5 or len(set(role_ids)) != 5 or [role["unit_id"] for role in roles] != role_ids
+                or max(role["low_tick"] for role in roles) > min(role["high_tick"] for role in roles)):
             return False
         excursion_ids = center.get("excursion_unit_ids", ())
         if (len(set(excursion_ids)) != len(excursion_ids)
@@ -728,6 +748,8 @@ def _native_center_body_source_valid(snapshot, center, unit_by_id, unit_position
             (center["core"]["zd_tick"], center["core"]["zg_tick"])
             == (max(unit["low_tick"] for unit in core), min(unit["high_tick"] for unit in core))
             and center["core"]["zd_tick"] <= center["core"]["zg_tick"]
+            and (roles[-1]["end_tick"] > center["core"]["zg_tick"]
+                 if roles[-1]["direction"] == "up" else roles[-1]["end_tick"] < center["core"]["zd_tick"])
             and all(max(unit["low_tick"], center["core"]["zd_tick"])
                     <= min(unit["high_tick"], center["core"]["zg_tick"]) for unit in body)
             and (center["envelope"]["dd_tick"], center["envelope"]["gg_tick"])

@@ -148,6 +148,12 @@ test('a conditional center cannot carry a formal confirmation flag', () => {
 });
 
 function center(revision = 1, overrides = {}) {
+  const ticks = [900, 1200, 1000, 1100, 900, 1200];
+  const roles = ticks.slice(1).map((end, i) => ({unit_id: `u${i + 1}`,
+    direction: end > ticks[i] ? 'up' : 'down', start_tick: ticks[i], end_tick: end,
+    low_tick: Math.min(ticks[i], end), high_tick: Math.max(ticks[i], end),
+    start_time: BASE + i * 100, end_time: BASE + (i + 1) * 100,
+    locked: true, confirmed_at: BASE + (i + 1) * 100}));
   return {
     schema: 'chanlun-chart-center',
     render_kind: 'formal_center',
@@ -158,6 +164,8 @@ function center(revision = 1, overrides = {}) {
     body_revision: revision,
     structural_level: 0,
     source_kind: 'segment',
+    formation_rule: 'physical_five',
+    core: {zd_tick: 1000, zg_tick: 1100, zd_price: 10, zg_price: 11},
     state: 'ongoing',
     tradable: false,
     points: [
@@ -173,6 +181,7 @@ function center(revision = 1, overrides = {}) {
     overlap_component_count: 5,
     establishment_component_count: 5,
     establishment_segment_ids: ['u1', 'u2', 'u3', 'u4', 'u5'],
+    establishment_segments: roles,
     core_unit_ids: ['u2', 'u3', 'u4'],
     initial_unit_ids: ['u2', 'u3', 'u4'],
     body_unit_ids: ['u2', 'u3', 'u4'],
@@ -284,10 +293,10 @@ test('a five-role payload cannot masquerade as a three-core center', () => {
   const structure=snapshot({levels:[{structural_level:0,origin:'native_segments',
     centers:[old],center_previews:[],trend_shapes:[],points:[],divergences:[]}]});
   assert.throws(() => cm._strictRenderGroups(structure,scopeContext(cm)),
-    /native center requires three connected overlapping source segments/);
+    /native center requires five consecutive overlapping source segments/);
 });
 
-test('a confirmed three-core center renders before an independent departure', () => {
+test('native three-core centers and previews are both rejected', () => {
   const {cm}=manager();
   const prices=[1200,1000,1150,1050];
   const roles=prices.slice(0,3).map((price,index)=>({
@@ -307,16 +316,55 @@ test('a confirmed three-core center renders before an independent departure', ()
   });
   const structure=snapshot({levels:[{structural_level:0,origin:'native_segments',
     centers:[native],center_previews:[],trend_shapes:[],points:[],divergences:[]}]});
-  assert.equal([...cm._strictRenderGroups(structure,scopeContext(cm)).values()].flat().length,1);
+  assert.throws(()=>cm._strictRenderGroups(structure,scopeContext(cm)),/native center requires five/);
   roles[2].locked=false;
   assert.throws(()=>cm._strictRenderGroups(structure,scopeContext(cm)),/native center requires/);
   const preview={...native,render_kind:'center_preview',state:'forming',tradable:false,
     third_class_confirmed:false};
   structure.levels[0].centers=[];
   structure.levels[0].center_previews=[preview];
-  assert.equal([...cm._strictRenderGroups(structure,scopeContext(cm)).values()].flat().length,1);
+  assert.throws(()=>cm._strictRenderGroups(structure,scopeContext(cm)),/native center requires five/);
   delete preview.establishment_segments;
   assert.throws(()=>cm._strictRenderGroups(structure,scopeContext(cm)),/native center requires/);
+});
+
+test('native five-role evidence keeps the middle-three frame distinct from its shared overlap', () => {
+  const {sandbox}=loadChartManager();
+  const item=center();
+  item.establishment_segments[0].start_tick=1050;
+  item.establishment_segments[0].low_tick=1050;
+  const originalPoints=structuredClone(item.points);
+  assert.doesNotThrow(()=>sandbox.validateStrictCenterRenderContract(item,0));
+  assert.equal(item.core.zd_tick,1000);
+  assert.deepEqual(item.points,originalPoints);
+  const ticks=[800,900,700,1200,1000,1300];
+  item.establishment_segments=ticks.slice(1).map((end,i)=>({
+    ...item.establishment_segments[i], start_tick:ticks[i],end_tick:end,
+    low_tick:Math.min(ticks[i],end),high_tick:Math.max(ticks[i],end)}));
+  item.establishment_segments[1].high_tick=1100;
+  item.establishment_segments[3].low_tick=850;
+  item.core={zd_tick:850,zg_tick:1100};
+  assert.ok(item.establishment_segments.every(unit=>Math.max(unit.low_tick,850)<=Math.min(unit.high_tick,1100)),
+    'each separate role touches the middle-three core');
+  assert.throws(()=>sandbox.validateStrictCenterRenderContract(item,0),/five consecutive overlapping/,
+    'separate entry/exit touches do not prove a common five-segment intersection');
+});
+
+test('native roles must be consecutive and missing or unlocked evidence cannot issue a formal frame',()=>{
+  const {sandbox}=loadChartManager();
+  const validate=item=>sandbox.validateStrictCenterRenderContract(item,0,true);
+  const item=center();
+  item.establishment_segments[4].locked=false;
+  assert.throws(()=>validate(item),/five consecutive overlapping/);
+  item.render_kind='center_preview'; item.state='forming';
+  assert.doesNotThrow(()=>validate(item));
+  item.establishment_segments[4].start_time+=1;
+  assert.throws(()=>validate(item),/five consecutive overlapping/);
+  item.establishment_segments[4].start_time-=1;
+  item.establishment_segments[1].locked=false;
+  assert.throws(()=>validate(item),/five consecutive overlapping/,'confirmed roles cannot follow an unconfirmed role');
+  delete item.establishment_segments;
+  assert.throws(()=>validate(item),/five consecutive overlapping/);
 });
 
 test('retired movement types stay hidden even with a saved display switch', () => {
@@ -416,18 +464,23 @@ test('higher-period request retries a pending build and installs its verified sn
   assert.equal(redraws,1);
 });
 
-test('forming core draws before an exit exists and is replaced when the exit locks', () => {
+test('four-role forming core is rejected; fifth-role preview is replaced after locking', () => {
   const {cm,calls} = manager();
   const preview = center(1, {render_kind:'center_preview', state:'forming', third_class_confirmed:false,
     preview_status:'awaiting_leave', draw_geometry:true, establishment_leave_unit_id:null,
     initial_exit_unit_id:null, establishment_segment_ids:['u1','u2','u3','u4'],
     establishment_component_count:4, lifecycle_role_count:4, overlap_component_count:4});
   const forming = snapshot({levels:[{structural_level:0,origin:'native_segments',centers:[],center_previews:[preview]}]});
+  assert.throws(() => cm._strictRenderGroups(forming, scopeContext(cm)), /entry\/leave contract/);
+  forming.levels[0].center_previews[0] = center(1, {render_kind: 'center_preview', state: 'forming',
+    third_class_confirmed: false, preview_status: 'awaiting_segment_confirmation', draw_geometry: true});
+  forming.levels[0].center_previews[0].establishment_segments[4].locked = false;
   cm._drawStrictStructure(chartData('replace',forming),'5');
   assert.equal(calls.create.length,1);
   assert.equal(calls.create[0].options.overrides.linestyle,2);
   assert.equal(calls.create[0].options.text, '');
-  assert.match(calls.create[0].options.title, /待离开段/);
+  assert.match(calls.create[0].options.title, /待线段确认/);
+  assert.doesNotMatch(calls.create[0].options.title, /待离开段/);
   cm._drawStrictStructure(chartData(),'5');
   assert.equal(calls.create.length,2);
   assert.deepEqual(calls.remove,[calls.create[0].id]);
@@ -1310,11 +1363,13 @@ test('orphan sweep does not inspect TradingView-owned shapes outside debug mode'
 test('formal center validation accepts opposite external exits and rejects an exit inside the core', () => {
   const { sandbox } = loadChartManager();
   for (const reverse of [false, true]) {
-    const ticks = [80, 120, 90, 115, 100, 110, 70].map(p => reverse ? 200 - p : p);
+    const ticks = [80, 120, 90, 115, 100, 130, 70].map(p => reverse ? 200 - p : p);
     const units = ticks.slice(1).map((end, index) => ({
       unit_id: `u${index + 1}`, direction: end > ticks[index] ? 'up' : 'down',
       start_tick: ticks[index], end_tick: end,
       low_tick: Math.min(ticks[index], end), high_tick: Math.max(ticks[index], end),
+      start_time: BASE + index * 100, end_time: BASE + (index + 1) * 100,
+      locked: true, confirmed_at: BASE + (index + 1) * 100,
     }));
     const core = units.slice(1, 4), leave = units[5];
     const item = center(1, { core_formed: true, frame_qualified: true,
@@ -1322,8 +1377,7 @@ test('formal center validation accepts opposite external exits and rejects an ex
       center_end_available_at: null, available_at: BASE + 600,
       entering_segment: units[0], leaving_segment: leave, middle_three_components: core,
       core: { zd_tick: Math.max(...core.map(u => u.low_tick)), zg_tick: Math.min(...core.map(u => u.high_tick)) },
-      establishment_leave_unit_id: 'u6', initial_exit_unit_id: 'u6', frame_leave_unit_id: 'u6',
-      establishment_segment_ids: ['u1', 'u2', 'u3', 'u4', 'u6'],
+      frame_leave_unit_id: 'u6', establishment_segments: units.slice(0, 5),
     });
     assert.doesNotThrow(() => sandbox.validateStrictCenterRenderContract(item, 0));
     leave.end_tick = reverse ? item.core.zg_tick : item.core.zd_tick;
@@ -1333,16 +1387,19 @@ test('formal center validation accepts opposite external exits and rejects an ex
 
 test('legacy one-price physical center requires five verified closed-contact roles', () => {
   const {sandbox} = loadChartManager();
-  const roles = ['u1','u2','u3','u4','u5'].map(unit_id => ({
-    unit_id, low_tick: 990, high_tick: 1010, locked: true,
-  }));
-  const item = center(1, {core: {zd_tick: 1000, zg_tick: 1000},
+  const ticks = [900,1100,1000,1200,1100,1300];
+  const roles = ticks.slice(1).map((end, i) => ({unit_id: `u${i + 1}`,
+    direction: end > ticks[i] ? 'up' : 'down', start_tick: ticks[i], end_tick: end,
+    low_tick: Math.min(ticks[i], end), high_tick: Math.max(ticks[i], end),
+    start_time: BASE + i * 100, end_time: BASE + (i + 1) * 100,
+    locked: true, confirmed_at: BASE + (i + 1) * 100}));
+  const item = center(1, {core: {zd_tick: 1100, zg_tick: 1100},
     runtime_overlap_policy: 'physical_closed_interval_contact',
     overlap_component_count: 0, establishment_segments: roles});
   assert.doesNotThrow(() => sandbox.validateStrictCenterRenderContract(item, 0));
-  roles[4].low_tick = 1001;
-  assert.throws(() => sandbox.validateStrictCenterRenderContract(item, 0), /five-role overlap/);
-  roles[4].low_tick = 990;
+  roles[4].low_tick = 1101;
+  assert.throws(() => sandbox.validateStrictCenterRenderContract(item, 0), /five consecutive overlapping/);
+  roles[4].low_tick = 1100;
   item.runtime_overlap_policy = 'physical_positive_overlap';
   assert.throws(() => sandbox.validateStrictCenterRenderContract(item, 0), /five-role overlap/);
 });

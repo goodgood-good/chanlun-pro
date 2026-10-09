@@ -601,6 +601,9 @@ class TrendCenter:
             raise ValueError("formal establishment leave must be locked")
         if establishment_leave in self.body_units:
             raise ValueError("establishment leave must stay outside center body")
+        roles = (self.entry_unit, *self.initial_units, establishment_leave)
+        if max(item.low_tick for item in roles) > min(item.high_tick for item in roles):
+            raise ValueError("five physical establishment roles must share a price interval")
         expected_zd = max((item.low_tick for item in self.core_units))
         expected_zg = min((item.high_tick for item in self.core_units))
         if (self.zd_tick, self.zg_tick) != (expected_zd, expected_zg):

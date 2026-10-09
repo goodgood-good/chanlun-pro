@@ -20,7 +20,7 @@ from chanlun.core.strict_structure.strength import (
     compare_terminal_trend_divergence,
 )
 
-NATIVE_SIGNAL_RULE_BASIS = "user_declared_native_center_macd_v5"
+NATIVE_SIGNAL_RULE_BASIS = "user_declared_native_center_macd_v6"
 
 
 def _epoch(moment: datetime) -> int:
@@ -108,6 +108,8 @@ def _center_sources_known(center, unit_by_id, as_of):
              center.completion_return_unit)
     return (
         center.structural_level == 0 and center.source_kind is SourceKind.SEGMENT
+        and center.formation_rule == "five_role" and len(center.establishment_units) == 5
+        and max(u.low_tick for u in center.establishment_units) <= min(u.high_tick for u in center.establishment_units)
         and all(
             unit_by_id.get(unit.unit_id) == unit
             and unit.source_kind is SourceKind.SEGMENT

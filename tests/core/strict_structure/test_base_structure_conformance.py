@@ -206,8 +206,8 @@ def test_strict_base_profile_contains_only_current_production_rules():
     config = dict(strict_base_config())
 
     assert STRICT_BASE_PROFILE_ID == "chanlun-source-faithful-base"
-    assert config["center_seed_rule"] == "three-locked-segment-core-closed-overlap-including-single-price-v3"
-    assert config["chart_structure_rule"] == "native-three-core-segment-centers-completed-inner-view-v3"
+    assert config["center_seed_rule"] == "five-locked-consecutive-segments-common-overlap-entry-middle-three-exit-v4"
+    assert config["chart_structure_rule"] == "native-five-role-segment-centers-completed-inner-view-v4"
     assert config["stroke_rule"] == "old-user-path-b-completed-prefix-v14"
     assert config["stroke_distance_rule"] == "merged-centers-at-least-four"
     assert config["stroke_secondary_fractal_rule"] == "retained-facts-without-internal-extreme-veto"
@@ -246,10 +246,10 @@ def test_strict_base_profile_contains_only_current_production_rules():
         "closed-core-contact-is-oscillation-strict-outside-return-v4"
     )
     assert config["center_scan_rule"] == (
-        "three-segment-core-causal-lifecycle-owner-v2"
+        "five-role-physical-seed-causal-lifecycle-owner-v3"
     )
     # This is an explicit engineering view policy, not an author's unique decomposition.
-    assert config["center_operational_view_rule"] == "completed_inner_view_v1"
+    assert config["center_operational_view_rule"] == "completed_inner_five_role_view_v1"
     assert config["center_operational_view_scope"] == (
         "strictly-inner-core-independent-connector-completed-same-level-departure-return"
     )
