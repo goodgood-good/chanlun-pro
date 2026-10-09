@@ -1,7 +1,7 @@
 """Presentation and manual review for the screening workbench.
 
-Reads only the latest screening run. Opening the workbench never starts a
-market scan. Run identities keep current candidates and manual reviews aligned.
+Publishes current results progressively, retaining labelled previous rows until
+their replacement is checked. Opening the workbench never starts a market scan.
 """
 
 from __future__ import annotations
@@ -116,15 +116,15 @@ _POINT_INDEX_FIELDS = (
 )
 
 
-def _dashboard_projection(payload, compact):
-    rows = _current_rows(payload, payload.get("run_id", "idle"))
+def _compact_rows(rows, compact):
     if compact:
         fields = {"id", "code", "name", "market", "frequency", "origin", "stage", "latest_price", "candidate_evidence_version",
                   "source_closed_at", "gain_pct", "confirmation_age_sessions", "selection_available_at",
-                  "evidence_available", "evidence_chart_available", "operational_macd_risk", "nested_confirmation", "exit_plan"}
+                  "evidence_available", "evidence_chart_available", "operational_macd_risk", "nested_confirmation", "exit_plan",
+                  "latest_recheck_at", "latest_recheck_closed_at", "selection_check_version", "refresh_state", "result_source"}
         rows = [{**{key: value for key, value in row.items() if key in fields and value is not None},
                  "point": {key: row["point"][key] for key in _POINT_INDEX_FIELDS if row["point"].get(key) is not None},
-                 "detail_loaded": False} for row in rows]
+                 "detail_loaded": bool(row.get('refresh_state'))} for row in rows]
         for row in rows:
             if row.get("exit_plan"):
                 row["exit_plan"] = {key: value for key, value in row["exit_plan"].items() if key in {
@@ -133,10 +133,16 @@ def _dashboard_projection(payload, compact):
             nested = row.get("nested_confirmation")
             if nested:
                 row["nested_confirmation"] = {key: nested.get(key) for key in ("state", "frequency")}
+    return rows
+
+
+def _dashboard_projection(payload, compact):
     return {**{key: value for key, value in payload.items() if key not in {
         "selected", "observations", "entry_waiting", "consolidation_alerts", "processed_symbols",
         "u295_lower_structural_witnesses", "recent_rejections", "verified_periods",
-    }}, "_workbench_rows": rows}
+    }}, "_workbench_rows": _current_rows(payload, payload.get('run_id', 'idle')),
+        '_workbench_verified': [(r.get('market','a'),r['code'],r['frequency']) for r in payload.get('verified_periods',[])],
+        '_workbench_processed': [(r.get('market','a'),r['code']) for r in payload.get('processed_symbols',[])]}
 
 
 def candidate_detail(source, candidate_id):
@@ -202,9 +208,12 @@ def dashboard(*, background=False, compact=False):
     source = result.get("run_id", "idle")
     rows, removed, live_version, unverified = _live_rows(result.get("_workbench_rows", _current_rows(result, source)),
                                             source, result.get("current_source_revision"))
+    from .screening_rollover import display_for
+    rows, previous_count = display_for(str(manager.root)).merge(result, rows, project=_current_rows, live_filter=_live_rows)
+    rows = _compact_rows(rows, compact)
     status = {k: v for k, v in result.items() if k not in (
         "selected", "observations", "entry_waiting", "consolidation_alerts", "recent_rejections", "rejection_counts", "reason_labels", "errors",
-        "_workbench_rows", "processed_symbols", "u295_lower_structural_witnesses", "verified_periods",
+        "_workbench_rows", "_workbench_verified", "_workbench_processed", "processed_symbols", "u295_lower_structural_witnesses", "verified_periods",
     )}
     status["error_count"] = (result.get("error_count") if result.get("results_loading")
                              else len(result.get("errors", [])))
@@ -213,6 +222,8 @@ def dashboard(*, background=False, compact=False):
     status["live_exclusion_count"] = removed
     status["live_unverified_count"] = unverified
     status["live_recheck_version"] = live_version
+    status['previous_result_count'] = previous_count
+    status['current_result_count'] = len(rows) - previous_count
     for row in rows:
         key = (row["market"], row["code"], row.get("source_closed_at"))
         row["higher_context"] = context["rows"].get(key) or {

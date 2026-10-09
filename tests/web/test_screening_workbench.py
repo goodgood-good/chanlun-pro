@@ -343,7 +343,7 @@ def test_dashboard_reads_current_run_without_starting_scan_or_promoting_sector_h
     assert data["sector_catalog_at"].startswith("2026-09-07")
     assert "current_regime" not in data["sectors"][0]
     assert before == {p: p.stat().st_mtime_ns for p in manager.root.rglob("*")
-                      if p.is_file() and p.name != "verified_results.json.gz"}
+                      if p.is_file() and p.name not in {"verified_results.json.gz", "workbench_display.json.gz"}}
     manager.start.assert_not_called()
 
 
@@ -519,7 +519,7 @@ def test_new_empty_observations_do_not_fall_back_to_old_rejection_records(fixtur
 
 
 @pytest.mark.parametrize("status", ["starting", "running", "completed", "failed", "cancelled"])
-def test_latest_empty_run_never_falls_back_to_older_candidates(fixture_run, status):
+def test_previous_results_remain_labelled_until_new_run_finishes(fixture_run, status):
     manager, old_id, archive = fixture_run
     latest_id = "b" * 32
     # An obsolete snapshot must not even be parsed on the latest-results path.
@@ -534,9 +534,50 @@ def test_latest_empty_run_never_falls_back_to_older_candidates(fixture_run, stat
     data = workbench.dashboard()
     assert data["source"] == latest_id
     assert data["status"]["status"] == status
-    assert data["candidates"] == []
-    assert data["point_counts"] == {}
+    if status == 'completed':
+        assert data['candidates'] == []
+        assert data['point_counts'] == {}
+    else:
+        assert len(data['candidates']) == 1
+        assert data['candidates'][0]['refresh_state'] == 'pending'
+        assert data['candidates'][0]['result_source'] == old_id
+        assert data['status']['current_result_count'] == 0
+        # The display overlay never enters the current scanner or detail API.
+        assert manager.results()['selected'] == []
+        with pytest.raises(ValueError):
+            workbench.candidate_detail(latest_id,data['candidates'][0]['id'])
     assert (manager.root / old_id / "results.jsonl").is_file()
+
+
+def test_http_reload_retains_previous_rows_then_publishes_final_empty_result(fixture_run):
+    manager, old_id, _ = fixture_run
+    manager.results()
+    manager.start = Mock(side_effect=AssertionError('reading cannot start a scan'))
+    app = create_app(test_config={'TESTING':True,'LOGIN_DISABLED':True,'VALIDATE_WEB_SECURITY':False})
+    try:
+        first = app.test_client().get('/screening/workbench?compact=1').get_json()
+        previous_id = first['candidates'][0]['id']
+        new_id = 'b'*32
+        directory = manager.root/new_id
+        state = {'run_id':new_id,'status':'running','completed':0,'total':1,
+                 'worker_pid':os.getpid(),'source_revision':screening.source_revision(),'updated_at':time.time()}
+        screening.write_json(directory/'status.json',state)
+        screening.write_json(manager.root/'latest.json',{'run_id':new_id})
+        for _ in range(2):
+            body = app.test_client().get('/screening/workbench?compact=1').get_json()
+            assert body['source']==new_id and len(body['candidates'])==1
+            assert body['candidates'][0]['id']==previous_id
+            assert body['candidates'][0]['refresh_state']=='pending'
+            assert body['candidates'][0]['detail_loaded'] is True
+            assert body['status']['current_result_count']==0
+        (directory/'results.jsonl').write_text(json.dumps({'code':'SH.600088','rows':[]})+'\n',encoding='utf-8')
+        screening.write_json(directory/'status.json',{**state,'status':'completed','completed':1})
+        manager.results()
+        final = app.test_client().get('/screening/workbench?compact=1').get_json()
+        assert final['candidates']==[] and final['status']['previous_result_count']==0
+        manager.start.assert_not_called()
+    finally:
+        app.extensions['shutdown_runtime_services']()
 
 
 def test_review_survives_reload_is_owned_and_pinned_to_actual_candidate(fixture_run):

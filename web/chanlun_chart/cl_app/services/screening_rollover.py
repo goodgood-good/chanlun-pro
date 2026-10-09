@@ -1,0 +1,149 @@
+"""A display-only rolling list; never an input to screening or notifications."""
+from collections import defaultdict
+from copy import deepcopy
+from functools import lru_cache
+import gzip
+import json
+import os
+from pathlib import Path
+import re
+import threading
+import zlib
+
+SCHEMA = 'screening-workbench-display-v1'
+FILENAME = 'workbench_display.json.gz'
+RUN_ID = re.compile(r'[a-f0-9]{32}')
+
+
+def _read(path):
+    try:
+        raw = path.read_bytes()
+        return json.loads(gzip.decompress(raw) if path.suffix == '.gz' else raw)
+    except (OSError, ValueError, EOFError, zlib.error):
+        return None
+
+
+def _period(row):
+    return row.get('market', 'a'), row['code'], row['frequency']
+
+
+def _valid_snapshot(saved):
+    return (isinstance(saved, dict) and saved.get('schema') == SCHEMA
+        and isinstance(saved.get('run_id'), str) and RUN_ID.fullmatch(saved['run_id'])
+        and isinstance(saved.get('through'), int) and isinstance(saved.get('rows'), list)
+        and all(isinstance(row, dict) and all(isinstance(row.get(key), str) for key in ('id','code','frequency'))
+                and isinstance(row.get('point'), dict) for row in saved['rows']))
+
+
+def _in_scope(row, settings, universe):
+    if settings.get('frequencies') and row['frequency'] not in settings['frequencies']:
+        return False
+    if settings.get('point_types') and row['point'].get('point_type') not in settings['point_types']:
+        return False
+    symbol = row.get('market', 'a'), row['code']
+    if universe is not None:
+        return symbol in universe
+    scope = settings.get('scope')
+    if scope == 'codes':
+        return symbol[0] == 'a' and symbol[1] in settings.get('codes', [])
+    if scope == 'symbols':
+        return symbol in {(r.get('market', 'a'), r['code']) for r in settings.get('symbols', [])}
+    return scope != 'all_a' or symbol[0] == 'a'
+
+
+class RollingDisplay:
+    def __init__(self, root):
+        self.root = Path(root)
+        self.lock = threading.Lock()
+        self.snapshot = None
+        self.loaded = False
+
+    def _bootstrap(self, result, project):
+        """Read saved, previously verified output as labelled history only."""
+        candidates = []
+        for directory in self.root.iterdir() if self.root.exists() else ():
+            if not RUN_ID.fullmatch(directory.name) or not directory.is_dir() or directory.name == result.get('run_id'):
+                continue
+            state = _read(directory / 'status.json')
+            if not isinstance(state, dict):
+                continue
+            if state.get('status') != 'completed' or state.get('run_id') != directory.name:
+                continue
+            started = state.get('started_at', 0)
+            if result.get('started_at') and started >= result['started_at']:
+                continue
+            candidates.append((started, directory))
+        for _, directory in sorted(candidates, key=lambda item: item[0], reverse=True):
+            saved = _read(directory / 'verified_results.json.gz')
+            if not isinstance(saved, dict):
+                continue
+            payload = saved.get('payload', {})
+            if (saved.get('schema') != 'screening-verified-results-v1' or not isinstance(payload, dict)
+                    or payload.get('run_id') != directory.name):
+                continue
+            try:
+                rows = project(payload, directory.name)
+            except (KeyError, TypeError, ValueError):
+                continue
+            return {'run_id': directory.name, 'rows': rows, 'through': payload.get('results_through', 0)}
+        return None
+
+    def merge(self, result, rows, *, project, live_filter):
+        source = result.get('run_id', 'idle')
+        if not RUN_ID.fullmatch(source):
+            return rows, 0
+        with self.lock:
+            if not self.loaded:
+                saved = _read(self.root / FILENAME)
+                if _valid_snapshot(saved):
+                    self.snapshot = saved
+                self.loaded = True
+            through = result.get('results_through', result.get('completed', 0)) or 0
+            finished = result.get('status') == 'completed' and not result.get('results_loading')
+            if self.snapshot is None and not finished:
+                self.snapshot = self._bootstrap(result, project)
+            saved = self.snapshot or {}
+            restoring = result.get('results_loading') and (not result.get('results_available') or through < saved.get('through', 0))
+            prior = saved.get('rows', []) if saved.get('run_id') != source or restoring else [
+                row for row in saved.get('rows', []) if row.get('refresh_state')]
+            universe = _read(self.root / source / 'universe.json')
+            universe = {(r.get('market', 'a'), r['code']) for r in universe} if isinstance(universe, list) else None
+            replaced = {tuple(p) for p in result.get('_workbench_verified', [])} | {_period(row) for row in rows}
+            processed = {tuple(p) for p in result.get('_workbench_processed', [])}
+            groups = defaultdict(list)
+            if not finished:
+                for row in prior:
+                    if _period(row) in replaced or not _in_scope(row, result.get('settings', {}), universe):
+                        continue
+                    old_source = row.get('result_source', saved.get('run_id'))
+                    groups[old_source].append({**row, 'result_source': old_source,
+                        'refresh_state': 'limited' if _period(row)[:2] in processed else 'pending',
+                        'detail_loaded': True, 'evidence_chart_available': False})
+            previous = []
+            for old_source, old_rows in groups.items():
+                previous.extend(live_filter(old_rows, old_source, result.get('current_source_revision'))[0])
+            merged = [*rows, *previous]
+            merged.sort(key=lambda row: (bool(row.get('refresh_state')),
+                -(row.get('selection_available_at') or row['point'].get('available_at') or 0), row['code'], row['frequency']))
+            snapshot = {'schema': SCHEMA, 'run_id': source, 'through': through, 'rows': merged}
+            # Slow requests may finish after a newer batch/prefix was published.
+            latest = _read(self.root / 'latest.json') or {}
+            if (latest.get('run_id') == source and not (saved.get('run_id') == source and saved.get('through', 0) > through)
+                    and snapshot != self.snapshot):
+                self.snapshot = snapshot
+                path = self.root / FILENAME
+                temporary = path.with_name(f'{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+                try:
+                    temporary.write_bytes(gzip.compress(json.dumps(snapshot, ensure_ascii=False).encode('utf-8'), compresslevel=1))
+                    os.replace(temporary, path)
+                except OSError:
+                    pass  # A display cache failure cannot discard current results.
+                finally:
+                    try: temporary.unlink(missing_ok=True)
+                    except OSError: pass
+            return deepcopy(merged), len(previous)
+
+
+@lru_cache(maxsize=8)
+def display_for(root):
+    return RollingDisplay(root)

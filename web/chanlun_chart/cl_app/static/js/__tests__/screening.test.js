@@ -483,6 +483,62 @@ function withCandidate() {
   return data;
 }
 
+test('a new scan keeps the previous candidate and chart while its response is pending',async()=>{
+  let latest=withCandidate(),release;
+  latest.status.settings={...latest.status.settings,scope:'all_a',frequencies:['5m']};
+  let started=false;
+  const pending=new Promise(resolve=>{release=resolve;});
+  const ui=page(async (url)=>{
+    if(url==='/screening/start'){
+      started=true;latest={...latest,source:'next',status:{...latest.status,run_id:'next',status:'running',completed:0}};
+      return response(latest.status);
+    }
+    if(started&&url.startsWith('/screening/workbench'))return pending;
+    return dispatch(latest,url);
+  });await settle();
+  const chart=ui.get('chart-frame').src;
+  const starting=ui.get('screen-form').listeners.submit({preventDefault(){}});await settle();
+  assert.equal(ui.get('signal-list').children.length,1);
+  assert.match(ui.get('signal-list').querySelector('.queue-refresh').textContent,/上次结果.*待本轮更新/);
+  assert.equal(ui.get('chart-frame').src,chart);
+  assert.equal(ui.get('signal-count').textContent,0);
+  assert.equal(ui.get('review-fields').disabled,true);
+  const old={...latest.candidates[0],refresh_state:'pending',result_source:'a'};
+  const fresh={...old,id:'fresh',code:'SH.600001',name:'new result',refresh_state:undefined};
+  release(response({...latest,candidates:[fresh,old],status:{...latest.status,completed:1,previous_result_count:1,current_result_count:1}}));
+  await starting;await settle();
+  assert.equal(ui.get('signal-list').children.length,2);
+  assert.equal(ui.get('signal-count').textContent,1);
+  assert.equal(ui.get('signal-list').querySelectorAll('.queue-refresh').length,1);
+});
+
+test('an automatic new run and failed fetch retain labelled previous results until replacement',async()=>{
+  let latest=withCandidate(),fail=false;
+  latest.status.settings={...latest.status.settings,scope:'all_a',frequencies:['5m']};
+  const ui=page(async url=>fail&&url.startsWith('/screening/workbench')
+    ?response({error:'temporary result read failure'},503):dispatch(latest,url));await settle();
+  latest={...latest,source:'next',status:{...latest.status,run_id:'next',status:'running',completed:0}};fail=true;
+  await ui.timers[0]();await settle();
+  assert.equal(ui.get('signal-list').children.length,1);
+  assert.match(ui.get('decision-title').textContent,/上次结果/);
+  assert.equal(ui.get('review-fields').disabled,true);
+  fail=false;latest={...latest,candidates:[],status:{...latest.status,status:'completed',completed:1}};
+  await ui.timers[0]();await settle();
+  assert.equal(ui.get('signal-list').children.length,0);
+  assert.equal(ui.get('selected-detail').hidden,true);
+});
+
+test('reopening a running scan displays server-retained rows without requesting current evidence',async()=>{
+  const latest=withCandidate();latest.status={...latest.status,status:'running',previous_result_count:1,current_result_count:0,results_loading:true,results_available:false};
+  latest.candidates[0]={...latest.candidates[0],refresh_state:'pending',result_source:'old',detail_loaded:true};
+  const ui=page(async url=>dispatch(latest,url));await settle();
+  assert.equal(ui.get('signal-list').children.length,1);
+  assert.match(ui.get('selected-tags').textContent,/上次结果/);
+  assert.equal(ui.get('chart-source').disabled,true);
+  assert.equal(ui.get('review-fields').disabled,true);
+  assert.match(ui.get('page-message').textContent,/逐步替换/);
+});
+
 test('the actual template supports rendering a completed result without invented elements',async()=>{
   const latest=withCandidate();
   const ui=page(async url=>dispatch(latest,url),undefined,false,true);

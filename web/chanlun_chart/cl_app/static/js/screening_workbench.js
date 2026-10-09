@@ -299,7 +299,8 @@
     function renderSummary() {
       if (!state.data) return;
       const {status,candidates,sectors}=state.data;
-      const initialLoading=status.results_loading&&!status.results_available;
+      const currentCandidates=candidates.filter(row=>!row.refresh_state);
+      const initialLoading=status.results_loading&&!status.results_available&&!candidates.length;
       renderRunControls();
       const incompleteRun=status.status==='completed'&&status.total>0
         &&status.error_count/status.total>=.2;
@@ -309,6 +310,7 @@
       const nativeSignals=!status.run_id || settings.alert_mode==='native_center_signals'
         || candidates.some(row=>row.point?.evidence_scope==='native_center_signal');
       $('run-detail').textContent=[status.total ? `已处理 ${status.completed||0} / ${status.total} 只` : '',
+        status.previous_result_count?`本轮结果 ${status.current_result_count||0} 条 · 保留上次结果 ${status.previous_result_count} 条，逐步更新`:'',
         status.results_through!==undefined?`已核验 ${status.results_through} 只${status.results_partial?'，候选持续更新':''}`:'',
         status.effective_workers?`并行 ${status.effective_workers} 进程`:settings.workers?`设定 ${settings.workers} 进程`:'',
         settings.strategy===STRATEGY?'5m 主信号 · 区间内 1m 结构确认':settings.frequencies?.map(f=>`${f} K线周期`).join(' / '),
@@ -316,9 +318,9 @@
         settings.minimum_operating_frequency?`MACD基础避险最低周期 ${settings.minimum_operating_frequency}`:'',
         settings.recent_sessions ? `最近 ${settings.recent_sessions} 个交易日确认` : '',
         status.cancel_requested&&activeRun(status.status)?'正在取消选股计算':''].filter(Boolean).join(' · ');
-      $('symbol-count').textContent=initialLoading?'—':new Set(candidates.map(r=>r.market+':'+r.code)).size;
-      $('signal-count').textContent=initialLoading?'—':candidates.length;
-      const waiting=candidates.filter(isWaiting).length;
+      $('symbol-count').textContent=initialLoading?'—':new Set(currentCandidates.map(r=>r.market+':'+r.code)).size;
+      $('signal-count').textContent=initialLoading?'—':currentCandidates.length;
+      const waiting=currentCandidates.filter(isWaiting).length;
       const higher=state.data.higher_context||{};
       $('higher-context-status').textContent=higher.status==='disabled'?'递归 30m 走势背景已停用；请直接选择 30m 中枢提醒。':higher.status==='completed'?
         `30m 独立背景已完成 ${higher.completed}/${higher.total} 只；按本轮 5m 截止时刻核对。方向筛选只影响页面，不改变买卖点、监听或通知。`:
@@ -327,14 +329,14 @@
         higher.status==='failed'?`30m 背景计算失败：${higher.error||'请查看任务日志'}`:
         status.source_current===false?'本轮为旧版选股结果；30m 独立背景将在新一轮选股完成后计算。':'30m 独立背景等待本轮选股完成。';
       $('stage-counts').textContent=initialLoading?'正在读取候选…':nativeSignals?
-        `${status.frozen_native_review?'原截止时刻已确认买卖点':'正式买卖点提醒'} ${candidates.length-waiting} 条`:
-        `筛选已通过 ${candidates.length-waiting} · 条件待齐 ${waiting}`;
-      $('signal-breakdown').textContent=initialLoading?'正在读取候选…':nativeSignals?`本周期中枢信号 ${candidates.length-waiting} 条`:`筛选通过 ${candidates.length-waiting} · 待齐 ${waiting}`;
+        `${status.frozen_native_review?'原截止时刻已确认买卖点':'正式买卖点提醒'} ${currentCandidates.length-waiting} 条`:
+        `筛选已通过 ${currentCandidates.length-waiting} · 条件待齐 ${waiting}`;
+      $('signal-breakdown').textContent=initialLoading?'正在读取候选…':status.previous_result_count?`另有 ${status.previous_result_count} 条上次结果待更新`:nativeSignals?`本周期中枢信号 ${currentCandidates.length-waiting} 条`:`筛选通过 ${currentCandidates.length-waiting} · 待齐 ${waiting}`;
       $('sector-count').textContent=sectors.filter(s=>s.signal_count>0).length;
       $('review-count').textContent=Object.keys(state.reviews.latest).length;
       $('error-count').textContent=status.error_count ?? '—';
       $('point-counts').replaceChildren(...Object.entries(POINTS).map(([p,label])=>{
-        const rows=candidates.filter(row=>row.point?.point_type===p);
+        const rows=currentCandidates.filter(row=>row.point?.point_type===p);
         const confirmed=rows.filter(row=>pointStage(row)==='confirmed').length;
         return node('span',nativeSignals?`${label} ${rows.length} · 已确认 ${confirmed}`:`${label} ${rows.length} · 正式点已确认 ${confirmed}`);
       }));
@@ -407,6 +409,7 @@
           b.append(node('small','已选最低周期 MACD 基础避险','badge'));
         if(row.origin!=='watchlist')b.append(node('small',higherContextText(row.higher_context),'queue-context'));
         if(row.latest_recheck_closed_at)b.append(node('small',`复核行情截止 ${date(row.latest_recheck_closed_at)}`,'queue-freshness'));
+        if(row.refresh_state)b.append(node('small',row.refresh_state==='limited'?'本轮数据受限 · 保留上次结果':'上次结果 · 待本轮更新','queue-refresh badge'));
         b.addEventListener('click',()=>{selectRow(row);renderQueue();mobileView('chart');});$('signal-list').append(b);
       }
       $('queue-empty').hidden=!!state.rows.length;
@@ -419,9 +422,29 @@
     }
     function list(id, values) {$(id).replaceChildren(...values.map(v=>node('li',v)));}
     function candidateDetailKey(row) {
-      return [state.data?.source,row.candidate_evidence_version??state.data?.status.evidence_version,state.data?.status.result_reader_revision,row.selection_check_version,row.id].join(':');
+      return [state.data?.source,row.refresh_state,row.candidate_evidence_version??state.data?.status.evidence_version,state.data?.status.result_reader_revision,row.selection_check_version,row.id].join(':');
+    }
+    function selectPreviousRow(row) {
+      const changed=state.selected?.id!==row.id;
+      state.selected=row;
+      if(changed)state.frequency=row.frequency||'5m';
+      $('chart-source').value='live';
+      $('selected-detail').hidden=false;$('selected-title').textContent=`${row.name||row.code} · ${row.code}`;
+      $('selected-tags').textContent=`${row.frequency} · ${pointLabel(row.point)} · 上次结果`;
+      $('decision-title').textContent=row.refresh_state==='limited'?'本轮数据受限 · 保留上次结果':'上次结果 · 待本轮更新';
+      $('decision-detail').textContent=`上次结果行情截止 ${date(row.source_closed_at)}。本轮检查完成后自动替换，当前图表可继续查看。`;
+      $('candidate-detail-state').textContent='';
+      for(const id of ['evidence-established','evidence-missing','evidence-risk','exit-price-detail','exit-price-sources','confirmation-exit-detail'])list(id,[]);
+      $('anchor-price').textContent=price(row.point?.anchor_price);
+      $('invalidation-price').textContent=price(row.point?.invalidation_price);$('close-price').textContent=price(row.latest_price);
+      const exits=row.exit_plan&&globalThis.PointExitInfo?.describe(row.exit_plan);
+      $('stop-loss-price').textContent=exits?.stop||'—';$('take-profit-price').textContent=exits?.profit||'—';
+      $('live-quote').textContent=quoteText(state.quotes.get(`${row.market}:${row.code}`));
+      $('raw-evidence').textContent=JSON.stringify(row,null,2);
+      renderReview();renderChart();
     }
     function selectRow(row) {
+      if(row.refresh_state){selectPreviousRow(row);return;}
       const detailKey=candidateDetailKey(row);
       if(row.detail_loaded===false&&row.origin!=='watchlist'){
         const cached=state.details.get(detailKey);
@@ -595,7 +618,7 @@
     }
     function renderChart(force=false) {
       const row=state.selected;if(!row)return;
-      const evidenceAvailable=row.origin!=='watchlist'&&row.evidence_chart_available!==false;
+      const evidenceAvailable=!row.refresh_state&&row.origin!=='watchlist'&&row.evidence_chart_available!==false;
       if(!evidenceAvailable)$('chart-source').value='live';
       const frozen=evidenceAvailable&&$('chart-source').value==='evidence';
       $('chart-source').disabled=!evidenceAvailable;
@@ -649,11 +672,11 @@
       if(!state.selected)return;
       const id=state.selected.id, stored=state.reviews.latest[id],draft=state.drafts.get(draftKey());
       const values=draft||stored;
-      $('review-fields').disabled=state.selected.origin==='watchlist'||state.selected.detail_loaded===false;
+      $('review-fields').disabled=!!state.selected.refresh_state||state.selected.origin==='watchlist'||state.selected.detail_loaded===false;
       for(const select of $('review-form').querySelectorAll('select[name]'))select.value=values?.judgements?.[select.name]|| (select.name==='disposition'?'WATCH':'UNCERTAIN');
       $('review-notes').value=values?.notes||'';
       $('review-state').textContent=stored?`最近保存 ${date(stored.saved_at)}`:'待人工复核';
-      $('review-message').textContent=state.selected.origin==='watchlist'?'关注标的需先产生正式候选，才能保存该候选的复核记录。':draft?'未保存的草稿已保留':'';
+      $('review-message').textContent=state.selected.refresh_state?'本轮结果更新后可保存复核记录。':state.selected.origin==='watchlist'?'关注标的需先产生正式候选，才能保存该候选的复核记录。':draft?'未保存的草稿已保留':'';
       const history=state.reviews.history.filter(r=>r.candidate_id===id);
       $('review-history-count').textContent=history.length;
       $('review-history').replaceChildren(...history.map(r=>{const a=node('article');a.append(node('strong',date(r.saved_at)),node('p',r.notes||'未填写笔记'),node('small',`处置：${{WATCH:'继续观察',REJECT:'拒绝',NEEDS_MORE_DATA:'需要更多数据'}[r.judgements.disposition]}`));return a;}));
@@ -668,9 +691,24 @@
     function showResults(data) {
       const changed=state.data?.source!==data.source;
       state.data=data;
-      if(changed){clearSelection();state.details.clear();state.queuePage=1;state.reviews={latest:{},history:[]};state.reviewsLoadedSource=null;state.reviewSerial++;state.filters.sector='';}
+      if(changed){
+        if(!data.candidates.some(row=>row.id===state.selected?.id))clearSelection();
+        state.details.clear();state.queuePage=1;state.reviews={latest:{},history:[]};state.reviewsLoadedSource=null;state.reviewSerial++;state.filters.sector='';
+      }
       renderSummary();renderSectors();renderQueue();
       void refreshQuotes();
+    }
+    function showRunTransition(status) {
+      const source=status.run_id||'idle';
+      if(source===state.data?.source){showResults({...state.data,status});return;}
+      const settings=status.settings||{};
+      const candidates=(state.data?.candidates||[]).filter(row=>
+        (!settings.frequencies?.length||settings.frequencies.includes(row.frequency))&&
+        (!settings.point_types?.length||settings.point_types.includes(row.point?.point_type))&&
+        (settings.scope!=='codes'||row.market==='a'&&(settings.codes||[]).includes(row.code))&&
+        (settings.scope!=='all_a'||row.market==='a')).map(row=>({...row,
+          result_source:row.result_source||state.data.source,refresh_state:'pending',detail_loaded:true,evidence_chart_available:false}));
+      showResults({...state.data,source,candidates,status:{...status,previous_result_count:candidates.length,current_result_count:0}});
     }
     function renderRunControls() {
       const status=state.data?.status,active=activeRun(status?.status);
@@ -739,9 +777,7 @@
       let changed=false;
       try {
         const status=await api('/screening/'+action,action==='start'?screeningSettings():{});
-        const source=status.run_id||'idle';
-        showResults(action==='cancel'&&source===state.data.source?{...state.data,status}:
-          {source,status,candidates:[],sectors:[],point_counts:{}});
+        showRunTransition(status);
         state.version='';changed=true;
       }catch(error){message(error.message);}
       finally{state.mutationPending=false;renderRunControls();}
@@ -767,21 +803,19 @@
           if(state.data?.source===(status.run_id||'idle')&&[
             'source_current','current_source_revision','result_reader_revision','live_recheck_version'
           ].some(key=>status[key]!==state.data.status[key]))newerProofStatus=status;
-          if(version(status)===state.version){
+          if(version(status)===state.version&&!state.data?.status.previous_result_count){
             if(state.reviewsLoadedSource!==state.data?.source)await loadReviews(state.data.source,serial);
             if(serial===state.serial)message('');
             return;
           }
           if(state.data&&state.data.source!==(status.run_id||'idle')) {
-            // Once a newer run is known, discard the old display even if the
-            // new result request is slow or fails. A failed read must retry.
-            showResults({source:status.run_id||'idle',status,candidates:[],sectors:[],point_counts:{}});
+            showRunTransition(status);
           }
         }
         const data=await api('/screening/workbench?compact=1');
         if(serial!==state.serial)return;
         showResults(data);state.version=data.status.results_loading?'':version(data.status);
-        message(data.status.results_loading?(data.status.results_available?`已展示 ${data.status.results_through} 只标的中通过核验的候选，正在读取新增结果。`:RESULTS_LOADING):'');
+        message(data.status.results_loading?(data.status.previous_result_count?'正在读取本轮结果，上次结果将逐步替换。':data.status.results_available?`已展示 ${data.status.results_through} 只标的中通过核验的候选，正在读取新增结果。`:RESULTS_LOADING):'');
         if(data.status.results_loading&&!data.status.results_available)return;
         state.reviewsLoadedSource=null;
         await loadReviews(data.source,serial);
@@ -791,8 +825,10 @@
             // The status read has already superseded the displayed proof.
             // A failed result read cannot keep those rows actionable. Preserve
             // reviews/drafts and retry the verified list on the next poll.
+            const previous=(state.data?.candidates||[]).filter(row=>row.refresh_state);
             showResults({source:newerProofStatus.run_id||'idle',status:{...newerProofStatus,
-              results_loading:true,results_available:false},candidates:[],sectors:[],point_counts:{}});
+              previous_result_count:previous.length,current_result_count:0,
+              results_loading:true,results_available:false},candidates:previous,sectors:state.data?.sectors||[],point_counts:{}});
             state.version='';
           }
           message(error.message);
@@ -1036,7 +1072,7 @@
     document.addEventListener('keydown',e=>{if(e.key==='Escape')theater(false);});
     $('review-form').addEventListener('input',()=>{if(state.selected)state.drafts.set(draftKey(),reviewFormValue());});
     $('review-form').addEventListener('submit',async event=>{
-      event.preventDefault();if(!state.selected||state.selected.origin==='watchlist')return;
+      event.preventDefault();if(!state.selected||state.selected.origin==='watchlist'||state.selected.refresh_state)return;
       const source=state.data.source,candidate_id=state.selected.id,key=draftKey(),submitted=reviewFormValue();
       const submittedDraft=state.drafts.get(key);
       if(state.savingReview)return;
