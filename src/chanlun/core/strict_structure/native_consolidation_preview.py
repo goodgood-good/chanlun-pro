@@ -91,7 +91,7 @@ def build_native_consolidation_previews(units, centers, strength, frame, histogr
         if not _center_sources_known(center, by_id, as_of):
             continue
         owned = {u.unit_id for u in (*center.body_units, *center.establishment_units,
-                                    *center.failed_departure_units)}
+                                    *center.failed_departure_units, *center.excursion_units)}
         if center.pending_leave_unit is not None:
             owned.add(center.pending_leave_unit.unit_id)
         pairs = []

@@ -73,18 +73,26 @@ def test_live_and_frozen_native_exit_references_agree_for_all_six_signal_classes
     from chanlun.screening.runner import snapshot_for
     from chanlun.cl_utils.point_exits import build_point_exit_plans
 
-    frame = pd.read_parquet(Path("tests/fixtures/SZ.002299_1m.parquet"))
-    frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="recorded-raw")
-    snapshot = snapshot_for(frame, "SZ.002299", "1m")
-    original = deepcopy(snapshot)
-    live = snapshot["point_exit_plans"]
-    frozen = build_point_exit_plans(snapshot)
-    assert frozen == live
-    assert {point["point_type"] for point in snapshot["levels"][0]["points"]} == {
+    observed_classes = set()
+    reverse_first_class = False
+    for name, code, frequency in (
+        ("SZ.002299_1m.parquet", "SZ.002299", "1m"),
+        ("segment_completion/SH_600004_5m.parquet", "SH.600004", "5m"),
+    ):
+        frame = pd.read_parquet(Path("tests/fixtures") / name)
+        frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="recorded-raw")
+        snapshot = snapshot_for(frame, code, frequency)
+        original = deepcopy(snapshot)
+        live = snapshot["point_exit_plans"]
+        assert build_point_exit_plans(snapshot) == live
+        observed_classes.update(point["point_type"] for point in snapshot["levels"][0]["points"])
+        reverse_first_class |= any(plan["take_profit"].get("point_type") in {"1buy", "1sell"}
+                                   for plan in live.values())
+        assert snapshot == original
+    assert observed_classes == {
         "1buy", "2buy", "3buy", "1sell", "2sell", "3sell",
     }
-    assert any(plan["take_profit"].get("point_type") in {"1buy", "1sell"} for plan in live.values())
-    assert snapshot == original
+    assert reverse_first_class
 
     missing = deepcopy(snapshot)
     point = missing["levels"][0]["points"][-1]

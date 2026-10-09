@@ -117,12 +117,13 @@ def test_recorded_selected_scan_preserves_disjoint_successor_bridge():
             unit.unit_id for unit in successor.body_units
         }
         if previous.state is CenterState.SUPERSEDED:
-            assert previous.supersession_bridge_units
+            assert previous.supersession_bridge_units or previous.excursion_units
+            connector = (previous.supersession_bridge_units or previous.excursion_units)[-1]
             assert successor.entry_unit is None
-            assert previous.supersession_bridge_units[-1].end_tick == (
+            assert connector.end_tick == (
                 successor.body_units[0].start_tick
             )
-            assert previous.supersession_bridge_units[-1].market_end == (
+            assert connector.market_end == (
                 successor.body_units[0].market_start
             )
 

@@ -132,13 +132,13 @@ def snapshot_for(frame, code, frequency, *, include_consolidation=False):
             consolidation_strength = None
             snapshot["native_consolidation_error"] = f"MACD evidence unavailable: {type(exc).__name__}"
         alerts = build_native_consolidation_alerts(
-            tuple(runtime.cd.get_segment_units()), tuple(runtime.cd.get_native_centers().centers),
+            tuple(runtime.cd.get_segment_units()), tuple(runtime.cd.get_native_centers().signal_centers),
             consolidation_strength, as_of=runtime.cd._strict_as_of(),
         )
         try:
             preview_checks = {}
             alerts.extend(build_native_consolidation_previews(
-                tuple(runtime.cd.get_segment_units()), tuple(runtime.cd.get_native_centers().centers),
+                tuple(runtime.cd.get_segment_units()), tuple(runtime.cd.get_native_centers().signal_centers),
                 consolidation_strength, frame, runtime.cd.get_idx()["macd"]["hist"],
                 as_of=runtime.cd._strict_as_of(), diagnostics=preview_checks,
             ))

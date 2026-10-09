@@ -189,7 +189,7 @@ def combined_extreme_market_time(units, side: str) -> datetime | None:
     return None if any(t is None for t in moments) else max(moments)
 
 
-def center_envelope_units(initial_units, body_units, source_kind: SourceKind, failed_departure_units=()) -> tuple[ConstituentUnit, ...]:
+def center_envelope_units(initial_units, body_units, source_kind: SourceKind, failed_departure_units=(), excursion_units=()) -> tuple[ConstituentUnit, ...]:
     """Use the center-forming direction's Z legs for recursive DD/GG.
 
     Physical segment centers retain their operational full-body envelope.
@@ -199,7 +199,7 @@ def center_envelope_units(initial_units, body_units, source_kind: SourceKind, fa
     # A failed departure is a completed surrounding wave, even if its return
     # crosses the entire core and becomes the next pending departure. L020's
     # separation test must retain those extremes without enlarging ZD/ZG.
-    values = (*tuple(body_units), *tuple(failed_departure_units))
+    values = (*tuple(body_units), *tuple(failed_departure_units), *tuple(excursion_units))
     if SourceKind(source_kind) is SourceKind.TREND_TYPE:
         direction = tuple(initial_units)[0].direction
         return tuple(item for item in values if item.direction == direction)
@@ -255,6 +255,9 @@ class TrendCenter:
     supersession_bridge_units: tuple[ConstituentUnit, ...] = ()
     formation_rule: Literal["five_role", "three_core"] | None = None
     boundary_contact: Literal["oscillation", "third_class"] = "oscillation"
+    # A native segment can touch the core internally yet end outside. Its next
+    # segment may stay outside without being an independent third-class leave.
+    excursion_units: tuple[ConstituentUnit, ...] = ()
 
     def _validate_recursive(self) -> None:
         object.__setattr__(self, 'source_kind', SourceKind(self.source_kind))
@@ -263,6 +266,7 @@ class TrendCenter:
         object.__setattr__(self, 'body_units', tuple(self.body_units))
         object.__setattr__(self, 'extension_units', tuple(self.extension_units))
         object.__setattr__(self, 'failed_departure_units', tuple(self.failed_departure_units))
+        object.__setattr__(self, 'excursion_units', tuple(self.excursion_units))
         object.__setattr__(self, 'supersession_bridge_units', tuple(self.supersession_bridge_units))
         if not self.center_id:
             raise ValueError('center_id is required')
@@ -297,7 +301,7 @@ class TrendCenter:
         expected_zg = min((item.high_tick for item in self.core_units))
         if (self.zd_tick, self.zg_tick) != (expected_zd, expected_zg):
             raise ValueError('center core must equal its three core-unit intersection')
-        envelope_units = center_envelope_units(self.initial_units, self.body_units, self.source_kind, self.failed_departure_units)
+        envelope_units = center_envelope_units(self.initial_units, self.body_units, self.source_kind, self.failed_departure_units, self.excursion_units)
         expected_dd = min((item.low_tick for item in envelope_units))
         expected_gg = max((item.high_tick for item in envelope_units))
         if (self.dd_tick, self.gg_tick) != (expected_dd, expected_gg):
@@ -335,12 +339,12 @@ class TrendCenter:
             raise ValueError('last touch time must equal final body unit end')
         if self.available_at < self.established_at:
             raise ValueError('available_at must not precede established_at')
-        center_evidence = (() if self.entry_unit is None else (self.entry_unit,)) + self.body_units + self.failed_departure_units + (() if self.establishment_leave_unit is None else (self.establishment_leave_unit,))
+        center_evidence = (() if self.entry_unit is None else (self.entry_unit,)) + self.body_units + self.failed_departure_units + self.excursion_units + (() if self.establishment_leave_unit is None else (self.establishment_leave_unit,))
         if self.available_at < max((item.available_at for item in center_evidence)):
             raise ValueError('center availability must cover body evidence')
         if self.body_revision != len(self.extension_units):
             raise ValueError('body_revision must equal extension unit count')
-        for terminal in (self.establishment_leave_unit, *self.failed_departure_units, self.pending_leave_unit, self.completion_leave_unit, self.completion_return_unit):
+        for terminal in (self.establishment_leave_unit, *self.failed_departure_units, *self.excursion_units, self.pending_leave_unit, self.completion_leave_unit, self.completion_return_unit):
             if terminal is not None and (terminal.structural_level != self.structural_level or terminal.source_kind is not self.source_kind):
                 raise ValueError('center lifecycle unit level/source mismatch')
             if terminal is not None and terminal.price_basis_revision != self.price_basis_revision:
@@ -353,6 +357,10 @@ class TrendCenter:
             raise ValueError('failed departures must stay outside center body')
         if self.entry_unit is not None and self.entry_unit.unit_id in {item.unit_id for item in self.failed_departure_units}:
             raise ValueError('center entry cannot be failed departure history')
+        if self.excursion_units and self.formation_rule != "three_core":
+            raise ValueError('outside excursions require the native three-core policy')
+        if any(not item.locked or self._touches_core(item) for item in self.excursion_units):
+            raise ValueError('outside excursion must be locked and disjoint from core')
 
         def validate_pending_leave() -> None:
             pending = self.pending_leave_unit
@@ -453,7 +461,7 @@ class TrendCenter:
             establishment_owners = tuple((item for item in lifecycle_owners if item.unit_id == establishment_leave.unit_id))
             if establishment_owners != (establishment_leave,):
                 raise ValueError('physical establishment leave must belong to exactly one lifecycle role')
-        transition_units = (*self.body_units, *self.failed_departure_units, *self.supersession_bridge_units, *(() if self.pending_leave_unit is None else (self.pending_leave_unit,)), *(() if self.completion_leave_unit is None else (self.completion_leave_unit,)), *(() if self.completion_return_unit is None else (self.completion_return_unit,)))
+        transition_units = (*self.body_units, *self.failed_departure_units, *self.excursion_units, *self.supersession_bridge_units, *(() if self.pending_leave_unit is None else (self.pending_leave_unit,)), *(() if self.completion_leave_unit is None else (self.completion_leave_unit,)), *(() if self.completion_return_unit is None else (self.completion_return_unit,)))
         transition_ids = tuple((item.unit_id for item in transition_units))
         if len(transition_ids) != len(set(transition_ids)):
             raise ValueError('center transition ownership must be unique')
@@ -483,6 +491,14 @@ class TrendCenter:
             if current.market_start > previous.market_end:
                 raise ValueError(f'{pair_label} market endpoints must connect')
         transition_offset = {item.unit_id: offset for (offset, item) in enumerate(ordered_transitions)}
+        for excursion in self.excursion_units:
+            offset = transition_offset[excursion.unit_id]
+            if offset == 0 or not self._touches_core(ordered_transitions[offset - 1]):
+                raise ValueError('outside excursion requires a preceding core touch')
+            if offset + 1 < len(ordered_transitions):
+                following = ordered_transitions[offset + 1]
+                if not self._touches_core(following) and following not in self.supersession_bridge_units:
+                    raise ValueError('outside excursion requires a subsequent core touch or supersession')
         for failed in self.failed_departure_units:
             offset = transition_offset[failed.unit_id]
             if offset + 1 >= len(ordered_transitions):
@@ -497,6 +513,8 @@ class TrendCenter:
     def __post_init__(self) -> None:
         if SourceKind(self.source_kind) is SourceKind.TREND_TYPE or self.formation_rule == "three_core":
             return self._validate_recursive()
+        if self.excursion_units:
+            raise ValueError('outside excursions require the native three-core policy')
         object.__setattr__(self, "source_kind", SourceKind(self.source_kind))
         object.__setattr__(self, "state", CenterState(self.state))
         rule = self.formation_rule
@@ -1002,7 +1020,7 @@ class TrendCenter:
         if self._is_seed_exit(leave):
             return
         previous = max(
-            (*self.body_units, *self.failed_departure_units),
+            (*self.body_units, *self.failed_departure_units, *self.excursion_units),
             key=lambda item: (item.market_start, item.market_end, item.unit_id),
         )
         if (
@@ -1135,6 +1153,7 @@ class TrendCenter:
             *((self.entry_unit,) if self.entry_unit is not None else ()),
             *self.body_units,
             *self.failed_departure_units,
+            *self.excursion_units,
             *(
                 ()
                 if self.establishment_leave_unit is None
@@ -1187,6 +1206,7 @@ class TrendCenter:
             *self.establishment_units,
             *self.body_units,
             *self.failed_departure_units,
+            *self.excursion_units,
             leave,
             ret,
         )
@@ -1214,12 +1234,14 @@ class CenterPreview:
     completion_return_unit_id: str | None = None
     establishment_leave_unit_id: str | None = None
     formation_rule: Literal["five_role", "three_core"] | None = None
+    excursion_unit_ids: tuple[str, ...] = ()
 
     def _validate_recursive(self) -> None:
         object.__setattr__(self, 'source_kind', SourceKind(self.source_kind))
         object.__setattr__(self, 'state', CenterPreviewState(self.state))
         object.__setattr__(self, 'unit_ids', tuple(self.unit_ids))
         object.__setattr__(self, 'failed_departure_unit_ids', tuple(self.failed_departure_unit_ids))
+        object.__setattr__(self, 'excursion_unit_ids', tuple(self.excursion_unit_ids))
         if type(self.structural_level) is not int or self.structural_level < 0:
             raise ValueError('structural_level must be >= 0')
         if not self.price_basis_revision or not self.price_basis_revision.strip():
@@ -1261,6 +1283,13 @@ class CenterPreview:
         if set(lifecycle_ids) & set(self.failed_departure_unit_ids):
             raise ValueError('preview current lifecycle must stay outside failed history')
         external_ids = (*self.failed_departure_unit_ids, *lifecycle_ids)
+        if self.excursion_unit_ids:
+            if self.formation_rule != "three_core":
+                raise ValueError('outside excursions require the native three-core policy')
+            occupied = (*self.unit_ids, *external_ids, self.entry_unit_id)
+            if (len(set(self.excursion_unit_ids)) != len(self.excursion_unit_ids)
+                    or set(self.excursion_unit_ids) & set(occupied)):
+                raise ValueError('preview excursion ownership must be unique')
         if self.entry_unit_id is not None and self.entry_unit_id in external_ids:
             raise ValueError('preview entry and lifecycle units must be distinct')
         if self.establishment_leave_unit_id is not None:
@@ -1531,11 +1560,18 @@ class CenterLevelResult:
     events: tuple[CenterEvent, ...]
     locked_unit_count: int
     replay_from: int
+    unprocessed_unit_ids: tuple[str, ...] = ()
+
+    @property
+    def signal_centers(self) -> tuple[TrendCenter, ...]:
+        """An interrupted live center cannot supply current signal evidence."""
+        return self.centers[:-1] if self.unprocessed_unit_ids else self.centers
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "centers", tuple(self.centers))
         object.__setattr__(self, "previews", tuple(self.previews))
         object.__setattr__(self, "events", tuple(self.events))
+        object.__setattr__(self, "unprocessed_unit_ids", tuple(self.unprocessed_unit_ids))
         if len({center.center_id for center in self.centers}) != len(self.centers):
             raise ValueError("center level identities must be unique")
         for index, center in enumerate(self.centers):
@@ -1553,10 +1589,10 @@ class CenterLevelResult:
             boundary_unit = (
                 center.supersession_bridge_units[-1]
                 if center.supersession_bridge_units
-                else center.body_units[-1]
+                else max((*center.body_units, *center.excursion_units), key=lambda unit: unit.market_end)
             )
             if successor.formation_rule == "three_core":
-                if not center.supersession_bridge_units:
+                if not center.supersession_bridge_units and boundary_unit not in center.excursion_units:
                     raise ValueError(
                         "three-core successor requires a connecting lower unit"
                     )

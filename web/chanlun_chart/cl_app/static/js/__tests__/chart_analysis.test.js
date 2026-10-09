@@ -25,8 +25,8 @@ test('archived selected center fields cannot override formal centers and preview
    centers:[{center_id:'experimental',core_ticks:[100,110]}]},
   selected_center_type_partition:{schema:'chanlun-user-center-type-partition-v1'},
  }});
- assert.deepEqual(summary.centers,[formal]);
- assert.deepEqual(summary.previews,[preview]);
+ assert.deepEqual(summary.centers,[formal,old]);
+ assert.deepEqual(summary.previews,[preview,oldPreview]);
  assert.equal(summary.userView,undefined);
  assert.equal(summary.directFive,undefined);
 });

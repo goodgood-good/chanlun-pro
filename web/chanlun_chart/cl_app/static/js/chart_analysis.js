@@ -21,13 +21,12 @@
     const valid = data?.strict_structure_mode === 'replace'
       && ['native_centers', 'centers_and_signals'].includes(snapshot?.analysis_scope)
       && snapshot.levels?.length >= 1;
-    const centers = valid ? (snapshot.levels[0].centers || []).filter(
-      center => center.formation_rule !== 'three_core') : [];
-    const previews = valid ? (snapshot.levels[0].center_previews || []).filter(
-      preview => preview.formation_rule !== 'three_core') : [];
+    const centers = valid ? (snapshot.levels[0].centers || []) : [];
+    const previews = valid ? (snapshot.levels[0].center_previews || []) : [];
     return {bars: data?.bars?.length || 0, strokes: data?.bis?.length || 0,
       segments: data?.xds?.length || 0, centers, previews, ready: valid,
       ...(valid && snapshot.segment_construction ? {segmentConstruction: snapshot.segment_construction} : {}),
+      ...(valid && snapshot.center_processing ? {centerProcessing: snapshot.center_processing} : {}),
       loading: data?.strict_structure_error?.code === 'strict_structure_pending'};
   }
   function segmentStatusText(summary) {
@@ -86,7 +85,8 @@
     text('ca-segment-status', segmentStatusText(summary));
     text('ca-center-count', summary.ready ? count : '—');
     text('ca-native-status', summary.ready
-      ? count ? `本周期中枢 ${summary.centers.length} 个，形成中 ${forming.length} 个；虚线表示未确认部分`
+      ? summary.centerProcessing?.complete === false ? '后续中枢连接尚待确认，相关中枢暂不参与信号判断'
+      : count ? `本周期中枢 ${summary.centers.length} 个，形成中 ${forming.length} 个；虚线表示未确认部分`
         : '当前已加载区间尚无满足完整条件的中枢'
       : summary.loading ? 'K 线已加载，正在计算笔、线段与中枢…'
       : data ? '结构暂未就绪，请查看图表加载状态' : '正在加载行情…');

@@ -278,13 +278,38 @@ function scopeContext(cm) {
   };
 }
 
-test('stale three-core segment centers are rejected from the formal chart', () => {
+test('a five-role payload cannot masquerade as a three-core center', () => {
   const {cm}=manager();
   const old=center(1,{formation_rule:'three_core'});
   const structure=snapshot({levels:[{structural_level:0,origin:'native_segments',
     centers:[old],center_previews:[],trend_shapes:[],points:[],divergences:[]}]});
   assert.throws(() => cm._strictRenderGroups(structure,scopeContext(cm)),
-    /withdrawn three-core segment center/);
+    /native center requires three connected overlapping source segments/);
+});
+
+test('a confirmed three-core center renders before an independent departure', () => {
+  const {cm}=manager();
+  const prices=[1200,1000,1150,1050];
+  const roles=prices.slice(0,3).map((price,index)=>({
+    unit_id:`core-${index}`, direction:index%2 ? 'up':'down',
+    start_time:BASE+index*100, end_time:BASE+(index+1)*100,
+    start_tick:price, end_tick:prices[index+1],
+    low_tick:Math.min(price,prices[index+1]), high_tick:Math.max(price,prices[index+1]),
+    locked:true, confirmed_at:BASE+(index+1)*100, available_at:BASE+(index+1)*100,
+  }));
+  const ids=roles.map(unit=>unit.unit_id);
+  const native=center(1,{formation_rule:'three_core', entry_unit_id:null,
+    establishment_leave_unit_id:null,initial_exit_unit_id:null,minimum_lifecycle_role_count:3,
+    establishment_component_count:3,core_component_count:3,core_unit_ids:ids,initial_unit_ids:ids,
+    establishment_segment_ids:ids,establishment_segments:roles,core_formed:true,frame_qualified:false,
+    core:{zd_tick:1050,zg_tick:1150,zd_price:10.5,zg_price:11.5},third_class_confirmed:false,
+    points:[{time:BASE,price:11.5},{time:BASE+300,price:10.5}],
+  });
+  const structure=snapshot({levels:[{structural_level:0,origin:'native_segments',
+    centers:[native],center_previews:[],trend_shapes:[],points:[],divergences:[]}]});
+  assert.equal([...cm._strictRenderGroups(structure,scopeContext(cm)).values()].flat().length,1);
+  roles[2].locked=false;
+  assert.throws(()=>cm._strictRenderGroups(structure,scopeContext(cm)),/native center requires/);
 });
 
 test('retired movement types stay hidden even with a saved display switch', () => {

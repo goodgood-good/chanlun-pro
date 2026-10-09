@@ -146,25 +146,30 @@ def test_verified_result_cache_cannot_republish_a_run_after_its_algorithm_expire
 
 
 def test_recorded_six_signal_classes_pass_cold_and_first_available_replay():
-    frame = pd.read_parquet(Path("tests/fixtures/SZ.002299_1m.parquet"))
-    frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="recorded-raw")
-    snapshot = snapshot_for(frame, "SZ.002299", "1m")
-    centers = {item["center_id"]: item for item in snapshot["levels"][0]["centers"]}
-    candidates = []
-    for kind in ("1buy", "2buy", "3buy", "1sell", "2sell", "3sell"):
-        point = next(item for item in reversed(snapshot["levels"][0]["points"])
-                     if item["point_type"] == kind)
-        candidates.append({"point": point, "center": centers[point["center_id"]], "reasons": []})
-    selected, rejected = _review_native_center_signals(
-        snapshot, frame, candidates, "SZ.002299", "1m",
-    )
-    assert not rejected, rejected
-    assert len(selected) == 6
-    for item in selected:
-        assert item["audit"] == {
-            "cold_rebuild": True, "confirmation_replay": True,
-            "confirmation_boundary": True,
-        }
+    reviewed = set()
+    for name, code, frequency, kinds in (
+        ("SZ.002299_1m.parquet", "SZ.002299", "1m", ("1sell", "2sell", "3buy", "3sell")),
+        ("segment_completion/SH_600004_5m.parquet", "SH.600004", "5m", ("1buy", "2buy")),
+    ):
+        frame = pd.read_parquet(Path("tests/fixtures") / name)
+        frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="recorded-raw")
+        snapshot = snapshot_for(frame, code, frequency)
+        centers = {item["center_id"]: item for item in snapshot["levels"][0]["centers"]}
+        candidates = []
+        for kind in kinds:
+            point = next(item for item in reversed(snapshot["levels"][0]["points"])
+                         if item["point_type"] == kind)
+            candidates.append({"point": point, "center": centers[point["center_id"]], "reasons": []})
+        selected, rejected = _review_native_center_signals(snapshot, frame, candidates, code, frequency)
+        assert not rejected, rejected
+        assert len(selected) == len(kinds)
+        for item in selected:
+            reviewed.add(item["point"]["point_type"])
+            assert item["audit"] == {
+                "cold_rebuild": True, "confirmation_replay": True,
+                "confirmation_boundary": True,
+            }
+    assert reviewed == {"1buy", "2buy", "3buy", "1sell", "2sell", "3sell"}
 
 
 @pytest.fixture

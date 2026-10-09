@@ -642,7 +642,37 @@ function validateStrictCenterRenderContract(item, level, allowPartialPhysical) {
     ) throw new Error('strict center core contract is invalid');
 
     if (item.source_kind === 'segment' && item.formation_rule === 'three_core') {
-        throw new Error('withdrawn three-core segment center cannot enter the formal chart');
+        const roles = item.establishment_segments;
+        const preview = allowPartialPhysical === true && item.render_kind === 'center_preview';
+        if (item.minimum_lifecycle_role_count !== 3 || item.establishment_component_count !== 3
+            || item.entry_unit_id !== null || item.establishment_leave_unit_id !== null
+            || item.core_formed !== true || typeof item.frame_qualified !== 'boolean'
+            || !strictSameIds(item.establishment_segment_ids, item.core_unit_ids)
+            || !Array.isArray(roles) || roles.length !== 3
+            || roles.some((unit, index) => unit.unit_id !== item.core_unit_ids[index]
+                || !Number.isInteger(unit.low_tick) || !Number.isInteger(unit.high_tick)
+                || (!preview && (unit.locked !== true || !Number.isInteger(unit.confirmed_at)
+                    || unit.confirmed_at > item.available_at)))
+            || item.core.zd_tick !== Math.max(...roles.map(unit => unit.low_tick))
+            || item.core.zg_tick !== Math.min(...roles.map(unit => unit.high_tick))
+            || item.core.zd_tick > item.core.zg_tick
+            || roles.slice(1).some((unit, index) => unit.direction === roles[index].direction
+                || unit.start_time !== roles[index].end_time || unit.start_tick !== roles[index].end_tick)) {
+            throw new Error('native center requires three connected overlapping source segments');
+        }
+        if (item.third_class_confirmed === true) {
+            const leave = item.lifecycle_leaving_segment;
+            const ret = item.completion_return_segment;
+            if (!leave || !ret || leave.locked !== true || ret.locked !== true
+                || item.core_unit_ids.includes(leave.unit_id) || item.core_unit_ids.includes(ret.unit_id)
+                || leave.unit_id === ret.unit_id || leave.end_time !== ret.start_time
+                || leave.end_tick !== ret.start_tick || leave.direction === ret.direction
+                || leave.start_time < roles[2].end_time || ret.confirmed_at > item.available_at
+                || !(leave.direction === 'up' ? ret.low_tick > item.core.zg_tick : ret.high_tick < item.core.zd_tick)) {
+                throw new Error('native third-class point requires independent confirmed leave and return');
+            }
+        }
+        return;
     }
 
     if (item.source_kind === 'trend_type') {

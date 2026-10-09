@@ -100,7 +100,7 @@ def _alert(
 
 def _center_sources_known(center, unit_by_id, as_of):
     roles = (*center.establishment_units, *center.body_units,
-             *center.failed_departure_units, *center.supersession_bridge_units,
+              *center.failed_departure_units, *center.excursion_units, *center.supersession_bridge_units,
              center.entry_unit, center.completion_leave_unit,
              center.completion_return_unit)
     return (

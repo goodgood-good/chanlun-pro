@@ -49,7 +49,7 @@ def build_native_consolidation_alerts(units, centers, strength, *, as_of):
         # A -> opposite bridge -> C inside the same center is also relevant.
         # It does not need C to exceed A or break the core (L024:349-352).
         owned = {unit.unit_id for unit in (*center.body_units, *center.establishment_units,
-                                          *center.failed_departure_units)}
+                                          *center.failed_departure_units, *center.excursion_units)}
         if center.pending_leave_unit is not None:
             owned.add(center.pending_leave_unit.unit_id)
         for offset in range(index[center.initial_units[0].unit_id], len(values) - 2):

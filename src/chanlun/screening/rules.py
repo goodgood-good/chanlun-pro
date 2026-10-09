@@ -598,6 +598,8 @@ def audit_snapshot(snapshot: dict, frame: pd.DataFrame, context: dict,
 def _native_center_body_source_valid(snapshot, center, unit_by_id, unit_position, known_at):
     """Check the whole frozen center, including its immutable three-unit core."""
     try:
+        if center.get("processing_complete") is False:
+            return False
         core_ids = center["core_unit_ids"]
         body_ids = center["body_unit_ids"]
         if (len(core_ids) != 3 or len(set(core_ids)) != 3 or body_ids[:3] != core_ids
@@ -619,12 +621,18 @@ def _native_center_body_source_valid(snapshot, center, unit_by_id, unit_position
         roles = center["establishment_segments"]
         if [role["unit_id"] for role in roles] != role_ids:
             return False
-        identities = set((*role_ids, *body_ids, *center.get("failed_departure_unit_ids", ()),
+        excursion_ids = center.get("excursion_unit_ids", ())
+        if (len(set(excursion_ids)) != len(excursion_ids)
+                or set(excursion_ids) & (set(body_ids) | external_ids)):
+            return False
+        identities = set((*role_ids, *body_ids, *center.get("failed_departure_unit_ids", ()), *excursion_ids,
                           *center.get("supersession_bridge_unit_ids", ())))
         identities.update(center.get(field) for field in (
             "completion_leave_unit_id", "completion_return_unit_id", "pending_leave_unit_id"
         ) if center.get(field) is not None)
         positions = sorted(unit_position[identity] for identity in identities)
+        if positions != list(range(positions[0], positions[-1] + 1)):
+            return False
         chain = list(unit_by_id.values())[positions[0]:positions[-1] + 1]
         if any(
             not _causally_locked_role(unit, known_at)
@@ -648,7 +656,11 @@ def _native_center_body_source_valid(snapshot, center, unit_by_id, unit_position
             return False
         core = [unit_by_id[identity] for identity in core_ids]
         body = [unit_by_id[identity] for identity in body_ids]
-        envelope_units = [*body, *(unit_by_id[identity] for identity in center.get("failed_departure_unit_ids", ()))]
+        excursions = [unit_by_id[identity] for identity in excursion_ids]
+        if any(max(unit["low_tick"], center["core"]["zd_tick"])
+               <= min(unit["high_tick"], center["core"]["zg_tick"]) for unit in excursions):
+            return False
+        envelope_units = [*body, *excursions, *(unit_by_id[identity] for identity in center.get("failed_departure_unit_ids", ()))]
         return bool(
             (center["core"]["zd_tick"], center["core"]["zg_tick"])
             == (max(unit["low_tick"] for unit in core), min(unit["high_tick"] for unit in core))
@@ -682,7 +694,8 @@ def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
     if owner_index is None:
         return False
     owner = center_list[owner_index]
-    if (owner.get("source_kind") != "segment" or owner.get("structural_level") != 0
+    if (owner.get("processing_complete") is False
+            or owner.get("source_kind") != "segment" or owner.get("structural_level") != 0
             or owner.get("price_basis_revision") != snapshot.get("price_basis_revision")):
         return False
     unit_by_id = {item["unit_id"]: item for item in units}
@@ -737,6 +750,17 @@ def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
         comparison = divergence.get("compare_leg_unit_ids") or []
         departure = divergence.get("signal_leg_unit_ids") or []
         anchor_source = unit_by_id.get(point.get("price_anchor_unit_id"))
+        comparison_entry_id = owner.get("entry_unit_id")
+        if owner.get("formation_rule") == "three_core":
+            # Same comparison witness as center_entry_comparison_leg; this
+            # does not add an entry role to the immutable three-member core.
+            first_id = owner["core_unit_ids"][0]
+            first = unit_by_id[first_id]
+            first_index = unit_position[first_id]
+            comparison_entry_id = (
+                first_id if first["direction"] == owner.get("completion_direction")
+                else units[first_index - 1]["unit_id"] if first_index else None
+            )
         return bool(
             separated
             and owner.get("third_class_confirmed") is True
@@ -752,7 +776,7 @@ def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
             and point.get("related_unit_ids") == [*comparison, *departure]
             and divergence.get("compare_unit_id") == comparison[-1]
             and divergence.get("signal_unit_id") == departure[-1]
-            and comparison[-1] == owner.get("entry_unit_id")
+            and comparison[-1] == comparison_entry_id
             and departure[0] == owner.get("completion_leave_unit_id")
             and departure[1] == owner.get("completion_return_unit_id")
             and departure[-1] == point.get("anchor_unit_id")

@@ -289,7 +289,7 @@ def _center_payload(
         "render_kind": render_kind,
         "center_id": center.center_id,
         "price_basis_revision": center.price_basis_revision,
-        "render_id": f"{center.center_id}@{center.body_revision}{failed_revision}@{center.state.value}",
+        "render_id": f"{center.center_id}@{center.body_revision}{failed_revision}@excursion{len(center.excursion_units)}@{center.state.value}",
         "body_revision": center.body_revision,
         "structural_level": center.structural_level,
         "source_kind": center.source_kind.value,
@@ -349,7 +349,7 @@ def _center_payload(
         "frame_body_unit_ids": [
             u.unit_id
             for u in sorted(
-                (*center.body_units, *center.failed_departure_units),
+                (*center.body_units, *center.failed_departure_units, *center.excursion_units),
                 key=lambda unit: unit.market_start,
             )
             if u.market_end <= frame_end
@@ -394,6 +394,8 @@ def _center_payload(
         "failed_departure_unit_ids": [
             unit.unit_id for unit in center.failed_departure_units
         ],
+        "excursion_unit_ids": [unit.unit_id for unit in center.excursion_units],
+        "excursion_segments": [_unit_audit_payload(unit) for unit in center.excursion_units],
         "pending_leave_unit_id": None
         if center.pending_leave_unit is None
         else center.pending_leave_unit.unit_id,
@@ -521,8 +523,8 @@ def strict_center_preview_to_chart_dict(
         "center_ended": False,
         "center_end_available_at": None,
         "core_formed": True,
-        "frame_qualified": recursive or frame_leave is not None,
-        "frame_missing_conditions": [] if recursive or frame_leave is not None else ["leave_unavailable"],
+        "frame_qualified": preview.source_kind is SourceKind.TREND_TYPE or frame_leave is not None,
+        "frame_missing_conditions": [] if preview.source_kind is SourceKind.TREND_TYPE or frame_leave is not None else ["leave_unavailable"],
         "frame_leave_unit_id": None if frame_leave is None else frame_leave.unit_id,
         "core": {"zd_tick": preview.zd_tick, "zg_tick": preview.zg_tick},
         "points": [{"time": start_time, "price_tick": preview.zg_tick},
@@ -535,6 +537,8 @@ def strict_center_preview_to_chart_dict(
         "initial_unit_ids": list(preview.unit_ids[:3]),
         "body_unit_ids": list(preview.unit_ids),
         "failed_departure_unit_ids": list(preview.failed_departure_unit_ids),
+        "excursion_unit_ids": list(preview.excursion_unit_ids),
+        "excursion_segments": [_unit_audit_payload(units[key]) for key in preview.excursion_unit_ids],
         "establishment_segment_ids": [value.unit_id for value in establishment],
         "establishment_component_count": len(establishment),
         "overlap_component_count": len(establishment),
@@ -1221,6 +1225,9 @@ def build_native_center_snapshot(
             continue
         item = strict_center_to_chart_dict(center)
         item["tradable"] = False
+        item["processing_complete"] = not (
+            center_result.unprocessed_unit_ids and center == center_result.centers[-1]
+        )
         centers.append(_with_prices(item, quantum))
     segment_units = tuple(cd.get_segment_units())
     units = {unit.unit_id: unit for unit in segment_units}
@@ -1240,7 +1247,7 @@ def build_native_center_snapshot(
     alerts = [
         _with_prices(item, quantum)
         for item in build_native_center_signals(
-            segment_units, tuple(center_result.centers), strength, as_of=as_of,
+            segment_units, tuple(center_result.signal_centers), strength, as_of=as_of,
         )
     ]
     stroke_construction = (
@@ -1278,10 +1285,11 @@ def build_native_center_snapshot(
         })
     basis = cd._strict_price_basis_revision()
     revision = stable_structure_id(
-        "native-center-only-v1", cd.get_code(), interval, basis, cutoff,
+        "native-three-core-v2", cd.get_code(), interval, basis, cutoff,
         centers, previews, alerts, bool(stroke_construction.get("unresolved_regions")),
         segment_construction,
         unresolved_segment_ranges,
+        center_result.unprocessed_unit_ids,
         EXIT_PRICE_VERSION,
     )
     return with_point_exit_plans({
@@ -1292,6 +1300,13 @@ def build_native_center_snapshot(
             "member_basis": "native_locked_segment",
             "role": "operational_subordinate_member",
             "recursive_type_proven": False,
+            "center_formation": "three_locked_overlapping_segments",
+        },
+        "center_processing": {
+            "complete": not center_result.unprocessed_unit_ids,
+            "reason": "awaiting_connected_successor" if center_result.unprocessed_unit_ids else None,
+            "unprocessed_unit_ids": list(center_result.unprocessed_unit_ids),
+            "affected_center_id": center_result.centers[-1].center_id if center_result.unprocessed_unit_ids else None,
         },
         "symbol": cd.get_code(),
         "source_frequency": interval,

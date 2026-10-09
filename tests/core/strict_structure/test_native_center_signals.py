@@ -113,7 +113,9 @@ def test_recorded_first_and_second_points_use_two_separated_centers_and_complete
     previous, later = centers[later_index - 1:later_index + 1]
     assert classify_center_relation(previous, later) is CenterRelation.DOWN_TREND
     assert first["divergence"]["first_center_id"] == previous.center_id
-    assert first["divergence"]["compare_leg_unit_ids"][-1] == later.entry_unit.unit_id
+    from chanlun.core.strict_structure.strength import center_entry_comparison_leg
+    comparison = center_entry_comparison_leg(later, tuple(cd.get_segment_units()))
+    assert first["divergence"]["compare_leg_unit_ids"][-1] == comparison.terminal_unit.unit_id
     assert len(first["divergence"]["signal_leg_unit_ids"]) == 3
     assert later.completion_leave_unit.unit_id in first["divergence"]["signal_leg_unit_ids"]
     assert later.completion_return_unit.unit_id in first["divergence"]["signal_leg_unit_ids"]

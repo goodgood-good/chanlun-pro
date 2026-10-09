@@ -84,6 +84,7 @@ def _validate_center_references(
             failed_indexes = tuple(
                 index[item.unit_id] for item in center.failed_departure_units
             )
+            excursion_indexes = tuple(index[item.unit_id] for item in center.excursion_units)
         except KeyError as exc:
             raise ValueError("center references a missing unit") from exc
         if center.entry_unit is None:
@@ -100,7 +101,10 @@ def _validate_center_references(
         for offset, item in zip(failed_indexes, center.failed_departure_units):
             if units[offset] != item:
                 raise ValueError("center failed departure evidence changed")
-        history_indexes = tuple(sorted((*body_indexes, *failed_indexes)))
+        for offset, item in zip(excursion_indexes, center.excursion_units):
+            if units[offset] != item:
+                raise ValueError("center excursion evidence changed")
+        history_indexes = tuple(sorted((*body_indexes, *failed_indexes, *excursion_indexes)))
         if history_indexes != tuple(range(history_indexes[0], history_indexes[-1] + 1)):
             raise ValueError(
                 "center body and failed departures must own a contiguous history"
@@ -198,6 +202,7 @@ def _constituent_units(group, units, index, group_start, *, end_index=None):
             (
                 *terminal.body_units,
                 *terminal.failed_departure_units,
+                *terminal.excursion_units,
                 *(() if establishment_leave is None else (establishment_leave,)),
             ),
             key=lambda item: (item.market_start, item.market_end, item.unit_id),
