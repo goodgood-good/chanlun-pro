@@ -1,5 +1,6 @@
 import gzip
 import json
+from unittest.mock import patch
 
 from cl_app.services.screening_rollover import RollingDisplay, FILENAME
 
@@ -109,3 +110,24 @@ def test_reader_restart_keeps_already_published_current_rows_labelled_while_load
     assert count==2 and all(row['refresh_state']=='pending' for row in rows)
     recovered,count=merge(RollingDisplay(tmp_path),{**result,'results_loading':False},[row('SH.600002')])
     assert [r['code'] for r in recovered]==['SH.600002'] and count==0
+
+
+def test_latest_completed_scan_replaces_an_older_display_without_opening_that_scan(tmp_path):
+    view=RollingDisplay(tmp_path)
+    merge(view,run(tmp_path,A,'completed',started_at=100),[row('SH.600001')])
+    directory=tmp_path/B;directory.mkdir()
+    (directory/'status.json').write_text(json.dumps({'run_id':B,'status':'completed','started_at':200}))
+    (directory/'verified_results.json.gz').write_bytes(gzip.compress(json.dumps({
+        'schema':'screening-verified-results-v1','payload':{'run_id':B,'fixture_rows':[row('SH.600002')]}}).encode()))
+    rows,count=merge(RollingDisplay(tmp_path),run(tmp_path,C,started_at=300))
+    assert count==1 and rows[0]['code']=='SH.600002' and rows[0]['result_source']==B
+
+
+def test_unsaved_display_is_retried_after_a_transient_file_lock(tmp_path):
+    view=RollingDisplay(tmp_path);state=run(tmp_path,A,'completed')
+    with patch('cl_app.services.screening_rollover.os.replace',side_effect=OSError('temporary file lock')):
+        merge(view,state,[row('SH.600001')])
+    assert not (tmp_path/FILENAME).exists()
+    merge(view,state,[row('SH.600001')])
+    saved=json.loads(gzip.decompress((tmp_path/FILENAME).read_bytes()))
+    assert saved['rows'][0]['code']=='SH.600001' and not view.dirty

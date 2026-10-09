@@ -935,7 +935,7 @@ class ScreeningManager:
                 **({"strict_structure": frozen_structure}
                    if authoritative else {})}
 
-    def start(self, body, *, external_notifications=True, force_rebuild=False, monitor_periods=None, holding_snapshot=None):
+    def start(self, body, *, external_notifications=True, force_rebuild=False, monitor_periods=None, holding_snapshot=None, due_periods=None):
         if type(external_notifications) is not bool:
             raise ValueError("外部通知选项必须是布尔值")
         if type(force_rebuild) is not bool:
@@ -955,6 +955,15 @@ class ScreeningManager:
                                  for s in settings['symbols']]
         if self._reuse_workers and settings['scope'] != 'symbols':
             raise ValueError('Reusable monitoring requires an explicit symbol list')
+        if due_periods is not None:
+            allowed={f"{s['market']}:{s['code']}":set(s.get('_monitor_periods',settings['frequencies']))
+                     for s in settings.get('symbols',[])}
+            if (not self._reuse_workers or not isinstance(due_periods,dict) or set(due_periods)!=set(allowed)
+                    or any(not isinstance(periods,list) or not periods or not set(periods)<=allowed[key]
+                           for key,periods in due_periods.items())):
+                raise ValueError('监听待更新周期不合法')
+            settings['symbols']=[{**s,'_monitor_periods':sorted(set(due_periods[f"{s['market']}:{s['code']}"]))}
+                                 for s in settings['symbols']]
         dispatch_lock = (interprocess_file_lock(self.root / 'worker_dispatch.lock', timeout_seconds=15)
                          if self._reuse_workers else nullcontext())
         with self._lock, dispatch_lock:

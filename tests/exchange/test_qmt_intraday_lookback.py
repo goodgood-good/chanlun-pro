@@ -21,6 +21,18 @@ def test_qmt_one_minute_req_counts_uses_a_share_trading_sessions():
     assert elapsed_days >= 21
 
 
+def test_exact_cutoff_screening_can_reuse_the_existing_minute_subscription(monkeypatch):
+    from unittest.mock import Mock
+    ex=ExchangeQMT();ensure=Mock(return_value=True)
+    monkeypatch.setattr(ex,'_ensure_live_kline_subscription',ensure)
+    assert ex.ensure_live_kline_subscription('SH.600001','1m') is True
+    assert ensure.call_args.kwargs['qmt_code']=='600001.SH'
+    assert ensure.call_args.kwargs['period']=='1m'
+    assert 'force_refresh' not in ensure.call_args.kwargs
+    assert ex.ensure_live_kline_subscription('SH.600001','30m') is False
+    assert ensure.call_count==1
+
+
 def test_qmt_batch_prewarm_forwards_bounded_request_counts(monkeypatch):
     ex = ExchangeQMT()
     observed: list[tuple[str, int | None]] = []

@@ -1794,6 +1794,22 @@ class SignalMonitor:
             runtime_periods={_symbol_key(symbol):sorted({p['frequency'] for p in state['holding_risk_plans'].values()
                 if p.get('active') and f"{p['market']}:{p['code']}"==_symbol_key(symbol)}) for symbol in pending}
             runtime_periods={k:v for k,v in runtime_periods.items() if set(v)-set(seed['settings']['frequencies'])}
+            due_periods={}
+            revision=reference.get('current_source_revision') or reference.get('source_revision')
+            for symbol in pending:
+                key=_symbol_key(symbol)
+                periods=set(seed['settings']['frequencies'])|set(runtime_periods.get(key,[]))
+                needed=[]
+                for frequency in sorted(periods):
+                    check=state['selection_checks'].get(f'{key}:{frequency}',{})
+                    try:expected=closed_bar_cutoff(symbol['market'],symbol['code'],now,frequency)
+                    except (ValueError,OSError):expected=None
+                    if (key in forced or key in retries or key in urgent or not revision or expected is None
+                            or check.get('error') or check.get('revision')!=revision or check.get('cutoff')!=expected):
+                        needed.append(frequency)
+                due_periods[key]=needed or [_monitor_frequency(state,symbol,trigger_period)]
+            subset=any(set(due_periods[_symbol_key(s)]) != (set(seed['settings']['frequencies'])|set(runtime_periods.get(_symbol_key(s),[])))
+                       for s in pending)
             # A cached membership snapshot still bounds computation while the
             # database recovers; publication separately requires current membership.
             catalog_args={'holding_snapshot':list(state['holding_symbols'])}
@@ -1801,7 +1817,8 @@ class SignalMonitor:
                 'control_version':control_version,'seed':seed['run_id'],
                 'expected_run':expected_run,'expected_processed':expected_processed,
                 'settings':deepcopy(settings),
-                'options':deepcopy({**catalog_args,**({'monitor_periods':runtime_periods} if runtime_periods else {})}),
+                'options':deepcopy({**catalog_args,**({'monitor_periods':runtime_periods} if runtime_periods else {}),
+                                   **({'due_periods':due_periods} if subset else {})}),
                 'cutoffs':cutoffs,'retries':retries,'forced':forced,
                 'pending_before':set(state.get('force_pending_symbols',[])),
                 'waiting':pending_keys-set(cutoffs),'mode':mode,'scheduled_at':now.timestamp(),
@@ -1976,17 +1993,28 @@ class SignalMonitor:
                     state['last_error']=''
             yielded=(result.get('background_yielded') and result.get('run_id')==state.get('yielding_monitor_run')
                      and result['status']=='cancelled')
+            frequencies = set(result.get('settings',{}).get('frequencies',[])
+                              or (state.get('seed') or {}).get('settings',{}).get('frequencies',[]))
+            requested={_symbol_key(symbol):set(symbol.get('_monitor_periods',frequencies))
+                       for symbol in result.get('settings',{}).get('symbols',[])}
+            if not result.get('source_current'):
+                requested={}
+            def periods_for(symbol):return requested.get(symbol,frequencies)
+            def touched(item, symbols):
+                return _symbol_key(item) in symbols and item.get('frequency') in periods_for(_symbol_key(item))
             if (result["status"] not in ACTIVE | {"completed"} and not yielded) or not result.get("source_current"):
                 unchecked = set(state.get("active_symbols", []))
                 if result.get("source_current"):
                     unchecked -= set(state.get("active_consumed_symbols", []))
-                self._mark_selection_failures(unchecked, stamp,
-                                              result.get("current_source_revision") or result.get("source_revision"))
+                for symbol in unchecked:
+                    for frequency in periods_for(symbol):
+                        self._mark_selection_failures({symbol}, stamp,
+                            result.get('current_source_revision') or result.get('source_revision'),frequency)
                 if result["status"] not in ACTIVE | {"completed"}:
                     self._record_failures(unchecked, stamp, result.get("run_id"))
                 state["unverified_signals"].update({k: v for k, v in state["signals"].items()
-                                                    if _symbol_key(v) in unchecked})
-                state["signals"] = {k: v for k, v in state["signals"].items() if _symbol_key(v) not in unchecked}
+                                                    if touched(v,unchecked)})
+                state["signals"] = {k: v for k, v in state["signals"].items() if not touched(v,unchecked)}
                 state.update(processed_run=result.get("run_id"),
                              last_error=result.get("error") or "监听任务未完成或计算版本已变化，请重新检查")
                 self._save()
@@ -2008,7 +2036,7 @@ class SignalMonitor:
             missing = []
             for symbol in sorted(checked):
                 market, code = symbol.split(":", 1)
-                for frequency in sorted(frequencies):
+                for frequency in sorted(periods_for(symbol) & frequencies):
                     if ((symbol, frequency) not in verified and not any(
                             _symbol_key(error) == symbol
                             and error.get("signal_type") != "consolidation_divergence"
@@ -2169,7 +2197,7 @@ class SignalMonitor:
                                    "warning_recovery_cutoff": item.get('warning_recovery_cutoff'),
                                    **{k: item.get(k) for k in ("first_detected_at", "first_warned_at", "state_changed_at")}}
             for identity, previous in previous_signals.items():
-                if (_symbol_key(previous) in checked and identity not in signals
+                if (touched(previous,checked) and identity not in signals
                         and (previous.get("market", "a"), previous["code"]) not in failed_all_periods
                         and (previous.get("market", "a"), previous["code"], previous["frequency"]) not in failed_periods
                         and not (previous.get("signal_type") == "consolidation_divergence" and (
@@ -2227,8 +2255,8 @@ class SignalMonitor:
             state["unverified_signals"] = {
                 identity: item for identity, item in previous_signals.items()
                 if _symbol_key(item) in pool and identity not in signals
-                and (_symbol_key(item) not in checked and identity in state["unverified_signals"]
-                     or _symbol_key(item) in checked and (
+                and (not touched(item,checked) and identity in state["unverified_signals"]
+                     or touched(item,checked) and (
                          (item.get("market", "a"), item["code"]) in failed_all_periods
                          or (item.get("market", "a"), item["code"], item["frequency"]) in failed_periods
                          or item.get("signal_type") == "consolidation_divergence" and (
@@ -2238,8 +2266,9 @@ class SignalMonitor:
             # Unchanged/closed markets were not in this batch. Preserve their
             # signals and errors instead of publishing false exits for them.
             signals = {**{k: v for k, v in state["signals"].items()
-                          if _symbol_key(v) not in checked and _symbol_key(v) in pool}, **signals}
-            errors = [e for e in state.get("errors", []) if _symbol_key(e) not in checked]
+                          if not touched(v,checked) and _symbol_key(v) in pool}, **signals}
+            errors = [e for e in state.get("errors", []) if _symbol_key(e) not in checked
+                      or e.get('frequency') and not touched(e,checked)]
             errors.extend(result.get("errors", []))
             valid_cutoffs = {key: value for key, value in state.get("active_cutoffs", {}).items()
                              if key in checked and tuple(key.split(":", 1)) not in failed}
@@ -2275,7 +2304,8 @@ class SignalMonitor:
                     continue
                 symbol = _symbol_key(error)
                 if symbol in checked:
-                    self._mark_selection_failures({symbol}, stamp, result.get("source_revision"), error.get("frequency"))
+                    for frequency in ({error['frequency']} if error.get('frequency') else periods_for(symbol)):
+                        self._mark_selection_failures({symbol}, stamp, result.get("source_revision"), frequency)
             market_cutoffs = state.setdefault("last_cutoffs_by_market", {})
             for key, value in valid_cutoffs.items():
                 market = key.split(":", 1)[0]
@@ -2373,7 +2403,10 @@ class SignalMonitor:
                 return {}
             checked = {_symbol_key(row) for row in result.get('processed_symbols', [])}
             plans = {key: deepcopy(plan) for key,plan in state['holding_risk_plans'].items()
-                     if plan.get('active') and _symbol_key(plan) in checked & set(state['holding_symbols'])}
+                     if plan.get('active') and _symbol_key(plan) in checked & set(state['holding_symbols'])
+                     and plan['frequency'] in next((s.get('_monitor_periods',result.get('settings',{}).get('frequencies',[]))
+                         for s in result.get('settings',{}).get('symbols',[]) if _symbol_key(s)==_symbol_key(plan)),
+                         result.get('settings',{}).get('frequencies',state.get('monitor_frequencies',[])))}
             previous = deepcopy(state['selection_checks'])
         periods = {f"{_symbol_key(p)}:{p['frequency']}": p for p in result.get('verified_periods',[])}
         active_ids = {_signal(row)['id'] for row in result.get('selected',[])+result.get('observations',[])}

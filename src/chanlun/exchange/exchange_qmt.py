@@ -371,6 +371,14 @@ class ExchangeQMT(Exchange):
             force_refresh=True,
         )
 
+    def ensure_live_kline_subscription(self, code: str, frequency: str) -> bool:
+        """Warm bounded live input before an exact-cutoff screening read."""
+        if frequency not in {'1m', '5m'}:
+            return False
+        return self._ensure_live_kline_subscription(
+            qmt_code=self.code_to_qmt(code), period=self.frequency_map[frequency],
+            dividend_type=QMT_STRUCTURE_DIVIDEND_TYPE)
+
     def code_to_tdx(self, code: str):
         _c = code.split(".")
         if len(_c[0]) == 6:

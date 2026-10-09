@@ -1117,6 +1117,20 @@ def test_fetch_repairs_interior_gap_and_uses_trading_day_history(sample, monkeyp
     assert second.kwargs["args"] == {"exact_end": True}
 
 
+def test_live_monitor_input_prepares_subscription_and_still_repairs_stale_data(sample,monkeypatch):
+    from unittest.mock import Mock
+    from chanlun.screening import runner
+    frame,_,context=sample
+    exchange=Mock();exchange.get_start_date_by_frequency.return_value='20260901000000'
+    exchange.klines.side_effect=[frame.iloc[:-1].copy(),frame]
+    monkeypatch.setattr(runner,'_exchange',lambda:exchange)
+    assert runner.fetch_frame('SH.600000','5m',{**context,'live_updates':True}) is frame
+    exchange.ensure_live_kline_subscription.assert_called_once_with('SH.600000','5m')
+    assert exchange.klines.call_count==2
+    assert exchange.klines.call_args_list[0].kwargs['args']['skip_download'] is True
+    assert exchange.klines.call_args_list[-1].kwargs['args']['exact_end'] is True
+
+
 def test_fetch_history_does_not_roll_forward_at_midnight_without_new_closed_bars(sample, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import Mock

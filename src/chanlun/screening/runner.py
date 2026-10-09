@@ -195,6 +195,10 @@ def fetch_frame(code, frequency, context, *, repair_from=None):
         frame = exchange.klines(code, frequency, start_date=start, end_date=end,
                                 args={"exact_end": True})
         return _resolve_suspensions(frame, code, context)
+    if context.get('live_updates'):
+        # Reused shards keep their bounded set of minute subscriptions alive.
+        # Reading and validation still use this run's exact closed-bar cutoff.
+        exchange.ensure_live_kline_subscription(code, frequency)
     args = {"exact_end": True, "skip_download": True}
     frame = exchange.klines(code, frequency, start_date=start, end_date=end, args=args)
     errors = validate_frame(frame, context)
@@ -811,6 +815,9 @@ def _scan_worker_symbol_with_capacity(stock, settings, contexts, run_dir, revisi
                                               settings["recent_sessions"], settings["max_anchor_sessions"])
                     for frequency in symbol_settings["frequencies"]
                 }
+        elif request.get('worker_runtime') is not None:
+            symbol_contexts={frequency:{**context,'live_updates':True}
+                             for frequency,context in symbol_contexts.items()}
         result = scan_symbol(stock, symbol_settings, symbol_contexts, run_dir,
                              cache_root=Path(run_dir).parent / "analysis_cache", revision=revision, **cache_options)
     except Exception as exc:

@@ -57,6 +57,8 @@ class RollingDisplay:
         self.lock = threading.Lock()
         self.snapshot = None
         self.loaded = False
+        self.baseline_checked = None
+        self.dirty = False
 
     def _bootstrap(self, result, project):
         """Read saved, previously verified output as labelled history only."""
@@ -85,7 +87,8 @@ class RollingDisplay:
                 rows = project(payload, directory.name)
             except (KeyError, TypeError, ValueError):
                 continue
-            return {'run_id': directory.name, 'rows': rows, 'through': payload.get('results_through', 0)}
+            return {'run_id': directory.name, 'rows': rows, 'through': payload.get('results_through', 0),
+                    'started_at': (_read(directory / 'status.json') or {}).get('started_at', 0)}
         return None
 
     def merge(self, result, rows, *, project, live_filter):
@@ -100,8 +103,14 @@ class RollingDisplay:
                 self.loaded = True
             through = result.get('results_through', result.get('completed', 0)) or 0
             finished = result.get('status') == 'completed' and not result.get('results_loading')
-            if self.snapshot is None and not finished:
-                self.snapshot = self._bootstrap(result, project)
+            if not finished and self.baseline_checked != source:
+                self.baseline_checked = source
+                if not self.snapshot or self.snapshot.get('run_id') != source:
+                    baseline = self._bootstrap(result, project)
+                    saved_state = _read(self.root / (self.snapshot or {}).get('run_id', '') / 'status.json') or {}
+                    saved_started = (self.snapshot or {}).get('started_at') or saved_state.get('started_at', 0)
+                    if baseline and (self.snapshot is None or baseline['started_at'] > saved_started):
+                        self.snapshot = baseline
             saved = self.snapshot or {}
             restoring = result.get('results_loading') and (not result.get('results_available') or through < saved.get('through', 0))
             prior = saved.get('rows', []) if saved.get('run_id') != source or restoring else [
@@ -125,17 +134,20 @@ class RollingDisplay:
             merged = [*rows, *previous]
             merged.sort(key=lambda row: (bool(row.get('refresh_state')),
                 -(row.get('selection_available_at') or row['point'].get('available_at') or 0), row['code'], row['frequency']))
-            snapshot = {'schema': SCHEMA, 'run_id': source, 'through': through, 'rows': merged}
+            snapshot = {'schema': SCHEMA, 'run_id': source, 'through': through, 'rows': merged,
+                        'started_at': result.get('started_at', saved.get('started_at', 0) if saved.get('run_id') == source else 0)}
             # Slow requests may finish after a newer batch/prefix was published.
             latest = _read(self.root / 'latest.json') or {}
             if (latest.get('run_id') == source and not (saved.get('run_id') == source and saved.get('through', 0) > through)
-                    and snapshot != self.snapshot):
+                    and (snapshot != self.snapshot or self.dirty)):
                 self.snapshot = snapshot
+                self.dirty = True
                 path = self.root / FILENAME
                 temporary = path.with_name(f'{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
                 try:
                     temporary.write_bytes(gzip.compress(json.dumps(snapshot, ensure_ascii=False).encode('utf-8'), compresslevel=1))
                     os.replace(temporary, path)
+                    self.dirty = False
                 except OSError:
                     pass  # A display cache failure cannot discard current results.
                 finally:

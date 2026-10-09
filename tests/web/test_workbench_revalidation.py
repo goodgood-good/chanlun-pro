@@ -106,6 +106,21 @@ def test_successful_exit_proof_keeps_precedence_over_an_old_pending_marker(live_
     assert result["status"]["live_unverified_count"] == 0
 
 
+def test_previous_display_survives_temporary_revalidation_but_not_a_proven_exit(live_candidate):
+    service, manual, live, cutoff, candidate, original, revision = live_candidate
+    suspend(live_candidate)
+    previous={**deepcopy(candidate),'refresh_state':'pending','result_source':manual.state['run_id']}
+    rows,removed,_,uncertain=workbench._live_rows([previous],manual.state['run_id'],revision,preserve_unverified=True)
+    assert len(rows)==1 and rows[0]['refresh_state']=='limited' and removed==0 and uncertain==1
+    live.state.update(source_revision=revision,current_source_revision=revision)
+    live.finish(cutoff);service._consume_monitor()
+    rows,removed,_,uncertain=workbench._live_rows([previous],manual.state['run_id'],revision,preserve_unverified=True)
+    assert len(rows)==1 and removed==uncertain==0
+    key=f"{candidate['market']}:{candidate['code']}:{candidate['frequency']}"
+    service._load()['selection_checks'][key]['identities']=[]
+    assert workbench._live_rows([previous],manual.state['run_id'],revision,preserve_unverified=True)[0]==[]
+
+
 def test_pending_overlay_does_not_expose_or_mutate_private_signal_proof(live_candidate):
     service, manual, live, cutoff, candidate, original, revision = live_candidate
     suspend(live_candidate)

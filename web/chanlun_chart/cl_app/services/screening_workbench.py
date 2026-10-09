@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 import hashlib
 import json
 from pathlib import Path
@@ -170,7 +170,7 @@ def _check_version(records):
     return hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:20] if records else 0
 
 
-def _live_rows(rows, source, revision):
+def _live_rows(rows, source, revision, *, preserve_unverified=False):
     from .signal_monitor import service as signal_monitor
     overlay = signal_monitor.selection_overlay(source, revision)
     kept, removed, unverified = [], 0, 0
@@ -187,9 +187,13 @@ def _live_rows(rows, source, revision):
                 continue
         if period and identity in period.get("unverified_identities", ()):
             unverified += 1
+            if preserve_unverified:
+                kept.append({**row, 'refresh_state': 'limited'})
             continue
         if period and period.get("error") and (period.get("failed_cutoff", period.get("cutoff")) or 0) >= cutoff:
             unverified += 1
+            if preserve_unverified:
+                kept.append({**row, 'refresh_state': 'limited'})
             continue
         if verified:
             row["latest_recheck_at"] = period["checked_at"]
@@ -209,7 +213,8 @@ def dashboard(*, background=False, compact=False):
     rows, removed, live_version, unverified = _live_rows(result.get("_workbench_rows", _current_rows(result, source)),
                                             source, result.get("current_source_revision"))
     from .screening_rollover import display_for
-    rows, previous_count = display_for(str(manager.root)).merge(result, rows, project=_current_rows, live_filter=_live_rows)
+    rows, previous_count = display_for(str(manager.root)).merge(result, rows, project=_current_rows,
+        live_filter=partial(_live_rows, preserve_unverified=True))
     rows = _compact_rows(rows, compact)
     status = {k: v for k, v in result.items() if k not in (
         "selected", "observations", "entry_waiting", "consolidation_alerts", "recent_rejections", "rejection_counts", "reason_labels", "errors",

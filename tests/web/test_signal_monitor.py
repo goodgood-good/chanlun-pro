@@ -45,10 +45,13 @@ class Jobs:
                      "consolidation_checked": True,
                      "source_closed_at": self.state.get("cutoffs", {}).get(frequency,
                          max(self.state.get("cutoffs", {}).values(), default=100))}
-                    for symbol in selected for frequency in self.state["settings"].get("frequencies", [])
+                    for symbol in selected for frequency in symbol.get('_monitor_periods',self.state["settings"].get("frequencies", []))
                 ]}
 
-    def start(self, settings, *, external_notifications=True, monitor_periods=None, holding_snapshot=None):
+    def start(self, settings, *, external_notifications=True, monitor_periods=None, holding_snapshot=None, due_periods=None):
+        if due_periods is not None:
+            settings=deepcopy(settings)
+            settings['symbols']=[{**s,'_monitor_periods':due_periods[f"{s['market']}:{s['code']}"]} for s in settings['symbols']]
         self.runtime_periods = monitor_periods
         self.holding_snapshot = holding_snapshot
         self.started.append(deepcopy(settings))
