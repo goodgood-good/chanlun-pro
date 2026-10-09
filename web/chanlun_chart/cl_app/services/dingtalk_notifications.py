@@ -188,6 +188,12 @@ class DingTalkOutbox:
             CREATE TABLE IF NOT EXISTS signal_payloads (
                 outbox_id TEXT PRIMARY KEY, events TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS outbox_monitor_created ON outbox(created DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS outbox_monitor_status_created ON outbox(status,created DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS outbox_monitor_effective_time ON outbox(
+                (CASE WHEN status='sent' THEN COALESCE(sent,created) ELSE created END) DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS outbox_monitor_status_effective_time ON outbox(status,
+                (CASE WHEN status='sent' THEN COALESCE(sent,created) ELSE created END) DESC,id DESC);
             CREATE TABLE IF NOT EXISTS delivery_settings (key TEXT PRIMARY KEY, value REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS inline_charts (signal_key TEXT PRIMARY KEY,url TEXT NOT NULL,created REAL NOT NULL,outbox_id TEXT NOT NULL);
             """)

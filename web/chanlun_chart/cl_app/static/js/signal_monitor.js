@@ -2,6 +2,8 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
+  const notificationWorkspace=$('notification-workspace');
+  const notificationWorkspaceEnabled=notificationWorkspace?.dataset?.view==='notifications';
   const points = {'1buy':'一买','2buy':'二买','3buy':'三买','1sell':'一卖','2sell':'二卖','3sell':'三卖',
     consolidation_up:'向上盘整背驰',consolidation_down:'向下盘整背驰',risk_stop:'结构止损触发',risk_reverse:'反向信号确认'};
   const stages = {warning:'提前预警（未确认）',invalidated:'预警已失效',confirmed:'已确认',approaching:'形成等待',formed:'形成等待',observed:'形成等待',left:'退出本轮候选',triggered:'持仓风险触发'};
@@ -18,7 +20,7 @@
     for (const id of ['signals','pool','events']) $(id+'-page-size').value='25';
     if ($('monitor-settings')) $('monitor-settings').open=false;
     if ($('monitor-history')) $('monitor-history').open=false;
-    const main=document.querySelector('main'),controls=document.querySelector('.monitor-controls');
+    const main=!notificationWorkspaceEnabled&&document.querySelector('main'),controls=document.querySelector('.monitor-controls');
     if(main?.insertBefore&&controls){
       for(const selector of ['[aria-label="通知运行状态"]','.summary','.monitor-signals','.monitor-stages']){
         const element=document.querySelector(selector);if(element)main.insertBefore(element,controls);
@@ -59,6 +61,236 @@
     } finally { if(deadline!==null)clearTimeout(deadline); }
   }
   function message(text) { $('monitor-message').textContent=text;$('monitor-message').hidden=!text; }
+  let activePanel='notifications';
+  const inbox={page:1,size:phone?15:25,request:0,pending:false,controller:null,data:null,
+    selectedId:null,detailRequest:0,detailController:null,detail:null,detailVersion:null,detailFetchedAt:0,
+    detailLoading:false,imageIndex:0,listVersion:null,searchTimer:null};
+  const deliveryNames={sent:'已发送',pending:'待发送',sending:'发送中',retry:'等待重试',
+    failed:'发送失败',expired:'已过期 · 未补发',suppressed:'静默 · 未发送',cancelled:'已取消'};
+  const marketNames={a:'A 股',us:'美股',hk:'港股',fx:'外汇',ny_futures:'纽约期货',futures:'国内期货',currency_spot:'数字货币现货',currency:'数字货币合约'};
+  function deliveryState(row){return row.delivery_status||row.status||'unknown';}
+  function notificationLabel(row){
+    return points[row.point_type]||({screening:'选股完成汇总',chart:'通知图表',risk:'持仓风险',consolidation:'盘整背驰'}[row.kind])||'信号通知';
+  }
+  function notificationTitle(row){
+    return row.event_count>1?(row.title||`${row.name||row.code||'监听'}等 ${row.event_count} 条信号`):row.name||row.title||row.code||'通知';
+  }
+  function notificationSymbols(row){
+    if(Array.isArray(row.symbols)&&row.symbols.length>1)return row.symbols.slice(0,3)
+      .map(value=>typeof value==='string'?value:[value.name,value.code].filter(Boolean).join(' ')).join(' · ')
+      +(row.symbols.length>3?` 等 ${row.symbols.length} 个标的`:'');
+    return [marketNames[row.market]||row.market,row.code,row.event_count>1?`${row.event_count} 条信号`:''].filter(Boolean).join(' · ');
+  }
+  function notificationSummary(row){
+    if(row.error)return row.error;
+    const summary=String(row.summary||'');
+    let remaining=summary;
+    for(const part of [row.name,row.code,row.frequency,notificationLabel(row),'已确认','确认','提前预警','预警','未确认']){
+      if(part)remaining=remaining.split(part).join('');
+    }
+    return remaining.replace(/[\s·，。:：|()（）]/g,'')?summary:'';
+  }
+  function signalColor(row){
+    return /buy$/.test(row.point_type||'')?'notification-buy':/sell$/.test(row.point_type||'')?'notification-sell':'';
+  }
+  function notificationStage(row){
+    const stage=row.signal_stage||row.signal?.stage;
+    return stages[stage]||'';
+  }
+  function notificationBadge(row){
+    const state=deliveryState(row);
+    return node('span',deliveryNames[state]||'状态待核对','notification-state notification-state-'+state.replace(/[^a-z_]/g,''));
+  }
+  function panel(name){
+    if(!notificationWorkspaceEnabled)return;
+    activePanel=name;
+    for(const button of document.querySelectorAll('[data-monitor-tab]')){
+      const selected=button.dataset.monitorTab===name;
+      button.setAttribute('aria-selected',String(selected));button.setAttribute('tabindex',selected?'0':'-1');
+    }
+    for(const section of document.querySelectorAll('[data-monitor-panel]'))section.hidden=section.dataset.monitorPanel!==name;
+    if(name==='notifications')void refreshNotifications();
+  }
+  function notificationQuery(){
+    return '?'+new URLSearchParams({page:String(inbox.page),size:String(inbox.size),
+      hours:$('notifications-hours').value||'24',
+      q:$('notifications-search').value.trim(),status:$('notifications-status').value||'all',
+      kind:$('notifications-kind').value||'all',frequency:$('notifications-frequency').value||'all',
+      scope:$('notifications-scope').value||'all'});
+  }
+  function inboxMessage(value){$('notifications-message').textContent=value||'';}
+  function notificationVersion(row){return JSON.stringify([row.id,row.updated_at,row.status,row.delivery_status,row.sent_at,row.error,row.image_count,row.images]);}
+  function renderNotificationList(result){
+    inbox.data=result;
+    const summary=result.summary||{},pagination=result.pagination||{},rows=result.items||[];
+    for(const key of ['sent','pending','failed','holdings'])$('notification-'+key+'-count').textContent=Number.isInteger(summary[key])?summary[key]:'—';
+    $('notification-last-sent').textContent=summary.last_sent_at?date(summary.last_sent_at):'尚无成功发送记录';
+    inbox.page=pagination.page||1;
+    $('notifications-total').textContent=(pagination.total??rows.length)+' 条';
+    $('notifications-page').textContent=(pagination.total??rows.length)?`${inbox.page} / ${pagination.pages||1} 页`:'0 条';
+    $('notifications-prev').disabled=inbox.page<=1;
+    $('notifications-next').disabled=pagination.has_more!==undefined?!pagination.has_more:inbox.page>=(pagination.pages||1);
+    $('notifications-empty').hidden=rows.length>0;
+    $('notifications-empty').textContent=$('notifications-status').value==='suppressed'?'暂无符合条件的静默记录。':'暂无匹配的实际通知记录；信号变化可在“实时信号与持仓”查看。';
+    const signature=JSON.stringify([notificationQuery(),rows,inbox.selectedId]);
+    if(signature!==inbox.listVersion){
+      inbox.listVersion=signature;
+      $('notifications-list').replaceChildren(...rows.map(row=>{
+        const button=node('button',undefined,'notification-row');button.type='button';
+        button.setAttribute('aria-pressed',String(row.id===inbox.selectedId));
+        const head=node('div',undefined,'notification-row-head');
+        head.append(node('strong',notificationTitle(row)),node('time',date(row.sent_at||row.created_at||row.event_at)));
+        button.append(head,node('span',[notificationSymbols(row),row.kind==='chart'?'图表通知':row.kind==='screening'?'选股汇总':'消息通知'].filter(Boolean).join(' · '),'notification-row-code'));
+        const meta=node('div',undefined,'notification-row-meta'),signal=node('span',[row.frequency,notificationLabel(row),notificationStage(row)].filter(Boolean).join(' · '),signalColor(row));
+        if(row.holding)signal.append(node('span','我的持仓','monitor-holding-badge'));
+        meta.append(signal,notificationBadge(row));button.append(meta);
+        const summary=notificationSummary(row);if(summary)button.append(node('p',summary,'notification-row-summary'));
+        button.addEventListener('click',()=>void selectNotification(row,true));
+        return button;
+      }));
+    }
+    if(!inbox.selectedId&&rows.length)void selectNotification(rows[0]);
+    else{
+      const selected=rows.find(row=>row.id===inbox.selectedId);
+      if(selected&&!inbox.detailLoading&&(inbox.detailVersion!==notificationVersion(selected)||Date.now()-inbox.detailFetchedAt>=15000))void selectNotification(selected);
+    }
+  }
+  function safeNotificationImage(value){
+    if(typeof value!=='string'||!/^\/(?!\/)/.test(value))return null;
+    return value.startsWith('/monitor/notifications/')||value.startsWith('/public/alert-chart/')?value:null;
+  }
+  function imageLabel(image,index){
+    return Array.isArray(image.periods)&&image.periods.length>1?image.periods.join(' / ')+' 合成图':image.frequency||`附图 ${index+1}`;
+  }
+  function openNotificationImage(url,label){
+    let dialog=$('notification-image-dialog');
+    if(!dialog){
+      dialog=node('dialog',undefined,'notification-image-dialog');dialog.id='notification-image-dialog';
+      dialog.setAttribute('aria-label','通知图表放大查看');document.body.append(dialog);
+      dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close();});
+    }
+    const header=node('header'),close=node('button','关闭 ×');close.type='button';close.addEventListener('click',()=>dialog.close());
+    header.append(node('strong',label),close);const image=node('img');image.src=url;image.alt=label;
+    dialog.replaceChildren(header,image);dialog.showModal();
+  }
+  function notificationImages(images){
+    const section=node('section',undefined,'notification-section'),heading=node('div',undefined,'notification-image-heading');
+    heading.append(node('h4','通知附图'));section.append(heading);
+    if(!images.length){section.append(node('p','这条通知没有保存图表图片。','muted'));return section;}
+    const expand=node('button','放大图表 ↗');expand.type='button';
+    expand.addEventListener('click',()=>{const image=images[inbox.imageIndex],url=safeNotificationImage(image?.url);if(url)openNotificationImage(url,imageLabel(image,inbox.imageIndex));});
+    heading.append(expand);
+    const tabs=node('div',undefined,'notification-image-tabs'),frame=node('div',undefined,'notification-image-frame');
+    const buttons=[];
+    const choose=index=>{
+      inbox.imageIndex=index;
+      const image=images[index],label=imageLabel(image,index),url=safeNotificationImage(image.url);
+      expand.disabled=!url;
+      buttons.forEach((button,i)=>button.setAttribute('aria-pressed',String(i===index)));
+      frame.replaceChildren();
+      if(url){
+        const button=node('button',undefined,'notification-image-open');button.type='button';button.setAttribute('aria-label','放大 '+label);
+        const picture=node('img');picture.src=url;picture.alt=label+' · K线、MACD 与 MACD HTF';picture.loading='lazy';picture.decoding='async';
+        picture.addEventListener('error',()=>{frame.replaceChildren(node('p','图片暂不可读取，请刷新后重试。','notification-image-unavailable'));});
+        button.append(picture);button.addEventListener('click',()=>openNotificationImage(url,label));frame.append(button);
+        const caption=node('div',undefined,'notification-image-caption');caption.append(node('span',label),node('span','点击放大'));frame.append(caption);
+      }else frame.append(node('p',image.error||({pending:'图表正在生成或等待发送',failed:'图表生成或发送失败',expired:'图表已超过保存期限'}[image.status])||'这张附图暂不可读取。','notification-image-unavailable'));
+    };
+    images.forEach((image,index)=>{const button=node('button',imageLabel(image,index));button.type='button';button.addEventListener('click',()=>choose(index));buttons.push(button);tabs.append(button);});
+    if(images.length>1)section.append(tabs);
+    section.append(frame);choose(Math.min(inbox.imageIndex,images.length-1));return section;
+  }
+  function renderNotificationDetail(item){
+    const content=$('notification-detail-content'),originalWasOpen=content.querySelector?.('.notification-original')?.open===true;
+    const multipleSignals=Array.isArray(item.signals)&&item.signals.length>1;
+    content.replaceChildren();
+    const heading=node('div',undefined,'notification-detail-title'),titles=node('div');
+    titles.append(node('h3',notificationTitle(item)),node('p',notificationSymbols(item),'notification-detail-symbol'));
+    heading.append(titles,notificationBadge(item));content.append(heading);
+    const tags=node('div',undefined,'notification-detail-tags');tags.append(node('span',[item.frequency,notificationLabel(item)].filter(Boolean).join(' · '),'notification-signal-label '+signalColor(item)));
+    const commonStage=multipleSignals?(stages[item.signal_stage]||''):notificationStage(item);
+    if(commonStage)tags.append(node('span',commonStage,'notification-state'));
+    if(item.holding)tags.append(node('span','我的持仓','monitor-holding-badge'));
+    if(item.event_count>1)tags.append(node('span',`共 ${item.event_count} 条信号`,'notification-state'));
+    content.append(tags,node('p','以下为通知保存时的信号与图表。','muted'));
+    if(deliveryState(item)==='suppressed')content.append(node('p','这是一条静默事件记录，没有作为通知发送。','notification-error'));
+    const signal=item.signal||item.signals?.[0]||{};
+    const confirmedAt=item.confirmed_at||signal.point_confirmed_at;
+    const facts=node('dl',undefined,'notification-facts');
+    const factRows=multipleSignals?[
+      ['事件发生',date(item.event_at)],['通知生成',date(item.created_at)],
+      ['实际发送',item.sent_at?date(item.sent_at):'尚未发送'],
+      ['发送尝试',Number.isInteger(item.attempts)?`${item.attempts} 次`:'未保存'],
+    ]:[['事件发生',date(item.event_at||signal.recorded_at)],
+      ['信号确认',confirmedAt?date(confirmedAt):['warning','approaching','formed'].includes(item.signal_stage||signal.stage)?'尚未确认':'未保存'],
+      ['通知生成',date(item.created_at)],['实际发送',item.sent_at?date(item.sent_at):'尚未发送'],
+      ['行情截止',date(item.source_closed_at||signal.source_closed_at)],
+      ['信号拐点',signal.anchor_price??'未保存'],['拐点时间',date(signal.anchor_at)],
+      ['发送尝试',Number.isInteger(item.attempts)?`${item.attempts} 次`:'未保存']];
+    for(const [name,value] of factRows){
+      const part=node('div');part.append(node('dt',name),node('dd',value));facts.append(part);
+    }content.append(facts);
+    if(item.error)content.append(node('p',item.error,'notification-error'));
+    const evidence=node('section',undefined,'notification-section');evidence.append(node('h4','保存的信号要点'));
+    const lines=Array.isArray(item.evidence_lines)?item.evidence_lines:[];
+    if(lines.length){const list=node('ul',undefined,'notification-evidence');for(const line of lines)list.append(node('li',typeof line==='string'?line:line.text||JSON.stringify(line)));evidence.append(list);}
+    else evidence.append(node('p','这条通知未保存完整的结构判定过程，可核对上方时刻、附图和消息原文。','muted'));
+    content.append(evidence);
+    if(multipleSignals){
+      const section=node('section',undefined,'notification-section');section.append(node('h4','本条通知包含的信号'));
+      const list=node('ul',undefined,'notification-evidence');
+      for(const row of item.signals){
+        const entry=node('li'),confirmed=row.point_confirmed_at||row.confirmed_at;
+        entry.append(node('strong',[row.name||row.code,row.code,row.frequency,notificationLabel(row),stages[row.stage]||row.stage].filter(Boolean).join(' · ')));
+        for(const [name,value] of [
+          ['信号确认',confirmed?date(confirmed):['warning','approaching','formed'].includes(row.stage)?'尚未确认':'未保存'],
+          ['信号拐点',row.anchor_price??'未保存'],['拐点时间',date(row.anchor_at)],['行情截止',date(row.source_closed_at)],
+        ])entry.append(node('div',`${name}：${value}`));
+        list.append(entry);
+      }
+      section.append(list);content.append(section);
+    }
+    content.append(notificationImages(Array.isArray(item.images)?item.images:[]));
+    const original=node('details',undefined,'notification-original');original.open=originalWasOpen;
+    original.append(node('summary','消息原文'),node('pre',item.body||item.message||'未保存消息原文。'));content.append(original);
+    for(const note of item.record_notes||[])if(typeof note==='string')content.append(node('p',note,'muted'));
+  }
+  async function selectNotification(row,scroll=false){
+    if(!row?.id)return;
+    const changed=inbox.selectedId!==row.id;
+    inbox.selectedId=row.id;inbox.detailVersion=notificationVersion(row);inbox.detailLoading=true;
+    if(inbox.data){inbox.listVersion=null;renderNotificationList(inbox.data);}
+    if(changed){inbox.detail=null;inbox.imageIndex=0;$('notification-detail-content').replaceChildren(node('p','正在读取通知详情…','notification-empty'));}
+    if(scroll&&phone)$('notification-detail').scrollIntoView?.({block:'start',behavior:'smooth'});
+    inbox.detailController?.abort();inbox.detailController=typeof AbortController==='function'?new AbortController():null;
+    const request=++inbox.detailRequest;
+    try{
+      const result=await api('/monitor/notifications/'+encodeURIComponent(row.id),undefined,inbox.detailController);
+      if(request!==inbox.detailRequest||inbox.selectedId!==row.id)return;
+      const changedContent=JSON.stringify(inbox.detail)!==JSON.stringify(result);
+      inbox.detail=result;inbox.detailFetchedAt=Date.now();
+      if(changedContent)renderNotificationDetail(result);
+    }catch(error){
+      if(request!==inbox.detailRequest)return;
+      inbox.detailVersion=null;
+      if(!inbox.detail)$('notification-detail-content').replaceChildren(node('p',error.name==='AbortError'?'详情读取超时，请点选重试。':error.message,'notification-error'));
+      else inboxMessage('详情暂未更新，保留上次内容。'+error.message);
+    }finally{if(request===inbox.detailRequest)inbox.detailLoading=false;}
+  }
+  async function refreshNotifications(force=false){
+    if(!notificationWorkspaceEnabled||(!force&&activePanel!=='notifications')||inbox.pending&&!force)return;
+    inbox.controller?.abort();inbox.controller=typeof AbortController==='function'?new AbortController():null;
+    const request=++inbox.request;inbox.pending=true;
+    $('notifications-reload').disabled=true;
+    if(!inbox.data)inboxMessage('正在读取实际通知记录…');
+    try{
+      const result=await api('/monitor/notifications'+notificationQuery(),undefined,inbox.controller);
+      if(request!==inbox.request)return;
+      if(!Array.isArray(result.items)||!result.pagination)throw Error('通知记录返回格式异常，请稍后重试。');
+      inboxMessage('');renderNotificationList(result);
+    }catch(error){if(request===inbox.request)inboxMessage((inbox.data?'暂未更新，保留上次记录。':'')+(error.name==='AbortError'?'通知读取超时，请稍后重试。':error.message));}
+    finally{if(request===inbox.request){inbox.pending=false;$('notifications-reload').disabled=false;}}
+  }
   function pointStatus(row) {
     if(row.stage==='left')return '退出候选';
     return row.point_status ? stages[row.point_status]||row.point_status : row.stage==='confirmed'?'已确认':'筛选条件待齐';
@@ -116,7 +348,7 @@
     const page=listPage('events',data?.events||[]);
     $('events').replaceChildren(...page.rows.map(row=>{
       const item=node('article',undefined,'monitor-event');item.append(chart(row),node('span',` · ${row.frequency||'5m'} ${points[row.point_type]||row.point_type} · ${pointStatus(row)}`));
-      const badge=holdingBadge(row,'持仓提醒');if(badge)item.append(badge);
+      const badge=holdingBadge(row);if(badge)item.append(badge);
       for(const detail of statusDetails(row))item.append(node('small',detail));
       item.append(node('small',`${date(row.recorded_at)} 记录 · 行情截止 ${date(row.source_closed_at)} · ${row.change==='discovered'?'首次发现':row.change==='left'?'退出候选':'状态变化'}`));return item;
     }));
@@ -127,7 +359,7 @@
     $('signals').replaceChildren(...page.rows.map(row=>{
       const tr=node('tr'),name=node('td');name.append(chart(row));tr.append(name);
       const badge=holdingBadge(row);if(badge){name.append(badge);tr.className='monitor-held-signal';}
-      tr.append(node('td',`${row.frequency} ${points[row.point_type]||row.point_type}`));
+      tr.append(node('td',`${row.frequency} ${points[row.point_type]||row.point_type}`,signalColor(row)));
       const status=node('td');status.append(node('div',pointStatus(row)));
       for(const detail of statusDetails(row))status.append(node('div',detail,'muted'));
       tr.append(status);
@@ -398,5 +630,40 @@
   $('holding-risk-refresh')?.addEventListener('click',()=>void riskView());
   $('analytics-panel')?.addEventListener('toggle',()=>{if($('analytics-panel').open)void analyticsView();});
   $('analytics-refresh')?.addEventListener('click',()=>void analyticsView());
-  void refresh();const poll=async()=>{if(!document.hidden)await refresh();setTimeout(poll,5000);};setTimeout(poll,5000);
+  if(notificationWorkspaceEnabled){
+    const filterButton=$('notifications-filters-toggle'),filterPanel=$('notifications-filters');
+    const filterToggleLabel=()=>{
+      const expanded=filterPanel.dataset.expanded==='true';
+      const count=['status','kind','frequency','scope'].filter(id=>!['','all'].includes($('notifications-'+id).value)).length;
+      filterButton.textContent=(expanded?'收起筛选':'更多筛选')+(count?` · ${count}`:'');
+      filterButton.setAttribute('aria-expanded',String(expanded));
+    };
+    filterButton.addEventListener('click',()=>{filterPanel.dataset.expanded=String(filterPanel.dataset.expanded!=='true');filterToggleLabel();});
+    const tabButtons=Array.from(document.querySelectorAll('[data-monitor-tab]'));
+    tabButtons.forEach((button,index)=>{
+      button.addEventListener('click',()=>panel(button.dataset.monitorTab));
+      button.addEventListener('keydown',event=>{
+        if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+        event.preventDefault();
+        const target=event.key==='Home'?0:event.key==='End'?tabButtons.length-1:
+          (index+(event.key==='ArrowRight'?1:-1)+tabButtons.length)%tabButtons.length;
+        tabButtons[target].focus();panel(tabButtons[target].dataset.monitorTab);
+      });
+    });
+    const filterChanged=()=>{
+      filterToggleLabel();
+      inbox.page=1;inbox.selectedId=null;inbox.detail=null;inbox.detailVersion=null;inbox.detailLoading=false;
+      ++inbox.detailRequest;inbox.detailController?.abort();
+      $('notification-detail-content').replaceChildren(node('p','选择一条通知查看详情。','notification-empty'));
+      void refreshNotifications(true);
+    };
+    for(const id of ['hours','status','kind','frequency','scope'])$('notifications-'+id).addEventListener('change',filterChanged);
+    $('notifications-search').addEventListener('input',()=>{clearTimeout(inbox.searchTimer);inbox.searchTimer=setTimeout(filterChanged,200);});
+    $('notifications-prev').addEventListener('click',()=>{inbox.page=Math.max(1,inbox.page-1);void refreshNotifications(true);});
+    $('notifications-next').addEventListener('click',()=>{inbox.page++;void refreshNotifications(true);});
+    $('notifications-reload').addEventListener('click',()=>{inbox.detailVersion=null;void refreshNotifications(true);});
+    $('notifications-back').addEventListener('click',()=>$('notifications-list').scrollIntoView?.({block:'start',behavior:'smooth'}));
+    void refreshNotifications();
+  }
+  void refresh();const poll=async()=>{if(!document.hidden){await refresh();void refreshNotifications();}setTimeout(poll,5000);};setTimeout(poll,5000);
 })();

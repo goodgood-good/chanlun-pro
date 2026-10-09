@@ -11,6 +11,16 @@ class USmartAPIError(RuntimeError):
         self.retry_after = retry_after
 
 
+class USmartHistoryPending(USmartAPIError):
+    public_message = "该标的历史行情正在更新，请稍后重试。"
+
+    def __init__(self):
+        super().__init__(self.public_message,code="usmart_history_pending",retry_after=3)
+
+    def __reduce__(self):
+        return type(self), ()
+
+
 class LongbridgeConnectionLimitError(RuntimeError):
     """The provider rejected a quote connection; data is unavailable, not empty."""
 

@@ -3,8 +3,10 @@
 from flask import Blueprint, jsonify, render_template, request, abort, send_file
 from flask_login import login_required
 import hashlib
+import sqlite3
 
 from ..services.signal_monitor import service
+from ..services.recent_notifications import reader_for
 
 
 monitor_bp = Blueprint("monitor", __name__)
@@ -48,6 +50,50 @@ def status():
 def analytics():
     response=jsonify({**service.analytics.summary(),'delivery':service.notifications.latency_summary()})
     response.headers['Cache-Control']='private, no-store'
+    return response
+
+
+@monitor_bp.get('/monitor/notifications')
+@login_required
+def recent_notifications():
+    try:
+        response = jsonify(reader_for(str(service.root)).list(request.args))
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except (OSError, sqlite3.Error):
+        return jsonify(error='通知记录暂不可用，请稍后重试'), 503
+    response.headers['Cache-Control'] = 'private, no-store'
+    return response
+
+
+@monitor_bp.get('/monitor/notifications/<identity>')
+@login_required
+def notification_detail(identity):
+    try:
+        result = reader_for(str(service.root)).detail(identity)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except (OSError, sqlite3.Error):
+        return jsonify(error='通知详情暂不可用，请稍后重试'), 503
+    if result is None:
+        abort(404)
+    response = jsonify(result)
+    response.headers['Cache-Control'] = 'private, no-store'
+    return response
+
+
+@monitor_bp.get('/monitor/notifications/<identity>/images/<int:index>.png')
+@login_required
+def notification_private_image(identity, index):
+    try:
+        path = (reader_for(str(service.root)).image_path(identity, index, request.args.get('version'))
+                if set(request.args) == {'version'} and len(request.args.getlist('version')) == 1 else None)
+    except (ValueError, OSError, sqlite3.Error):
+        path = None
+    if path is None:
+        abort(404)
+    response = send_file(path, mimetype='image/png', conditional=True, max_age=300)
+    response.headers['Cache-Control'] = 'private, max-age=300'
     return response
 
 

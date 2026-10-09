@@ -356,6 +356,8 @@ def test_us_kline_falls_back_to_usmart_when_longbridge_credentials_are_partial(
 
     def handler(endpoint, payload):
         assert endpoint == "kline"
+        if payload['start'] < 20260810160000000:
+            return {'list':[]}
         return {
             "list": [
                 {

@@ -84,7 +84,7 @@ def test_every_quote_attempt_uses_shared_admission_before_sending(monkeypatch,pr
         assert len(calls)==len(admissions)
         admissions.append(kwargs)
     client._rate_limiter=SimpleNamespace(wait=wait)
-    monkeypatch.setattr('chanlun.exchange.exchange_usmart.multiprocessing.current_process',
+    monkeypatch.setattr('chanlun.exchange.lb_priority.multiprocessing.current_process',
                         lambda:SimpleNamespace(name=process))
     assert client.quote('kline',{})=={'value':1}
     assert len(admissions)==len(calls)==2
@@ -103,3 +103,14 @@ def test_failed_admission_never_sends_or_immediately_retries(monkeypatch):
     with pytest.raises(USmartRateLimitTimeout):
         client.quote('kline',{})
     assert len(admissions)==1 and calls==delays==[]
+
+
+def test_main_process_prewarm_reaches_the_background_quote_queue(monkeypatch):
+    from chanlun.exchange.lb_priority import lb_low_priority
+    client,_,_=client_for(monkeypatch,[response(),response()])
+    priorities=[]
+    client._rate_limiter=SimpleNamespace(wait=lambda **kwargs:priorities.append(kwargs['priority']))
+    with lb_low_priority():
+        client.quote('kline',{})
+    client.quote('kline',{})
+    assert priorities==['background','interactive']

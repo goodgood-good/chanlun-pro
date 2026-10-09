@@ -1,7 +1,7 @@
 from cl_app import create_app
 from cl_app.blueprints import tv as tv_module
 from cl_app.services import chart_compute
-from chanlun.exchange.errors import LongbridgeConnectionLimitError, USmartAPIError
+from chanlun.exchange.errors import LongbridgeConnectionLimitError, USmartAPIError, USmartHistoryPending
 from types import SimpleNamespace
 
 import pytest
@@ -37,7 +37,7 @@ def test_internal_history_failure_is_not_reported_as_no_data(monkeypatch):
 
 
 @pytest.mark.parametrize("first", ["true", "false"])
-@pytest.mark.parametrize("provider", ["longbridge", "usmart"])
+@pytest.mark.parametrize("provider", ["longbridge", "usmart", "history_pending"])
 def test_provider_failure_reaches_history_as_retryable_error_not_empty_data(monkeypatch, first, provider):
     app = create_app(test_config={
         "TESTING": True, "LOGIN_DISABLED": True, "VALIDATE_WEB_SECURITY": False,
@@ -49,6 +49,8 @@ def test_provider_failure_reaches_history_as_retryable_error_not_empty_data(monk
         calls.append(args)
         if provider == "longbridge":
             raise LongbridgeConnectionLimitError()
+        if provider == "history_pending":
+            raise USmartHistoryPending()
         raise USmartAPIError("upstream HTTP 503", status_code=503)
 
     # Keep the real route -> chart fetch -> provider boundary. Failed history
@@ -71,7 +73,13 @@ def test_provider_failure_reaches_history_as_retryable_error_not_empty_data(monk
         app.extensions["shutdown_runtime_services"]()
     assert len(calls) == 1
     assert response.status_code == 503
-    if provider == "usmart":
+    if provider == "history_pending":
+        assert response.headers["Retry-After"] == "3"
+        assert response.get_json() == {
+            "s":"error", "error_code":"usmart_history_pending",
+            "errmsg":"该标的历史行情正在更新，请稍后重试。", "retry_after":3,
+        }
+    elif provider == "usmart":
         assert response.headers["Retry-After"] == "15"
         assert response.get_json() == {
             "s": "error", "error_code": "usmart_history_unavailable",

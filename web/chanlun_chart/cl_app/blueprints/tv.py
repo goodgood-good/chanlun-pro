@@ -39,7 +39,7 @@ from chanlun.exchange import (
     supports_bounded_stock_info,
 )
 from chanlun.tools.log_util import LogUtil
-from chanlun.exchange.errors import LongbridgeConnectionLimitError, USmartAPIError
+from chanlun.exchange.errors import LongbridgeConnectionLimitError, USmartAPIError, USmartHistoryPending
 
 from ..services.constants import (
     frequency_maps,
@@ -1524,8 +1524,8 @@ def tv_history():
         retry_after = exc.retry_after or 15
         return {
             "s": "error",
-            "error_code": "usmart_history_unavailable",
-            "errmsg": "盈立行情暂不可用，请稍后重试。",
+            "error_code": exc.code if isinstance(exc,USmartHistoryPending) else "usmart_history_unavailable",
+            "errmsg": exc.public_message if isinstance(exc,USmartHistoryPending) else "盈立行情暂不可用，请稍后重试。",
             "retry_after": retry_after,
         }, 503, {"Retry-After": str(retry_after)}
     except Exception as e:

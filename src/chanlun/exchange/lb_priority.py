@@ -1,4 +1,4 @@
-"""longbridge K线调用优先级标记（纯 Python，无 longbridge 依赖，可被 web 层安全 import）。
+"""行情调用优先级标记（纯 Python，无行情 SDK 依赖，可被 web 层安全 import）。
 
 prewarm/批量用 ``lb_low_priority()`` 在 caller 线程上标记，``ExchangeChangQiao.klines()`` 入口
 读取 ``_lb_call_priority`` 并随分段任务透传，让 prewarm 走独立的低 QPS 限流桶、不与交互请求
@@ -9,6 +9,7 @@ prewarm/批量用 ``lb_low_priority()`` 在 caller 线程上标记，``ExchangeC
 A 股-only 部署可能未装）。本模块只依赖标准库。
 """
 import contextlib
+import multiprocessing
 import threading
 
 _lb_call_priority = threading.local()
@@ -19,11 +20,18 @@ def current_priority() -> str:
     return getattr(_lb_call_priority, "value", "interactive")
 
 
+def quote_request_priority() -> str:
+    """Shared provider priority: process workers and marked prewarm stay background."""
+    if multiprocessing.current_process().name != "MainProcess" or current_priority() != "interactive":
+        return "background"
+    return "interactive"
+
+
 @contextlib.contextmanager
 def lb_low_priority():
     """在 with 块内把当前线程的 longbridge K线调用标记为 prewarm 低优先。
 
-    仅 ``ExchangeChangQiao.klines()`` 读取此标记；其它交易所（如 A 股 ExchangeDB）忽略，无副作用。
+    长桥和使用 ``quote_request_priority`` 的行情源都遵守此标记；不访问网络。
     """
     prev = current_priority()
     _lb_call_priority.value = "prewarm"

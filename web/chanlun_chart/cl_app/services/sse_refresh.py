@@ -5,6 +5,7 @@ recompute 复用 prepend_klines_and_replace_cache(与 tv_history 的 cache_tail_
 decide_push 用指纹比对，数据未变则不推(省流量+防前端闪烁)。
 """
 from chanlun.exchange import get_exchange
+from chanlun.exchange.lb_priority import lb_low_priority
 from chanlun.market import Market
 from chanlun.tools.log_util import LogUtil
 
@@ -52,7 +53,8 @@ def recompute_chart_data(market, code, frequency, cl_config, cache_key):
         if _is_negatively_cached(cache_key):
             return None
         ex = get_exchange(Market(market))
-        klines = ex.klines(code, frequency)
+        with lb_low_priority():
+            klines = ex.klines(code, frequency)
         klines = attach_chart_bar_time_label(
             klines, market=market, frequency=frequency, exchange=ex,
         )

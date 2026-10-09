@@ -58,15 +58,22 @@ def test_sse_refresh_resumes_after_initial_snapshot_is_complete(monkeypatch):
     from types import SimpleNamespace
     import pandas as pd
     from cl_app.services import chart_cache, sse_refresh, kline_recompute
+    from chanlun.exchange.lb_priority import quote_request_priority
 
     frame = pd.DataFrame({"date": [pd.Timestamp("2026-01-05", tz="UTC")]})
     monkeypatch.setattr(chart_cache, "_get_chart_cache_entry_ram_only", lambda _key: {"data": {"t": [1]}})
     monkeypatch.setattr(chart_cache, "_is_negatively_cached", lambda _key: False)
-    monkeypatch.setattr(sse_refresh, "get_exchange", lambda *_args: SimpleNamespace(klines=lambda *_args: frame))
+    priorities = []
+    def fetch(*_args):
+        priorities.append(quote_request_priority())
+        return frame
+    monkeypatch.setattr(sse_refresh, "get_exchange", lambda *_args: SimpleNamespace(klines=fetch))
     calls = []
     monkeypatch.setattr(kline_recompute, "prepend_klines_and_replace_cache", lambda *args: calls.append(args) or {"t": [2]})
     assert sse_refresh.recompute_chart_data("us", "TSLA.US", "1m", {}, "opened-chart") == {"t": [2]}
     assert len(calls) == 1
+    assert priorities == ["background"]
+    assert quote_request_priority() == "interactive"
 
 
 def test_sse_delivers_recent_full_history_without_starting_duplicate_work(monkeypatch):

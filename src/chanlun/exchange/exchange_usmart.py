@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
-import multiprocessing
 import os
 import threading
 import time
@@ -34,6 +33,7 @@ except ImportError as _crypto_import_error:
 from chanlun import config
 from chanlun.exchange.exchange import Exchange, Tick
 from chanlun.exchange.errors import USmartAPIError
+from chanlun.exchange.lb_priority import quote_request_priority
 from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.exchange.kline_completion import (
     drop_unclosed_last_bar,
@@ -394,7 +394,7 @@ class USmartClient:
         token = self.token or self.login()
         self._rate_limiter.wait(
             host=self.quote_host, channel=self.channel, endpoint=endpoint,
-            priority="interactive" if multiprocessing.current_process().name == "MainProcess" else "background",
+            priority=quote_request_priority(),
         )
         signer = self._get_signer()
         body = self._json_body(payload)
@@ -484,12 +484,19 @@ class ExchangeUSmart(Exchange):
         market: str,
         client: USmartClient | None = None,
         history_exchange: Exchange | None = None,
+        history_cache=None,
     ):
         market_key = str(market).lower()
         if market_key not in _MARKET_API_CODES:
             raise ValueError(f"uSMART does not support market {market!r}")
         self.market = market_key
         self.client = client or USmartClient()
+        # Injected transports stay deterministic unless the caller explicitly
+        # supplies a cache; the application's native provider shares one cache.
+        if history_cache is None and client is None:
+            from chanlun.exchange.usmart_history_cache import USmartHistoryCache
+            history_cache = USmartHistoryCache()
+        self._history_cache = history_cache
         self.tz = pytz.timezone(_MARKET_TIMEZONES[market_key])
         self._us_history_source = (
             str(
@@ -803,6 +810,27 @@ class ExchangeUSmart(Exchange):
             result = frame.loc[mask].copy().reset_index(drop=True)
             result.attrs = dict(frame.attrs)
             return result
+        if (self._history_cache is not None and self.market == "us" and start_date is None
+                and frequency in {"1m","5m","30m"}
+                and not (set(args)-{"count","pages","right","fq","fq_type","timeout","_bypass_history_cache"})):
+            end = (_to_local_timestamp(end_date,self.tz,end_of_day=True) if end_date is not None
+                   else pd.Timestamp.now(tz=self.tz))
+            return self._history_cache.read(
+                code=code,frequency=frequency,end=end,host=self.client.quote_host,channel=self.client.channel,
+                right=right_type,
+                count=_positive_number(args.get("count",getattr(config,"USMART_KLINE_PAGE_SIZE",1000)),1000,integer=True),
+                pages=_positive_number(args.get("pages",getattr(config,"USMART_KLINE_MAX_PAGES",10)),10,integer=True),
+                force=args.get("_bypass_history_cache") is True,
+                loader=lambda start:self._fetch_native_klines(code,frequency,start,end.isoformat(),
+                    args if start is None else {**args,"_history_keep_overlap":True}),
+            )
+        result = self._fetch_native_klines(code,frequency,start_date,end_date,args)
+        from chanlun.exchange.usmart_history_cache import public_history_frame
+        return public_history_frame(result)
+
+    def _fetch_native_klines(self, code, frequency, start_date=None, end_date=None, args=None):
+        args = dict(args or {})
+        right_type = self._right_type(args)
         page_size = _positive_number(
             args.get("count", getattr(config, "USMART_KLINE_PAGE_SIZE", 1000)),
             1000,
@@ -832,6 +860,9 @@ class ExchangeUSmart(Exchange):
         cursor = 0 if end_date is None else _timestamp_to_api_time(end_bound)
         rows: List[Mapping[str, Any]] = []
         seen_cursors = set()
+        page_rows = invalid_rows = 0
+        stalled = False
+        reached_start = reached_origin = False
 
         for _ in range(max_pages):
             if cursor in seen_cursors:
@@ -848,14 +879,20 @@ class ExchangeUSmart(Exchange):
                 },
             )
             page = data.get("list") or []
-            if not isinstance(page, list) or not page:
+            if not isinstance(page,list):
+                raise USmartAPIError("uSMART history returned an invalid page")
+            if not page:
+                reached_origin = True
                 break
+            page_rows = max(page_rows,len(page))
             valid_times = []
             for item in page:
                 if not isinstance(item, Mapping):
+                    invalid_rows += 1
                     continue
                 parsed = _parse_api_time(item.get("latestTime"), self.tz)
                 if parsed is None:
+                    invalid_rows += 1
                     continue
                 rows.append(item)
                 valid_times.append(parsed)
@@ -863,22 +900,30 @@ class ExchangeUSmart(Exchange):
                 break
             oldest = min(valid_times)
             if oldest <= start_bound:
+                reached_start = True
                 break
             next_cursor = _timestamp_to_api_time(oldest - pd.Timedelta(milliseconds=1))
             if next_cursor == cursor:
+                stalled = True
                 break
             cursor = next_cursor
 
         if not rows:
-            return pd.DataFrame(columns=_KLINE_COLUMNS)
+            empty = pd.DataFrame(columns=_KLINE_COLUMNS)
+            empty.attrs["_usmart_history_fetch"] = {"invalid_rows":invalid_rows,"stalled":stalled}
+            return empty
 
         records = []
+        future_rows = 0
         for item in rows:
             timestamp = _parse_api_time(item.get("latestTime"), self.tz)
             if timestamp is None:
                 continue
             timestamp = self._align_calendar_bar(timestamp, frequency)
-            if timestamp < start_bound or timestamp > end_bound:
+            if timestamp > end_bound:
+                future_rows += 1
+                continue
+            if timestamp < start_bound and not args.get("_history_keep_overlap"):
                 continue
             records.append(
                 {
@@ -894,12 +939,17 @@ class ExchangeUSmart(Exchange):
             )
         frame = pd.DataFrame(records, columns=_KLINE_COLUMNS)
         if frame.empty:
+            frame.attrs["_usmart_history_fetch"] = {"invalid_rows":invalid_rows,"stalled":stalled}
             return frame
         for column in ("open", "high", "low", "close", "volume"):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        before_count = len(frame)
         frame = frame.dropna(subset=["date", "open", "high", "low", "close"])
+        invalid_rows += before_count-len(frame)
         frame["volume"] = frame["volume"].fillna(0)
+        unique_before = len(frame)
         frame = frame.drop_duplicates(subset=["date"], keep="last")
+        duplicate_rows = unique_before-len(frame)
         frame = frame.sort_values("date").reset_index(drop=True)
         frame = normalize_kline_precision(frame, self.market, code)
 
@@ -914,6 +964,10 @@ class ExchangeUSmart(Exchange):
                 structure_price_quantum=quantum,
             )
             frame = attach_price_basis_metadata(frame, metadata)
+        frame.attrs["_usmart_history_fetch"] = {"page_rows":page_rows,"pages":len(seen_cursors),
+            "invalid_rows":invalid_rows,"stalled":stalled,"future_rows":future_rows,
+            "duplicate_rows":duplicate_rows,
+            "window_capped":len(seen_cursors)==max_pages and not reached_start and not reached_origin}
         return frame
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
