@@ -675,6 +675,20 @@ def _native_center_body_source_valid(snapshot, center, unit_by_id, unit_position
         return False
 
 
+def _native_comparison_entry_id(center, units, by_id, positions, direction):
+    """Mirror center_entry_comparison_leg without assigning an extra core role."""
+    if center.get("formation_rule") != "three_core":
+        return center.get("entry_unit_id")
+    core_ids = center.get("core_unit_ids") or ()
+    first = by_id.get(core_ids[0]) if core_ids else None
+    if first is None:
+        return None
+    if first["direction"] == direction:
+        return first["unit_id"]
+    offset = positions.get(first["unit_id"], -1)
+    return units[offset - 1]["unit_id"] if offset > 0 else None
+
+
 def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
     """Check the saved source graph before accepting a current signal."""
 
@@ -750,17 +764,9 @@ def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
         comparison = divergence.get("compare_leg_unit_ids") or []
         departure = divergence.get("signal_leg_unit_ids") or []
         anchor_source = unit_by_id.get(point.get("price_anchor_unit_id"))
-        comparison_entry_id = owner.get("entry_unit_id")
-        if owner.get("formation_rule") == "three_core":
-            # Same comparison witness as center_entry_comparison_leg; this
-            # does not add an entry role to the immutable three-member core.
-            first_id = owner["core_unit_ids"][0]
-            first = unit_by_id[first_id]
-            first_index = unit_position[first_id]
-            comparison_entry_id = (
-                first_id if first["direction"] == owner.get("completion_direction")
-                else units[first_index - 1]["unit_id"] if first_index else None
-            )
+        comparison_entry_id = _native_comparison_entry_id(
+            owner, units, unit_by_id, unit_position, owner.get("completion_direction"),
+        )
         return bool(
             separated
             and owner.get("third_class_confirmed") is True
@@ -1020,7 +1026,8 @@ def native_consolidation_source_valid(snapshot, alert):
         if alert["comparison_form"] == "entry_departure":
             departures = {center.get(field) for field in (
                 "establishment_leave_unit_id", "pending_leave_unit_id", "completion_leave_unit_id")}
-            if a_ids[-1] != center["entry_unit_id"] or c_ids[0] not in departures:
+            entry_id = _native_comparison_entry_id(center, units, by_id, position, alert["direction"])
+            if a_ids[-1] != entry_id or c_ids[0] not in departures:
                 return False
         elif alert["comparison_form"] == "center_oscillation":
             owned = set(center["body_unit_ids"]) | {role["unit_id"] for role in center["establishment_segments"]}
@@ -1103,7 +1110,7 @@ def _native_consolidation_warning_source_valid(snapshot, alert):
                                for u in (by_id[a_ids[0]], bridge, tail))):
                 return False
         elif form == "entry_departure":
-            if a_ids[-1] != center["entry_unit_id"]:
+            if a_ids[-1] != _native_comparison_entry_id(center, units, by_id, position, tail["direction"]):
                 return False
             if len(c_ids) == 1:
                 if units[position[c_ids[0]] - 1]["unit_id"] not in owned or not (

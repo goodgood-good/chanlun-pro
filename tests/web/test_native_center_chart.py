@@ -101,6 +101,25 @@ def test_live_and_frozen_native_exit_references_agree_for_all_six_signal_classes
     assert point["point_id"] not in build_point_exit_plans(missing)
 
 
+@pytest.mark.parametrize("name,code,frequency", [
+    ("SH.600519_5m.parquet", "SH.600519", "5m"),
+    ("SZ.002299_1m.parquet", "SZ.002299", "1m"),
+])
+def test_three_core_consolidation_comparisons_survive_frozen_evidence_validation(name, code, frequency):
+    from chanlun.screening.runner import snapshot_for
+    from chanlun.screening.rules import native_consolidation_source_valid
+
+    frame = pd.read_parquet(Path("tests/fixtures") / name)
+    frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="recorded-raw")
+    snapshot = snapshot_for(frame, code, frequency, include_consolidation=True)
+    alerts = snapshot["native_consolidation_alerts"]
+    centers = {center["center_id"]: center for center in snapshot["levels"][0]["centers"]}
+    departures = [alert for alert in alerts if alert["comparison_form"] == "entry_departure"]
+    assert departures
+    assert all(centers[alert["center_id"]]["entry_unit_id"] is None for alert in departures)
+    assert all(native_consolidation_source_valid(snapshot, alert) for alert in alerts)
+
+
 def test_initial_reselection_renders_one_pending_pen_without_a_future_lock():
     from script.review_stroke_rule_logic import COMPLETION_RETRACTION
     from tests.core.test_bi_source_updates import _frame
