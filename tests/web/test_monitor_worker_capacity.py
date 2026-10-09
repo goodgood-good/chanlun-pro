@@ -13,9 +13,14 @@ def test_urgent_batch_keeps_backlog_capacity_within_the_current_resource_budget(
     if full_scan:
         manual.state['status'] = 'running'
     service._schedule_monitor(clock[0], None)
-    assert [item['code'] for item in live.started[-1]['symbols']] == ['LIVE.US']
+    # The fair recheck share follows live work and stays within one worker
+    # wave, including the reduced capacity during a full screening run.
+    symbols = live.started[-1]['symbols']
+    assert symbols[0]['code'] == 'LIVE.US'
+    assert len(symbols) == 1 + expected
+    assert all(item['market'] == 'a' for item in symbols[1:])
     assert live.started[-1]['workers'] == expected
-    assert service._load()['pending_symbols_count'] == 20
+    assert service._load()['pending_symbols_count'] == 20 - expected
 
 
 def test_a_small_total_queue_still_reduces_the_process_budget(mixed):
@@ -27,7 +32,15 @@ def test_a_small_total_queue_still_reduces_the_process_budget(mixed):
     assert live.started[-1]['workers'] == 1
 
 
-def test_real_worker_processes_survive_a_small_urgent_batch_between_background_batches(mixed, pool, tmp_path):
+def test_capacity_alone_does_not_start_idle_worker_processes(mixed, pool, tmp_path):
+    service, _manual, _live, _clock, _closed = mixed
+    settings = service._load()['seed']['settings']
+    stock = service._load()['seed']['symbols'][-1]
+    assert len(results(scan(pool, tmp_path/'one-task', [stock], workers=4, settings=settings))) == 1
+    assert len(pool.snapshot()['worker_pids']) == 1
+
+
+def test_real_worker_processes_survive_a_small_urgent_batch_between_background_batches(mixed, pool, tmp_path, monkeypatch):
     service, _manual, live, clock, closed = mixed
 
     def execute(name):
@@ -38,7 +51,7 @@ def test_real_worker_processes_survive_a_small_urgent_batch_between_background_b
         return set(pool.snapshot()['worker_pids'])
 
     service._schedule_monitor(clock[0], None)
-    assert len(execute('first-live')) == 1  # Capacity alone never starts idle children.
+    assert len(execute('first-live-and-recheck')) == 4
     finish(service, live, closed['us'])
     service._schedule_monitor(clock[0], None)
     warmed = execute('background')
@@ -46,7 +59,11 @@ def test_real_worker_processes_survive_a_small_urgent_batch_between_background_b
     finish(service, live, closed['a'])
     clock[0] += timedelta(minutes=5)
     closed['us'] += 300
-    service._schedule_monitor(clock[0], None)
+    # A one-task batch cannot displace live work with a historical share, but
+    # the waiting backlog still needs the existing process capacity.
+    with monkeypatch.context() as limited:
+        limited.setattr('cl_app.services.signal_monitor.MONITOR_BATCH_SIZE', 1)
+        service._schedule_monitor(clock[0], None)
     assert [stock['code'] for stock in live.started[-1]['symbols']] == ['LIVE.US']
     assert execute('urgent') == warmed
     finish(service, live, closed['us'])

@@ -169,10 +169,30 @@ def test_cursor_is_stable_across_new_receipts_and_stops_at_the_end(records):
     reader.now=lambda:NOW+10
     assert reader.list({'size':'15'})['items'][0]['created_at']==NOW+1
     second=reader.list({'size':'15','cursor':first['pagination']['next_cursor']})
+    assert first['pagination']['has_newer'] is False and second['pagination']['has_newer'] is True
     assert not ids & {x['id'] for x in second['items']}
     third=reader.list({'size':'15','cursor':second['pagination']['next_cursor']})
     assert len(third['items'])==2 and not third['pagination']['has_more'] and third['pagination']['next_cursor'] is None
     with pytest.raises(ValueError):reader.list({'q':'changed','cursor':first['pagination']['next_cursor']})
+
+
+def test_newer_indicator_uses_same_member_filters_and_current_delivery_state(records):
+    root,reader=records
+    add(root,'signals:old-match',[event('AAA.US','5m')],created=NOW-100)
+    add(root,'signals:cross-member-new',[event('AAA.US','1m'),event('BBB.US','5m')],created=NOW-10)
+    query={'q':'AAA','frequency':'5m','status':'sent','as_of':str(NOW-50)}
+    assert reader.list(query)['pagination']['has_newer'] is False
+    add(root,'signals:new-match',[event('AAA.US','5m')],created=NOW-10)
+    assert reader.list(query)['pagination']['has_newer'] is True
+    assert reader.list({**query,'status':'failed'})['pagination']['has_newer'] is False
+
+
+def test_newer_silent_event_is_not_reported_as_new_delivery(records):
+    root,reader=records
+    silent(root,event(recorded_at=NOW-10))
+    query={'as_of':str(NOW-50)}
+    assert reader.list(query)['pagination']['has_newer'] is False
+    assert reader.list({**query,'status':'suppressed'})['pagination']['has_newer'] is True
 
 
 def test_sql_limits_payload_decoding_to_one_page(records,monkeypatch):

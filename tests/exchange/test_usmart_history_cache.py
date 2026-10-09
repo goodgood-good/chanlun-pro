@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from types import SimpleNamespace
+from pathlib import Path
 import multiprocessing
 import time
 
@@ -10,7 +11,7 @@ import pandas as pd
 import pytest
 
 from chanlun.exchange.errors import USmartAPIError
-from chanlun.exchange.usmart_history_cache import USmartHistoryCache,FETCH,META
+from chanlun.exchange.usmart_history_cache import USmartHistoryCache,FETCH,META,RAW_CONTRACT
 from chanlun.screening.cache import input_fingerprint
 
 
@@ -160,11 +161,74 @@ def test_concurrent_consumers_coalesce_full_history_download(history):
     assert history.calls==[None]
 
 
-def test_invalid_source_is_never_cached(history,tmp_path):
+def test_invalid_ohlcv_is_preserved_in_raw_cache_without_structural_approval(history,tmp_path):
     history.frame.loc[10,'low']=1000
-    history.read();history.read()
+    first=history.read();second=history.read()
+    assert history.calls==[None]
+    pd.testing.assert_frame_equal(first,history.frame)
+    pd.testing.assert_frame_equal(second,history.frame)
+    saved=pd.read_parquet(next(tmp_path.glob('*.parquet')))
+    quality=saved.attrs[META]['raw_quality']
+    assert saved.attrs[META]['storage_contract']==RAW_CONTRACT
+    assert quality['consumer_validation']=='required'
+    assert quality['invalid_bar_count']==1
+    assert quality['invalid_clock']==[{'time':int(history.frame.date.iloc[10].timestamp()),'reasons':['ohlc_geometry']}]
+    assert META not in first.attrs and FETCH not in first.attrs
+
+
+def test_raw_quality_metadata_is_covered_by_the_cache_checksum(history,tmp_path):
+    history.frame.loc[10,'low']=1000
+    history.read();path=next(tmp_path.glob('*.parquet'))
+    value=pd.read_parquet(path)
+    value.attrs[META]['raw_quality']['invalid_bar_count']=0
+    value.to_parquet(path,index=False)
+    history.read()
     assert history.calls==[None,None]
-    assert not list(tmp_path.glob('*.parquet'))
+    assert pd.read_parquet(path).attrs[META]['raw_quality']['invalid_bar_count']==1
+
+
+def test_old_cache_contract_is_not_reused_as_raw_source_approval(history,tmp_path):
+    from chanlun.exchange.usmart_history_cache import _metadata_digest
+    history.read();path=next(tmp_path.glob('*.parquet'))
+    value=pd.read_parquet(path)
+    meta=value.attrs[META]
+    meta['schema']='usmart-incremental-history-v1'
+    meta.pop('storage_contract');meta.pop('raw_quality')
+    meta['checksum']=_metadata_digest(meta)  # Coherent old metadata, not a checksum error.
+    value.to_parquet(path,index=False)
+    result=history.read()
+    assert history.calls==[None,None]
+    pd.testing.assert_frame_equal(result,history.frame)
+    assert pd.read_parquet(path).attrs[META]['storage_contract']==RAW_CONTRACT
+
+
+@pytest.mark.parametrize('location',[10,-8])
+def test_upstream_correction_is_not_permanently_pinned_by_raw_storage(history,tmp_path,location):
+    index=history.frame.index[location]
+    original=history.frame.loc[index,'low']
+    history.frame.loc[index,'low']=1000  # Controlled upstream fixture, never repaired by cache.
+    history.read()
+    history.frame.loc[index,'low']=original
+    history.advance()
+    result=history.read()
+    if location==10:
+        assert 1000 in result.low.values  # Outside the tail; full revalidation owns this boundary.
+        history.advance(seconds=900)
+        result=history.read()
+    assert history.calls[-1] is None
+    pd.testing.assert_frame_equal(result,history.frame.tail(100).reset_index(drop=True))
+    assert pd.read_parquet(next(tmp_path.glob('*.parquet'))).attrs[META]['raw_quality']['invalid_clock']==[]
+
+
+def test_unknown_tail_timestamp_requires_complete_revalidation(history):
+    history.read();history.advance()
+    def loader(start):
+        value=history.loader(start)
+        if start is not None:value.loc[value.index[0],'date']=pd.NaT
+        return value
+    result=history.read(loader=loader)
+    assert history.calls[0] is None and history.calls[1] is not None and history.calls[2] is None
+    pd.testing.assert_frame_equal(result,history.frame.tail(100).reset_index(drop=True))
 
 
 def test_capped_window_does_not_gain_an_extra_bar_when_provider_returns_a_future_bar(history):
@@ -213,6 +277,74 @@ def test_adapter_reuses_bounded_history_and_fetches_only_one_overlap_page(tmp_pa
     assert len(calls)==7
     pd.testing.assert_frame_equal(cached,cold)
     assert input_fingerprint(cached,'MSFT.US','1m')==input_fingerprint(cold,'MSFT.US','1m')
+
+
+@pytest.mark.parametrize('frequency,filename',[
+    ('1m','ORCL_US_1m_raw_20261006.parquet'),
+    ('5m','ORCL_US_5m_raw_20261009.parquet'),
+])
+def test_recorded_auction_anomaly_is_raw_cacheable_but_each_consumer_still_validates(
+    tmp_path,monkeypatch,frequency,filename,
+):
+    from chanlun import config
+    from chanlun.exchange.exchange_usmart import ExchangeUSmart,_timestamp_to_api_time,_parse_api_time
+    from chanlun.screening.markets import market_context,_session_mask
+    from chanlun.screening.rules import validate_frame
+    import pytz
+    monkeypatch.setattr(config,'US_HISTORY_KLINE_SOURCE','usmart')
+    source=pd.read_parquet(Path(__file__).parents[1]/'fixtures/usmart_history'/filename)
+    end=source.date.iloc[-3] if frequency=='1m' else source.date.iloc[-1]
+    clock=[end.timestamp()+.1]
+    calls=[]
+    def quote(endpoint,payload):
+        assert endpoint=='kline'
+        calls.append(dict(payload))
+        cursor=_parse_api_time(payload['start'],pytz.timezone('America/New_York'))
+        page=source.loc[source.date<=cursor].tail(payload['count'])
+        return {'list':[{'latestTime':_timestamp_to_api_time(row.date),
+                        **{key:getattr(row,key) for key in ('open','high','low','close','volume')}}
+                       for row in page.itertuples(index=False)]}
+    client=SimpleNamespace(quote=quote,quote_host='https://quote.example',channel='fixture')
+    cache=USmartHistoryCache(tmp_path,clock=lambda:clock[0])
+    warm=ExchangeUSmart('us',client=client,history_cache=cache)
+    cold=ExchangeUSmart('us',client=client)
+    options={'count':30,'pages':10}
+    result=warm.klines('ORCL.US',frequency,end_date=end.isoformat(),args=options)
+    assert len(calls)==10
+    for position in (-2,-1):
+        if frequency=='1m':
+            end=source.date.iloc[position]
+            clock[0]=end.timestamp()+.1
+        else:
+            clock[0]+=3  # Beyond coalescing; refresh the same source cutoff.
+        before=len(calls)
+        result=warm.klines('ORCL.US',frequency,end_date=end.isoformat(),args=options)
+        assert len(calls)-before==1
+    assert len(calls)==12  # Three independent cold reads would require thirty pages.
+    before=len(calls)
+    independent=cold.klines('ORCL.US',frequency,end_date=end.isoformat(),args=options)
+    assert len(calls)-before==10
+    pd.testing.assert_frame_equal(result,independent)
+    assert input_fingerprint(result,'ORCL.US',frequency)==input_fingerprint(independent,'ORCL.US',frequency)
+    stamp=pd.Timestamp(f'2026-10-06T09:{"30" if frequency=="1m" else "35"}:00-04:00')
+    anomaly=result.loc[result.date==stamp].iloc[0]
+    assert anomaly.open==143.3 and anomaly.low==143.37  # Exact recorded provider values.
+    saved=pd.read_parquet(next(tmp_path.glob('*.parquet')))
+    diagnostic=saved.attrs[META]['raw_quality']
+    assert diagnostic['consumer_validation']=='required'
+    assert {'time':int(stamp.timestamp()),'reasons':['ohlc_geometry']} in diagnostic['invalid_clock']
+    assert META not in result.attrs and FETCH not in result.attrs
+    context=market_context('us','ORCL.US',end.to_pydatetime(),frequency)
+    assert 'INVALID_BARS' in validate_frame(result,context)
+    mask=_session_mask(result.date.astype('int64')//1_000_000_000,
+                       context['session_periods'],int(frequency[:-1])*60)
+    regular=result.loc[mask].copy()
+    if frequency=='1m':
+        assert not regular.date.eq(stamp).any()
+        assert validate_frame(regular,context)==[]
+    else:
+        assert regular.date.eq(stamp).any()
+        assert validate_frame(regular,context)==['INVALID_BARS']
 
 
 def test_explicit_history_query_keeps_its_range_and_bypasses_source_cache(tmp_path,monkeypatch):

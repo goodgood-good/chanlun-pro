@@ -78,6 +78,102 @@ test('background refresh preserves the selected detail, page and chart element',
   assert.equal(ui.get('notifications-list').children[1]['aria-pressed'],'true');
 });
 
+for(const change of ['new delivery','previous-page status changed'])test('notification pagination keeps its boundary after '+change,async()=>{
+  let now=2000;
+  const records=Array.from({length:36},(_,index)=>row('record-'+index,{name:'record-'+index,sort_at:1900-index,sent_at:1900-index}));
+  const cursors=new Map();
+  const ui=fixture(async url=>{
+    if(!url.startsWith('/monitor/notifications?'))return dispatch(url);
+    const query=new URL(url,'http://local').searchParams,size=Number(query.get('size')),page=Number(query.get('page'));
+    const cursor=cursors.get(query.get('cursor'));
+    const asOf=cursor?.asOf??(query.has('as_of')?Number(query.get('as_of')):now);
+    const within=records.filter(value=>value.sort_at<=asOf).sort((a,b)=>b.sort_at-a.sort_at);
+    const remaining=cursor?within.filter(value=>value.sort_at<cursor.at):within.slice((page-1)*size);
+    const items=remaining.slice(0,size),hasMore=remaining.length>size;
+    const next=hasMore?'after-'+items.at(-1).id:null;
+    if(next)cursors.set(next,{at:items.at(-1).sort_at,asOf});
+    return response(listing(items,{pagination:{page,size,total:within.length,pages:Math.ceil(within.length/size),has_more:hasMore,as_of:asOf,next_cursor:next}}));
+  },true);
+  await settle();await settle();
+  const visible=()=>ui.get('notifications-list').children.map(button=>button.children[0].children[0].textContent);
+  assert.equal(visible()[0],'record-0');assert.equal(visible().at(-1),'record-14');
+  if(change==='new delivery')records.unshift(row('new',{name:'new',sort_at:2100,sent_at:2100}));
+  else records[0]={...records[0],sort_at:2100,sent_at:2100};
+  now=2200;
+  ui.get('notifications-next').handlers.click();await settle();await settle();
+  assert.equal(visible()[0],'record-15','the cursor, rather than a shifted offset, determines the next page');
+  assert.equal(visible().at(-1),'record-29');
+  const nextRequest=new URL(ui.requests.findLast(request=>request.url.startsWith('/monitor/notifications?')).url,'http://local');
+  assert.equal(nextRequest.searchParams.get('as_of'),'2000');
+  assert.equal(nextRequest.searchParams.get('cursor'),'after-record-14');
+  ui.get('notifications-prev').handlers.click();await settle();await settle();
+  assert.equal(visible()[0],change==='new delivery'?'record-0':'record-1');
+});
+
+test('historical refresh keeps its cursor, advertises newer delivery and only the latest action starts a new window',async()=>{
+  let changed=false;
+  const ui=fixture(async url=>{
+    if(!url.startsWith('/monitor/notifications?'))return dispatch(url);
+    const q=new URL(url,'http://local').searchParams,page=Number(q.get('page'));
+    return response(listing(page===1?[row('a'),...(changed?[row('new')]:[])]:[row('b')],{
+      pagination:{page,size:25,total:26,pages:2,has_more:page===1,as_of:q.has('as_of')?Number(q.get('as_of')):changed?2200:2000,
+        next_cursor:page===1?'first-boundary':null,has_newer:changed&&q.has('as_of')},
+    }));
+  });await settle();await settle();
+  ui.get('notifications-next').handlers.click();await settle();await settle();
+  changed=true;await ui.timers.find(timer=>timer.ms===5000).fn();await settle();
+  let request=new URL(ui.requests.findLast(value=>value.url.startsWith('/monitor/notifications?')).url,'http://local');
+  assert.equal(request.searchParams.get('page'),'2');assert.equal(request.searchParams.get('as_of'),'2000');
+  assert.equal(request.searchParams.get('cursor'),'first-boundary');
+  assert.equal(ui.get('notifications-newer').hidden,false);
+  assert.match(ui.get('notifications-snapshot-note').textContent,/发送状态仍会更新/);
+  ui.get('notifications-newer').handlers.click();await settle();await settle();
+  request=new URL(ui.requests.findLast(value=>value.url.startsWith('/monitor/notifications?')).url,'http://local');
+  assert.equal(request.searchParams.get('page'),'1');assert.equal(request.searchParams.has('as_of'),false);
+  assert.equal(request.searchParams.has('cursor'),false);assert.equal(ui.get('notifications-snapshot').hidden,true);
+  assert.equal(ui.get('notifications-list').children[0]['aria-pressed'],'true','the inspected record remains selected');
+});
+
+test('a failed next-page read retries that page rather than skipping another page',async()=>{
+  let fail=true;
+  const ui=fixture(async url=>{
+    if(!url.startsWith('/monitor/notifications?'))return dispatch(url);
+    const q=new URL(url,'http://local').searchParams,page=Number(q.get('page'));
+    if(page===2&&fail)return response({error:'temporary page read failure'},503);
+    return response(listing([row(page===1?'a':'b')],{pagination:{page,size:25,total:51,pages:3,has_more:true,
+      as_of:2000,next_cursor:page===1?'first-boundary':'second-boundary'}}));
+  });await settle();await settle();
+  ui.get('notifications-next').handlers.click();await settle();
+  assert.match(ui.get('notifications-message').textContent,/保留上次记录/);
+  assert.match(ui.get('notifications-page').textContent,/1 \/ 3/);
+  fail=false;ui.get('notifications-next').handlers.click();await settle();await settle();
+  const requested=ui.requests.filter(value=>value.url.startsWith('/monitor/notifications?')).map(value=>new URL(value.url,'http://local').searchParams.get('page'));
+  assert.deepEqual(requested,['1','2','2']);
+  assert.match(ui.get('notifications-page').textContent,/2 \/ 3/);
+});
+
+test('editing a filter on a historical page cannot send its old cursor with the new query',async()=>{
+  const ui=fixture(async url=>{
+    if(!url.startsWith('/monitor/notifications?'))return dispatch(url);
+    const q=new URL(url,'http://local').searchParams,page=Number(q.get('page'));
+    if(q.get('cursor')&&q.get('q'))return response({error:'cursor filter mismatch'},400);
+    return response(listing([row('a')],{pagination:{page,size:25,total:76,pages:4,has_more:true,
+      as_of:2000,next_cursor:'after-page-'+page}}));
+  });await settle();await settle();
+  ui.get('notifications-next').handlers.click();await settle();
+  const reads=()=>ui.requests.filter(value=>value.url.startsWith('/monitor/notifications?'));
+  assert.equal(reads().length,2);
+  ui.get('notifications-search').value='BABA';ui.get('notifications-search').handlers.input();
+  await ui.timers.find(timer=>timer.ms===5000).fn();await settle();
+  ui.get('notifications-next').handlers.click();await settle();
+  assert.equal(reads().length,2,'polling and navigation wait for the filter debounce to commit');
+  ui.timers.findLast(timer=>timer.ms===200).fn();await settle();await settle();
+  const request=new URL(reads().at(-1).url,'http://local');
+  assert.equal(request.searchParams.get('q'),'BABA');assert.equal(request.searchParams.get('page'),'1');
+  assert.equal(request.searchParams.has('cursor'),false);assert.equal(request.searchParams.has('as_of'),false);
+  assert.doesNotMatch(ui.get('notifications-message').textContent,/mismatch/);
+});
+
 test('filters reset to page one and stale detail replies cannot overwrite the selected notification',async()=>{
   let release;const pending=new Promise(resolve=>{release=resolve;});
   const ui=fixture(async url=>url.endsWith('/notice-1')?pending:dispatch(url,listing([row(),row('b')])));
@@ -88,6 +184,24 @@ test('filters reset to page one and stale detail replies cannot overwrite the se
   ui.get('notifications-status').value='failed';ui.get('notifications-status').handlers.change();await settle();
   const query=new URL(ui.requests.findLast(r=>r.url.startsWith('/monitor/notifications?')).url,'http://local');
   assert.equal(query.searchParams.get('page'),'1');assert.equal(query.searchParams.get('status'),'failed');
+});
+
+test('a newer delivery state for the same selected id supersedes its delayed old detail',async()=>{
+  let release,reads=0,delivered=false;
+  const old=new Promise(resolve=>{release=resolve;});
+  const pending=row('same',{status:'pending',delivery_status:'pending',sent_at:null});
+  const sent=row('same',{status:'sent',delivery_status:'sent',sent_at:140});
+  const ui=fixture(async url=>{
+    if(url.endsWith('/same'))return ++reads===1?old:response(detail('same',{...sent,body:'最新已发送内容'}));
+    return dispatch(url,listing([delivered?sent:pending]));
+  });await settle();
+  assert.equal(reads,1);
+  delivered=true;await ui.timers.find(timer=>timer.ms===5000).fn();await settle();await settle();
+  assert.equal(reads,2,'the changed list evidence must start a new detail read without waiting for the old one');
+  assert.match(text(ui.get('notification-detail-content')),/最新已发送内容/);
+  release(response(detail('same',{...pending,body:'旧待发送内容'})));await settle();
+  assert.doesNotMatch(text(ui.get('notification-detail-content')),/旧待发送内容|待发送/);
+  assert.match(text(ui.get('notification-detail-content')),/已发送/);
 });
 
 test('silent events never claim delivery and absent images are not invented',async()=>{

@@ -276,11 +276,11 @@ class RecentNotifications:
         status = "CASE WHEN o.status='sent' THEN 'sent' WHEN o.status IN ('pending','retry','sending') THEN 'pending' WHEN o.status IN ('failed','expired') THEN o.status ELSE 'unknown' END"
         return source, args, status, payload
 
-    def _silent_rows(self, options, held, *, count_only=False):
+    def _silent_rows(self, options, held, *, count_only=False, after=None):
         events, profiles, _ = self._state_metadata()
         with self._read('signal_analytics.sqlite3') as db:
             if db is None:
-                return [] if not count_only else 0
+                return False if after is not None else [] if not count_only else 0
             # A connection-local label relation is bounded by retained state;
             # SQL still filters/orders the full persisted analytical history.
             db.execute("PRAGMA query_only=OFF")
@@ -292,6 +292,9 @@ class RecentNotifications:
             args = [options['since'], options['as_of'], *values]
             if options['kind'] in {'screening', 'chart'}:
                 source += " AND 0"
+            if after is not None:
+                return db.execute('SELECT 1 ' + source + ' AND e.recorded>? LIMIT 1',
+                                  [*args, after]).fetchone() is not None
             if count_only:
                 return db.execute("SELECT COUNT(*) " + source, args).fetchone()[0]
             cursor = options.get('cursor')
@@ -384,6 +387,25 @@ class RecentNotifications:
                     expires_at=row['expires'], body=body, message=body)
         return item
 
+    def _has_newer(self, options, held):
+        now = self.now()
+        if now <= options['as_of']:
+            return False
+        since = 0 if options['hours'] == 'all' else now - int(options['hours']) * 3600
+        current = {**options, 'as_of': now, 'since': max(options['as_of'], since)}
+        if options['status'] == 'suppressed':
+            return self._silent_rows(current, held, after=options['as_of'])
+        with self._read('dingtalk_outbox.sqlite3') as db:
+            if db is None:
+                return False
+            source, params, _, _ = self._delivery_sql(current, held)
+            if options['status'] != 'all':
+                statuses = ('pending','retry','sending') if options['status'] == 'pending' else (options['status'],)
+                source += f" AND o.status IN ({','.join('?' for _ in statuses)})"
+                params.extend(statuses)
+            return db.execute('SELECT 1 ' + source + f' AND ({DELIVERY_TIME})>? LIMIT 1',
+                              [*params, options['as_of']]).fetchone() is not None
+
     def list(self, args):
         options = parse_options(args, self.now())
         held = self._state_metadata()[2]
@@ -427,7 +449,8 @@ class RecentNotifications:
                 row.pop(key, None)
         return {'items': rows, 'pagination': {'page': options['page'], 'size': options['size'], 'page_size': options['size'],
                 'total': total, 'pages': max(1, math.ceil(total/options['size'])),
-                'has_more': has_more, 'as_of': options['as_of'], 'next_cursor': cursor, 'order': ORDER_BASIS},
+                'has_more': has_more, 'as_of': options['as_of'], 'next_cursor': cursor, 'order': ORDER_BASIS,
+                'has_newer': self._has_newer(options, held) if 'as_of' in args or args.get('cursor') else False},
                 'summary': summary, 'window': {'hours': options['hours'], 'since': options['since'], 'until': options['as_of'],
                                               'time_basis': ORDER_BASIS},
                 'summary_scope': 'same_filters_except_status; holdings_counts_messages_for_current_holdings',

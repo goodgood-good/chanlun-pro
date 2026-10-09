@@ -48,7 +48,7 @@
       </div>
   <section class="monitor-activity-line" aria-label="通知运行状态"><strong id="notification-activity-status">正在核对通知状态…</strong><p id="notification-activity-times" class="muted"></p></section>
       <section class="notification-inbox panel">
-        <header class="notification-heading"><div><h2>通知记录</h2><p>北京时间 · 按发送时间排序，未发送按生成时间</p></div><button id="notifications-reload" type="button">刷新通知</button></header>
+        <header class="notification-heading"><div><h2>通知记录</h2><p>北京时间 · 按发送时间排序，未发送按生成时间</p></div><button id="notifications-reload" type="button" title="重新读取最新通知，从第1页开始">刷新通知</button></header>
         <div id="notifications-filters" class="notification-filters" data-expanded="false">
           <label class="notification-search">搜索<input id="notifications-search" type="search" placeholder="代码、名称或信号类型" autocomplete="off"></label>
           <label>时间范围<select id="notifications-hours"><option value="24">最近24小时</option><option value="168">最近7天</option><option value="720">最近30天</option><option value="all">全部记录</option></select></label>
@@ -59,6 +59,7 @@
           <label class="notification-extra-filter">标的范围<select id="notifications-scope"><option value="all">全部标的</option><option value="holdings">我的持仓</option></select></label>
         </div>
         <p id="notifications-message" class="notification-message" role="status" aria-live="polite"></p>
+        <div id="notifications-snapshot" class="notification-snapshot" hidden><span id="notifications-snapshot-note"></span><button id="notifications-newer" type="button" hidden>有新通知 · 查看最新</button></div>
         <div class="notification-columns">
           <div class="notification-list-column">
             <div class="notification-list-caption"><strong>发送记录</strong><span id="notifications-total" class="muted">正在读取…</span></div>

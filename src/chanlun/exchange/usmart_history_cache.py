@@ -1,9 +1,11 @@
-"""Bounded, revalidated uSMART history shared by chart and screening processes.
+"""Bounded raw uSMART history shared by chart and screening processes.
 
 Stable history is reused for at most 15 minutes. Every new tail must overlap
 unchanged completed candles; revisions, session transitions and explicit force
 requests rebuild the entire bounded provider window. This is a source cache,
 not an assertion that older forward-adjusted prices can never be revised.
+Storage preserves provider prices, including diagnosed invalid OHLCV rows.
+Each consumer must validate its own clock/session window before using structure.
 """
 from functools import lru_cache
 from contextlib import contextmanager
@@ -28,7 +30,8 @@ from chanlun.tools.log_util import LogUtil
 
 META = "_usmart_history_cache"
 FETCH = "_usmart_history_fetch"
-SCHEMA = "usmart-incremental-history-v1"
+SCHEMA = "usmart-incremental-history-v2"
+RAW_CONTRACT = "raw-provider-history-consumer-validation-required-v1"
 VALUES = ["open", "high", "low", "close", "volume"]
 _registry_lock = threading.Lock()
 _locks = weakref.WeakValueDictionary()
@@ -87,16 +90,14 @@ def _metadata_digest(meta):
         sort_keys=True,separators=(",", ":"),allow_nan=False).encode()).hexdigest()
 
 
-def _usable(frame):
+def _cacheable(frame):
+    """Storage eligibility is completeness and identity, not trading validity."""
     if frame is None or len(frame) < 3 or not set(["date", *VALUES]) <= set(frame):
         return False
     try:
-        return (isinstance(frame.date.dtype,pd.DatetimeTZDtype)
+        return (frame.columns.is_unique and isinstance(frame.date.dtype,pd.DatetimeTZDtype)
                 and not frame.date.isna().any() and frame.date.is_monotonic_increasing and frame.date.is_unique
-                and np.isfinite(frame[VALUES].to_numpy(dtype=float)).all()
-                and (frame[VALUES[:4]] > 0).all().all() and (frame.volume >= 0).all()
-                and (frame.high >= frame[["open","close","low"]].max(axis=1)).all()
-                and (frame.low <= frame[["open","close","high"]].min(axis=1)).all()
+                and all(pd.api.types.is_numeric_dtype(frame[column]) for column in VALUES)
                 and frame.attrs.get("price_basis_provider") == "usmart"
                 and bool(frame.attrs.get("price_basis_revision"))
                 and not frame.attrs.get(FETCH,{}).get("invalid_rows")
@@ -105,6 +106,30 @@ def _usable(frame):
                 and not frame.attrs.get("fetch_incomplete"))
     except (TypeError,ValueError,AttributeError):
         return False
+
+
+def _raw_quality(frame):
+    """Describe raw anomalies without correcting them or qualifying structure."""
+    result = {"consumer_validation": "required", "bars": len(frame),
+              "invalid_bar_count": 0, "invalid_clock": []}
+    if frame.empty or not set(["date", *VALUES]) <= set(frame):
+        return {**result, "source_available": False}
+    values = frame[VALUES].to_numpy(dtype=float)
+    checks = {
+        "non_finite": ~np.isfinite(values).all(axis=1),
+        "non_positive_price": (values[:, :4] <= 0).any(axis=1),
+        "negative_volume": values[:, 4] < 0,
+        "ohlc_geometry": ((frame.high < frame[["open", "close", "low"]].max(axis=1))
+                          | (frame.low > frame[["open", "close", "high"]].min(axis=1))).to_numpy(),
+    }
+    bad = np.logical_or.reduce(tuple(checks.values()))
+    result["invalid_bar_count"] = int(bad.sum())
+    result["invalid_clock"] = [
+        {"time": int(frame.date.iloc[index].timestamp()),
+         "reasons": [name for name, matches in checks.items() if matches[index]]}
+        for index in np.flatnonzero(bad)
+    ]
+    return result
 
 
 def _epoch(observed):
@@ -131,18 +156,21 @@ class USmartHistoryCache:
         try:
             frame = pd.read_parquet(path)
             meta = frame.attrs.get(META)
-            if (not isinstance(meta,dict) or meta.get("schema") != SCHEMA or meta.get("identity") != path.stem
+            if (not isinstance(meta,dict) or meta.get("schema") != SCHEMA
+                    or meta.get("storage_contract") != RAW_CONTRACT or meta.get("identity") != path.stem
                     or meta.get("checksum") != _metadata_digest(meta)
                     or meta.get("fingerprint") != _fingerprint(frame)):
                 return None
-            return frame if _usable(frame) else None
+            return frame if _cacheable(frame) else None
         except (OSError,ValueError,TypeError,KeyError):
             return None
 
     @staticmethod
     def _save(path, frame, meta):
         value = _clean(frame)
-        value.attrs[META] = {**meta,"schema":SCHEMA,"identity":path.stem,"fingerprint":_fingerprint(value)}
+        value.attrs[META] = {**meta,"schema":SCHEMA,"storage_contract":RAW_CONTRACT,
+                             "identity":path.stem,"fingerprint":_fingerprint(value),
+                             "raw_quality":_raw_quality(value)}
         value.attrs[META]['checksum'] = _metadata_digest(value.attrs[META])
         temp = path.with_name("." + path.stem + "." + uuid4().hex + ".tmp")
         try:
@@ -206,7 +234,7 @@ class USmartHistoryCache:
                 if valid and len(cached) >= 12:
                     overlap_start = cached.date.iloc[-12]
                     tail = loader(overlap_start.isoformat())
-                    if _usable(tail) and list(tail.columns) == list(cached.columns):
+                    if _cacheable(tail) and list(tail.columns) == list(cached.columns):
                         same_basis = all(tail.attrs.get(k)==cached.attrs.get(k) for k in (
                             "price_basis_revision","structure_price_quantum","price_basis_provider","price_basis_adjustment"))
                         old = cached.loc[(cached.date>=tail.date.iloc[0]) & (cached.date<cached.date.iloc[-2])].set_index("date")
@@ -234,7 +262,7 @@ class USmartHistoryCache:
                     meta = {"validated_at":now,"base_limit":base_limit,
                             "window_capped":stats.get("window_capped",result is not None and len(result)>=base_limit),
                             "row_limit":max(0 if result is None else len(result),base_limit-int(stats.get("future_rows",0)))}
-                if _usable(result):
+                if _cacheable(result):
                     publish = {**meta,"epoch":_epoch(observed),"end_floor":floor,"fetched_at":float(self.clock())}
                     # An earlier historical request may not roll back a newer
                     # shared source; its independent result remains usable.

@@ -62,9 +62,10 @@
   }
   function message(text) { $('monitor-message').textContent=text;$('monitor-message').hidden=!text; }
   let activePanel='notifications';
-  const inbox={page:1,size:phone?15:25,request:0,pending:false,controller:null,data:null,
+  const inbox={page:1,size:phone?15:25,asOf:null,frozen:false,pageCursors:new Map([[1,null]]),
+    request:0,pending:false,controller:null,data:null,
     selectedId:null,detailRequest:0,detailController:null,detail:null,detailVersion:null,detailFetchedAt:0,
-    detailLoading:false,imageIndex:0,listVersion:null,searchTimer:null};
+    detailLoading:false,imageIndex:0,listVersion:null,searchTimer:null,searchPending:false};
   const deliveryNames={sent:'已发送',pending:'待发送',sending:'发送中',retry:'等待重试',
     failed:'发送失败',expired:'已过期 · 未补发',suppressed:'静默 · 未发送',cancelled:'已取消'};
   const marketNames={a:'A 股',us:'美股',hk:'港股',fx:'外汇',ny_futures:'纽约期货',futures:'国内期货',currency_spot:'数字货币现货',currency:'数字货币合约'};
@@ -94,7 +95,8 @@
     return /buy$/.test(row.point_type||'')?'notification-buy':/sell$/.test(row.point_type||'')?'notification-sell':'';
   }
   function notificationStage(row){
-    const stage=row.signal_stage||row.signal?.stage;
+    const multiple=row.event_count>1||Array.isArray(row.signals)&&row.signals.length>1;
+    const stage=row.signal_stage||(!multiple&&row.signal?.stage);
     return stages[stage]||'';
   }
   function notificationBadge(row){
@@ -112,11 +114,21 @@
     if(name==='notifications')void refreshNotifications();
   }
   function notificationQuery(){
-    return '?'+new URLSearchParams({page:String(inbox.page),size:String(inbox.size),
+    const params=new URLSearchParams({page:String(inbox.page),size:String(inbox.size),
       hours:$('notifications-hours').value||'24',
       q:$('notifications-search').value.trim(),status:$('notifications-status').value||'all',
       kind:$('notifications-kind').value||'all',frequency:$('notifications-frequency').value||'all',
       scope:$('notifications-scope').value||'all'});
+    if(inbox.frozen&&Number.isFinite(inbox.asOf))params.set('as_of',String(inbox.asOf));
+    const cursor=inbox.frozen&&inbox.pageCursors.get(inbox.page);
+    if(cursor)params.set('cursor',cursor);
+    return '?'+params;
+  }
+  function resetNotificationPaging(){inbox.page=1;inbox.asOf=null;inbox.frozen=false;inbox.pageCursors=new Map([[1,null]]);}
+  function notificationPager(){
+    const pagination=inbox.data?.pagination||{},page=pagination.page||1;
+    $('notifications-prev').disabled=inbox.pending||inbox.searchPending||page<=1;
+    $('notifications-next').disabled=inbox.pending||inbox.searchPending||(pagination.has_more!==undefined?!pagination.has_more:page>=(pagination.pages||1));
   }
   function inboxMessage(value){$('notifications-message').textContent=value||'';}
   function notificationVersion(row){return JSON.stringify([row.id,row.updated_at,row.status,row.delivery_status,row.sent_at,row.error,row.image_count,row.images]);}
@@ -126,10 +138,18 @@
     for(const key of ['sent','pending','failed','holdings'])$('notification-'+key+'-count').textContent=Number.isInteger(summary[key])?summary[key]:'—';
     $('notification-last-sent').textContent=summary.last_sent_at?date(summary.last_sent_at):'尚无成功发送记录';
     inbox.page=pagination.page||1;
+    if(Number.isFinite(pagination.as_of))inbox.asOf=pagination.as_of;
+    if(!inbox.frozen)inbox.pageCursors=new Map([[1,null]]);
+    if(pagination.next_cursor)inbox.pageCursors.set(inbox.page+1,pagination.next_cursor);
+    const snapshot=$('notifications-snapshot');
+    if(snapshot){
+      snapshot.hidden=!inbox.frozen;
+      $('notifications-snapshot-note').textContent=inbox.frozen?`浏览范围截至 ${date(inbox.asOf)}；发送状态仍会更新。`:'';
+      $('notifications-newer').hidden=!inbox.frozen||pagination.has_newer!==true;
+    }
     $('notifications-total').textContent=(pagination.total??rows.length)+' 条';
     $('notifications-page').textContent=(pagination.total??rows.length)?`${inbox.page} / ${pagination.pages||1} 页`:'0 条';
-    $('notifications-prev').disabled=inbox.page<=1;
-    $('notifications-next').disabled=pagination.has_more!==undefined?!pagination.has_more:inbox.page>=(pagination.pages||1);
+    notificationPager();
     $('notifications-empty').hidden=rows.length>0;
     $('notifications-empty').textContent=$('notifications-status').value==='suppressed'?'暂无符合条件的静默记录。':'暂无匹配的实际通知记录；信号变化可在“实时信号与持仓”查看。';
     const signature=JSON.stringify([notificationQuery(),rows,inbox.selectedId]);
@@ -152,7 +172,8 @@
     if(!inbox.selectedId&&rows.length)void selectNotification(rows[0]);
     else{
       const selected=rows.find(row=>row.id===inbox.selectedId);
-      if(selected&&!inbox.detailLoading&&(inbox.detailVersion!==notificationVersion(selected)||Date.now()-inbox.detailFetchedAt>=15000))void selectNotification(selected);
+      if(selected&&(inbox.detailVersion!==notificationVersion(selected)
+        ||!inbox.detailLoading&&Date.now()-inbox.detailFetchedAt>=15000))void selectNotification(selected);
     }
   }
   function safeNotificationImage(value){
@@ -278,9 +299,10 @@
     }finally{if(request===inbox.detailRequest)inbox.detailLoading=false;}
   }
   async function refreshNotifications(force=false){
-    if(!notificationWorkspaceEnabled||(!force&&activePanel!=='notifications')||inbox.pending&&!force)return;
+    if(!notificationWorkspaceEnabled||(!force&&(activePanel!=='notifications'||inbox.searchPending))||inbox.pending&&!force)return;
     inbox.controller?.abort();inbox.controller=typeof AbortController==='function'?new AbortController():null;
     const request=++inbox.request;inbox.pending=true;
+    notificationPager();
     $('notifications-reload').disabled=true;
     if(!inbox.data)inboxMessage('正在读取实际通知记录…');
     try{
@@ -289,7 +311,7 @@
       if(!Array.isArray(result.items)||!result.pagination)throw Error('通知记录返回格式异常，请稍后重试。');
       inboxMessage('');renderNotificationList(result);
     }catch(error){if(request===inbox.request)inboxMessage((inbox.data?'暂未更新，保留上次记录。':'')+(error.name==='AbortError'?'通知读取超时，请稍后重试。':error.message));}
-    finally{if(request===inbox.request){inbox.pending=false;$('notifications-reload').disabled=false;}}
+    finally{if(request===inbox.request){inbox.pending=false;$('notifications-reload').disabled=false;notificationPager();}}
   }
   function pointStatus(row) {
     if(row.stage==='left')return '退出候选';
@@ -651,17 +673,36 @@
       });
     });
     const filterChanged=()=>{
+      clearTimeout(inbox.searchTimer);inbox.searchTimer=null;inbox.searchPending=false;
       filterToggleLabel();
-      inbox.page=1;inbox.selectedId=null;inbox.detail=null;inbox.detailVersion=null;inbox.detailLoading=false;
+      resetNotificationPaging();inbox.selectedId=null;inbox.detail=null;inbox.detailVersion=null;inbox.detailLoading=false;
       ++inbox.detailRequest;inbox.detailController?.abort();
       $('notification-detail-content').replaceChildren(node('p','选择一条通知查看详情。','notification-empty'));
       void refreshNotifications(true);
     };
     for(const id of ['hours','status','kind','frequency','scope'])$('notifications-'+id).addEventListener('change',filterChanged);
-    $('notifications-search').addEventListener('input',()=>{clearTimeout(inbox.searchTimer);inbox.searchTimer=setTimeout(filterChanged,200);});
-    $('notifications-prev').addEventListener('click',()=>{inbox.page=Math.max(1,inbox.page-1);void refreshNotifications(true);});
-    $('notifications-next').addEventListener('click',()=>{inbox.page++;void refreshNotifications(true);});
-    $('notifications-reload').addEventListener('click',()=>{inbox.detailVersion=null;void refreshNotifications(true);});
+    $('notifications-search').addEventListener('input',()=>{
+      inbox.searchPending=true;notificationPager();
+      clearTimeout(inbox.searchTimer);inbox.searchTimer=setTimeout(filterChanged,200);
+    });
+    const movePage=delta=>{
+      if(inbox.pending||inbox.searchPending||!inbox.data)return;
+      const current=inbox.data.pagination;
+      const next=Math.max(1,(current.page||1)+delta);
+      if(delta>0&&!current.has_more)return;
+      if(delta>0&&!current.next_cursor){inboxMessage('分页信息尚不完整，请刷新通知后重试。');return;}
+      inbox.frozen=true;inbox.page=next;
+      if(delta>0)inbox.pageCursors.set(next,current.next_cursor);
+      void refreshNotifications(true);
+    };
+    const latestNotifications=()=>{
+      if(inbox.searchPending){filterChanged();return;}
+      resetNotificationPaging();inbox.detailVersion=null;void refreshNotifications(true);
+    };
+    $('notifications-prev').addEventListener('click',()=>movePage(-1));
+    $('notifications-next').addEventListener('click',()=>movePage(1));
+    $('notifications-reload').addEventListener('click',latestNotifications);
+    $('notifications-newer')?.addEventListener('click',latestNotifications);
     $('notifications-back').addEventListener('click',()=>$('notifications-list').scrollIntoView?.({block:'start',behavior:'smooth'}));
     void refreshNotifications();
   }

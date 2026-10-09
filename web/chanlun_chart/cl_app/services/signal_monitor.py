@@ -98,11 +98,26 @@ def _holding_risk_view_key(inputs, revision, expected):
                                      separators=(',', ':')).encode()).hexdigest()
 
 
+def _bound_risk_periods(state, key):
+    return {plan['frequency'] for plan in state.get('holding_risk_plans',{}).values()
+            if plan.get('active') and _symbol_key(plan)==key}
+
+
+def _monitor_periods(state, key):
+    return (set((state.get('seed') or {}).get('settings',{}).get('frequencies',[]))
+            | _bound_risk_periods(state, key))
+
+
 def _monitor_frequency(state, symbol, default='5m'):
-    frequencies=set((state.get('seed') or {}).get('settings',{}).get('frequencies',[]))
-    frequencies.update(plan['frequency'] for plan in state.get('holding_risk_plans',{}).values()
-                       if plan.get('active') and _symbol_key(plan)==_symbol_key(symbol))
+    frequencies = _monitor_periods(state, _symbol_key(symbol))
     return next((f for f in ('1m','5m','30m') if f in frequencies),default)
+
+
+def _available_monitor_periods(state, key, revision):
+    """Only a known, unchanged source contract can suspend an automatic retry."""
+    blocked = state.get('contract_blocks', {})
+    return {frequency for frequency in _monitor_periods(state, key)
+            if not revision or blocked.get(f'{key}:{frequency}', {}).get('revision') != revision}
 
 
 def monitor_settings(state, source_settings):
@@ -125,6 +140,7 @@ def configure_periods(state, frequencies, stamp):
     seed = state.get('seed') or {}
     previous = set(seed.get('settings', state['settings']['screening']).get('frequencies', []))
     added = set(validated['frequencies']) - previous
+    removed = previous - set(validated['frequencies'])
     state['monitor_frequencies'] = list(validated['frequencies'])
     state['settings']['screening'] = validated
     if seed:
@@ -132,7 +148,22 @@ def configure_periods(state, frequencies, stamp):
         seed['settings'] = monitor_settings(state, seed['settings'])
     for frequency in added:
         state.setdefault('notification_frequency_since', {})[frequency] = stamp
-    if added:
+    if removed:
+        # Controls are authoritative immediately, including while an old worker
+        # is still returning. A separately bound holding risk period stays live.
+        for name in ('signals', 'unverified_signals', 'pending_notifications'):
+            state[name] = {key: item for key, item in state.get(name, {}).items()
+                           if item.get('frequency') not in removed
+                           or item.get('signal_type') == 'holding_risk'}
+        for name in ('selection_checks', 'holding_evidence', 'contract_blocks'):
+            state[name] = {key: item for key, item in state.get(name, {}).items()
+                           if key.rsplit(':', 1)[-1] not in removed
+                           or state.get('holding_risk_plans', {}).get(key, {}).get('active')}
+        state['errors'] = [item for item in state.get('errors', [])
+                           if item.get('frequency') not in removed
+                           or state.get('holding_risk_plans', {}).get(
+                               f"{_symbol_key(item)}:{item.get('frequency')}", {}).get('active')]
+    if added or removed:
         # Existing successful checks and notification identities stay intact;
         # only scheduling clocks are cleared so the new periods get a first pass.
         for symbol in seed.get('codes', []):
@@ -398,6 +429,12 @@ class SignalMonitor:
                 if fresh_holdings is None or not holding_current:
                     pending.append(event)
                     continue
+                since = max(state.get('consolidation_enabled_at', 0),
+                            state.get('holding_notification_since', {}).get(key, 0))
+                if event.get('stage') == 'warning':
+                    since = max(since, state.get('consolidation_warning_enabled_at', 0))
+                if (event.get('available_at') or 0) < since:
+                    continue
             elif event.get("point_type") not in seed.get("settings", {}).get("point_types", []):
                 if event.get('point_type') not in POINT_TYPES:
                     continue
@@ -439,7 +476,10 @@ class SignalMonitor:
                 continue
             if not consolidation and item["id"] not in check.get("identities", []):
                 continue
-            valid.append(deepcopy({**event, **item}))
+            delivered = deepcopy({**event, **item})
+            if fresh_holdings is not None:
+                delivered['holding'] = key in fresh_holdings
+            valid.append(delivered)
         return valid, pending
 
     def _request_notification_recheck(self, event, cutoff, revision):
@@ -521,6 +561,7 @@ class SignalMonitor:
                 }
             self._state.setdefault("checked_cutoffs", {})
             self._state.setdefault("retry_symbols", {})
+            self._state.setdefault('contract_blocks', {})
             self._state.setdefault("unverified_signals", {})
             self._state.setdefault("holding_symbols", [])
             self._state.setdefault('holding_risk_plans',{})
@@ -1111,6 +1152,8 @@ class SignalMonitor:
             if not (state.get("seed") or {}).get("codes"):
                 raise ValueError("尚无可监听的已完成选股候选")
             self._check_requests[None]=self._check_requests.get(None,0)+1
+            state['contract_blocks'] = {}
+            state['contract_check_generation'] = state.get('contract_check_generation', 0) + 1
             state["force"] = True
             self._save()
         self._wake.set()
@@ -1420,6 +1463,10 @@ class SignalMonitor:
                         and (_symbol_key(item) in held_keys if item.get("signal_type") == "consolidation_divergence"
                              else item.get("point_type") in (set(POINT_TYPES) if _symbol_key(item) in held_keys else point_types))}
                 scope_pruned |= len(kept) != len(state[name])
+                for item in kept.values():
+                    holding = _symbol_key(item) in held_keys
+                    scope_pruned |= item.get('holding') != holding
+                    item['holding'] = holding
                 state[name] = kept
             checks = {key: item for key, item in state["selection_checks"].items()
                       if item.get("symbol") in pool and (key.rsplit(":", 1)[-1] in frequencies
@@ -1630,7 +1677,11 @@ class SignalMonitor:
                         # Allow one committed result after an empty preemption.
                         return
                     for symbol in seed.get('symbols',[]):
-                        frequency=_monitor_frequency(state,symbol)
+                        revision = status.get('current_source_revision') or status.get('source_revision')
+                        available = _available_monitor_periods(state, _symbol_key(symbol), revision)
+                        if not available:
+                            continue
+                        frequency = next(f for f in ('1m', '5m', '30m') if f in available)
                         try:
                             closed=closed_bar_cutoff(symbol['market'],symbol['code'],now,frequency)
                         except (ValueError,OSError):
@@ -1696,6 +1747,7 @@ class SignalMonitor:
                         and monitor_status.get("run_id") != state.get("processed_run")):
                 return
             reference = monitor_status if monitor_status.get("run_id") else manual
+            revision = reference.get('current_source_revision') or reference.get('source_revision')
             if reference.get("source_current") is False:
                 # Latch the target version, not a failed run ID. A run that
                 # dies before recording its source hash must not force an
@@ -1711,7 +1763,10 @@ class SignalMonitor:
             previous_calendar_errors = {_symbol_key(error) for error in state.get("schedule_errors", [])}
             for symbol in seed["symbols"]:
                 key = _symbol_key(symbol)
-                symbol_trigger=_monitor_frequency(state,symbol,trigger_period)
+                available = _available_monitor_periods(state, key, revision)
+                if not available:
+                    continue
+                symbol_trigger = next(f for f in ('1m', '5m', '30m') if f in available)
                 try:
                     closed = (cutoff if symbol["market"] == "a" and cutoff is not None and symbol_trigger==trigger_period
                               else closed_bar_cutoff(symbol["market"], symbol["code"], now, symbol_trigger))
@@ -1822,7 +1877,7 @@ class SignalMonitor:
             revision=reference.get('current_source_revision') or reference.get('source_revision')
             for symbol in pending:
                 key=_symbol_key(symbol)
-                periods=set(seed['settings']['frequencies'])|set(runtime_periods.get(key,[]))
+                periods = _available_monitor_periods(state, key, revision)
                 needed=[]
                 for frequency in sorted(periods):
                     check=state['selection_checks'].get(f'{key}:{frequency}',{})
@@ -1831,7 +1886,7 @@ class SignalMonitor:
                     if (key in forced or key in retries or key in urgent or not revision or expected is None
                             or check.get('error') or check.get('revision')!=revision or check.get('cutoff')!=expected):
                         needed.append(frequency)
-                due_periods[key]=needed or [_monitor_frequency(state,symbol,trigger_period)]
+                due_periods[key] = needed or [next(f for f in ('1m', '5m', '30m') if f in periods)]
             subset=any(set(due_periods[_symbol_key(s)]) != (set(seed['settings']['frequencies'])|set(runtime_periods.get(_symbol_key(s),[])))
                        for s in pending)
             # A cached membership snapshot still bounds computation while the
@@ -1847,6 +1902,7 @@ class SignalMonitor:
                 'pending_before':set(state.get('force_pending_symbols',[])),
                 'waiting':pending_keys-set(cutoffs),'mode':mode,'scheduled_at':now.timestamp(),
                 'notification_rechecks':set(cutoffs)&urgent,
+                'contract_generation':state.get('contract_check_generation', 0),
                 'interval':state['settings']['interval_seconds'],'check_requests':dict(self._check_requests),
             }
         self._dispatch_monitor(launch)
@@ -1902,6 +1958,7 @@ class SignalMonitor:
                 # shutdown while startup was in progress. Its seed identifies
                 # whether later results still belong to the current pool.
                 state.update(active_seed=launch['seed'],active_monitor_run=launched['run_id'],
+                             active_contract_generation=launch.get('contract_generation', 0),
                              active_monitor_mode=launch['mode'],yielding_monitor_run=None,
                              active_scheduled_at=launch['scheduled_at'],active_symbols=list(cutoffs),
                              active_cutoffs=cutoffs,active_consumed_symbols=[],
@@ -2017,17 +2074,27 @@ class SignalMonitor:
                     state['last_error']=''
             yielded=(result.get('background_yielded') and result.get('run_id')==state.get('yielding_monitor_run')
                      and result['status']=='cancelled')
-            frequencies = set(result.get('settings',{}).get('frequencies',[])
-                              or (state.get('seed') or {}).get('settings',{}).get('frequencies',[]))
-            requested={_symbol_key(symbol):set(symbol.get('_monitor_periods',frequencies))
+            current_frequencies = set((state.get('seed') or {}).get('settings',{}).get('frequencies',[]))
+            launched_frequencies = set(result.get('settings',{}).get('frequencies',[]) or current_frequencies)
+            frequencies = launched_frequencies & current_frequencies
+            requested={_symbol_key(symbol):set(symbol.get('_monitor_periods',
+                           launched_frequencies | _bound_risk_periods(state, _symbol_key(symbol))))
                        for symbol in result.get('settings',{}).get('symbols',[])}
             if not result.get('source_current'):
                 requested={}
-            def periods_for(symbol):return requested.get(symbol,frequencies)
+            def periods_for(symbol):
+                return requested.get(symbol, launched_frequencies | _bound_risk_periods(state, symbol)) & _monitor_periods(state, symbol)
             def touched(item, symbols):
                 return _symbol_key(item) in symbols and item.get('frequency') in periods_for(_symbol_key(item))
             if (result["status"] not in ACTIVE | {"completed"} and not yielded) or not result.get("source_current"):
-                unchecked = set(state.get("active_symbols", []))
+                active = set(state.get('active_symbols', []))
+                unchecked = {key for key in active if periods_for(key)
+                             and key in (state.get('seed') or {}).get('codes', [])}
+                if not unchecked:
+                    state['processed_run'] = result.get('run_id')
+                    state['active_consumed_symbols'] = sorted(set(state.get('active_consumed_symbols', [])) | active)
+                    self._save()
+                    return
                 if result.get("source_current"):
                     unchecked -= set(state.get("active_consumed_symbols", []))
                 for symbol in unchecked:
@@ -2049,10 +2116,17 @@ class SignalMonitor:
                             and _symbol_key(value['original']) in state['holding_symbols']}
             risk_retries = {_symbol_key(value['original']) for value in risk_results.values() if value['retry']}
             pool = set((state.get("seed") or {}).get("codes", []))
-            checked = {_symbol_key(symbol) for symbol in result.get("processed_symbols", [])}
-            checked &= set(state.get("active_symbols", pool))
-            frequencies = set(result.get("settings", {}).get("frequencies", [])
-                              or (state.get("seed") or {}).get("settings", {}).get("frequencies", []))
+            consumed = {_symbol_key(symbol) for symbol in result.get("processed_symbols", [])}
+            consumed &= set(state.get("active_symbols", pool))
+            checked = {key for key in consumed & pool if periods_for(key)}
+            # A completed old period is acknowledged without publishing its
+            # proof, errors or notifications into the current control scope.
+            result = {**result,
+                      'verified_periods': [period for period in result.get('verified_periods', [])
+                          if _symbol_key(period) in checked and period.get('frequency') in periods_for(_symbol_key(period))],
+                      'errors': [error for error in result.get('errors', [])
+                          if _symbol_key(error) in checked and (not error.get('frequency')
+                              or error['frequency'] in periods_for(_symbol_key(error)))]}
             verified = {(_symbol_key(period), period.get("frequency"))
                         for period in result.get("verified_periods", [])
                         if type(period.get("source_closed_at")) is int}
@@ -2140,11 +2214,35 @@ class SignalMonitor:
                        and not (item.get("signal_type") == "consolidation_divergence" and (
                            (item.get("market", "a"), item["code"], item["frequency"]) in failed_consolidation
                            or (item.get("market", "a"), item["code"], None) in failed_consolidation))}
-            self._record_failures(({_symbol_key(error) for error in result.get("errors", [])} | risk_retries) & checked,
+            # This NY adapter explicitly rejects its static, unverified bar-time
+            # contract before fetching. Another candle cannot change that
+            # contract. Keep the failed proof/diagnostic, and retry only after a
+            # source revision change or an explicit user check.
+            revision = result.get('source_revision')
+            blocks = state.setdefault('contract_blocks', {})
+            for error in result.get('errors', []):
+                key = _symbol_key(error)
+                if (revision and state.get('active_contract_generation', 0) == state.get('contract_check_generation', 0)
+                        and error.get('market') == 'ny_futures'
+                        and error.get('signal_type') != 'consolidation_divergence'
+                        and 'BAR_TIME_LABEL_UNAVAILABLE' in error.get('reasons', [])
+                        and error.get('frequency') in periods_for(key)):
+                    blocks[f"{key}:{error['frequency']}"] = {
+                        'revision': revision, 'at': stamp, 'reason': 'BAR_TIME_LABEL_UNAVAILABLE',
+                        'error': error.get('error', '')}
+            retry_keys = ({_symbol_key(error) for error in result.get('errors', [])
+                           if not error.get('frequency') or error['frequency'] in
+                               _available_monitor_periods(state, _symbol_key(error), revision)} | risk_retries) & checked
+            retry_keys = {key for key in retry_keys if _available_monitor_periods(state, key, revision)}
+            self._record_failures(retry_keys,
                                    stamp, result["run_id"])
             for key in checked:
-                if tuple(key.split(":", 1)) not in failed and key not in risk_retries:
+                if key not in retry_keys:
                     state["retry_symbols"].pop(key, None)
+            suspended = {key for key in checked if not _available_monitor_periods(state, key, revision)}
+            if suspended:
+                state['force_pending_symbols'] = [key for key in state.get('force_pending_symbols', [])
+                                                  if key not in suspended]
             previous_signals = {**state["unverified_signals"], **state["signals"]}
             for identity, item in signals.items():
                 legacy = item.get("legacy_id")
@@ -2304,6 +2402,7 @@ class SignalMonitor:
                         or (period.get("market", "a"), period["code"], period["frequency"]) in failed_periods):
                     continue
                 period_key = f"{symbol}:{period['frequency']}"
+                state['contract_blocks'].pop(period_key, None)
                 identities = [item["id"] for item in signals.values()
                               if _symbol_key(item) == symbol and item["frequency"] == period["frequency"]
                               and item.get("signal_type") != "consolidation_divergence"]
@@ -2341,7 +2440,7 @@ class SignalMonitor:
                     frequency=period['frequency']
                     latest_cutoffs[frequency]=max(period['source_closed_at'],latest_cutoffs.get(frequency,0))
             through = result.get("results_through", after)
-            state["active_consumed_symbols"] = sorted(set(state.get("active_consumed_symbols", [])) | checked)
+            state["active_consumed_symbols"] = sorted(set(state.get("active_consumed_symbols", [])) | consumed)
             if (result["status"] == "completed" or yielded) and through >= result.get("completed", 0):
                 state["processed_run"] = result["run_id"]
                 state["last_batch_completed_at"] = stamp
