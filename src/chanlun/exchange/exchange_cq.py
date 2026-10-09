@@ -4,6 +4,7 @@ import atexit
 import weakref
 import threading
 import functools
+import math
 from datetime import timedelta, datetime, time as datetime_time
 from typing import Dict, List, Union
 import pandas as pd
@@ -23,6 +24,7 @@ from chanlun import config
 from chanlun.exchange import Exchange, SINGLE_SYMBOL_STOCK_INFO
 from chanlun.exchange.exchange import Tick
 from chanlun.exchange.quote_change import quote_change_rate, quote_price
+from chanlun.exchange.errors import LongbridgeConnectionLimitError
 from chanlun.tools.log_util import LogUtil
 from chanlun.exchange.lb_quota_tracker import LbQuotaTracker
 from chanlun.exchange.longbridge_quote import QuoteContextBridge
@@ -39,6 +41,27 @@ from chanlun.exchange.price_basis import (
 # 统一时区设置
 __tz = pytz.timezone("Asia/Shanghai")
 _LONGBRIDGE_OHLC_NORMALIZATION_REVISION = "ohlc-envelope"
+_quote_instances = weakref.WeakSet()
+_quote_instances_lock = threading.Lock()
+
+
+def release_worker_quote_context() -> None:
+    """Release only existing worker quote contexts; never initialize a provider."""
+    from chanlun.exchange.quote_capacity import is_worker_quote_process, release_worker_quote_slot
+    if not is_worker_quote_process():
+        return
+    with _quote_instances_lock:
+        instances = tuple(_quote_instances)
+    for instance in instances:
+        with instance._quote_context_lock:
+            context = instance._quote_context
+            if context is not None:
+                context.close()
+                instance._quote_context = None
+            # Keep slot release atomic with disposal for the next lazy caller.
+            release_worker_quote_slot()
+    if not instances:
+        release_worker_quote_slot()
 
 
 def _get_env(key: str):
@@ -240,7 +263,7 @@ def is_retryable_exception(exception):
     判断异常是否需要重试
     """
     # 内部哨兵：本进程已知配额耗尽，retry 不会让配额变多，直接 break
-    if isinstance(exception, _PreemptiveQuotaExhausted):
+    if isinstance(exception, _PreemptiveQuotaExhausted) or _is_connection_limit(exception):
         return False
     if isinstance(exception, OpenApiException):
         # 301600: out of minute kline begin date - 数据超限，不重试
@@ -249,6 +272,14 @@ def is_retryable_exception(exception):
         if code in (301600, 301607):
             return False
     return True
+
+
+def _is_connection_limit(exception) -> bool:
+    """Connection admission errors have no numeric code in the current SDK."""
+    if isinstance(exception, LongbridgeConnectionLimitError):
+        return True
+    message = str(getattr(exception, "message", None) or exception).lower()
+    return "connections limitation is hit" in message or "connection limit" in message
 
 
 def time_logger(func):
@@ -358,6 +389,9 @@ class ExchangeChangQiao(Exchange):
 
         atexit.register(_shutdown_on_exit)
 
+        with _quote_instances_lock:
+            _quote_instances.add(self)
+
         # 启动后台心跳探针：每 30s 发一次 trading_session() 探活，
         # 发现卡死（超过 5s 不返回）时主动重建 QuoteContext，
         # 避免等到业务调用才发现连接已死。
@@ -384,11 +418,31 @@ class ExchangeChangQiao(Exchange):
     _REBUILD_MIN_INTERVAL = 30.0  # 秒
     _last_rebuild_ts = None  # 上次重建的 time.monotonic()；类属性默认，实例首次重建时写
 
+    def _raise_if_connection_limited(self):
+        remaining = getattr(self, "_connection_limit_until", 0.0) - time.monotonic()
+        if remaining > 0:
+            raise LongbridgeConnectionLimitError(math.ceil(remaining))
+
+    def _remember_connection_limit(self, error):
+        # Repeated callers during cooldown must not keep moving its deadline.
+        now = time.monotonic()
+        until = getattr(self, "_connection_limit_until", 0.0)
+        if until <= now:
+            until = now + (error.retry_after if isinstance(error, LongbridgeConnectionLimitError) else 30)
+            self._connection_limit_until = until
+        return LongbridgeConnectionLimitError(math.ceil(until - now))
+
     def _quote_ctx(self) -> QuoteContextBridge:
         """懒加载 QuoteContext 并返回当前实例（加锁保护引用读写）。"""
+        from chanlun.exchange.quote_capacity import acquire_worker_quote_slot, release_worker_quote_slot
         with self._quote_context_lock:
             if self._quote_context is None:
-                self._quote_context = QuoteContextBridge(self.config)
+                acquire_worker_quote_slot()
+                try:
+                    self._quote_context = QuoteContextBridge(self.config)
+                except Exception:
+                    release_worker_quote_slot()
+                    raise
             return self._quote_context
 
     def _rebuild_quote_ctx(self) -> None:
@@ -398,7 +452,12 @@ class ExchangeChangQiao(Exchange):
         等待这些请求的工作线程随之退出；重建仍保留退避，避免并发重连风暴。
         """
         old_executor = None
+        from chanlun.exchange.quote_capacity import release_worker_quote_slot
         with self._quote_context_lock:
+            # A completed worker scope may already have disposed this context.
+            # A late watchdog timeout must not recreate it outside that scope.
+            if self._quote_context is None:
+                return
             now = time.monotonic()
             last = self._last_rebuild_ts
             if last is not None and (now - last) < self._REBUILD_MIN_INTERVAL:
@@ -407,15 +466,21 @@ class ExchangeChangQiao(Exchange):
                 return
             old = self._quote_context
             old_executor = self._quote_call_executor
-            self._quote_context = QuoteContextBridge(self.config)
+            # Keep the same worker slot, but never overlap two live sockets
+            # while replacing its transport generation.
+            old.close()
+            self._quote_context = None
+            try:
+                self._quote_context = QuoteContextBridge(self.config)
+            except Exception:
+                release_worker_quote_slot()
+                raise
             # 同时换掉 _quote_call 专用池：真正卡死(永不返回)的 longbridge 调用会占住该池
             # 的 worker 泄漏，换新池让后续调用拿到干净 worker，不被僵尸占满。
             self._quote_call_executor = ThreadPoolExecutor(
                 max_workers=16, thread_name_prefix="lb-qcall"
             )
             self._last_rebuild_ts = now
-        if old is not None:
-            old.close()
         # 锁外 shutdown 旧池(不 wait，里面可能有卡死线程；cancel 掉还没开始的排队任务)
         if old_executor is not None:
             try:
@@ -433,6 +498,7 @@ class ExchangeChangQiao(Exchange):
         注意：fn 内部通过 self._quote_ctx() 取引用（锁外执行），
         超时后主线程调 _rebuild_quote_ctx() 可安全拿到锁，不会死锁。
         """
+        self._raise_if_connection_limited()
         t = timeout if timeout is not None else self._QUOTE_CALL_TIMEOUT
         # 用专用池 _quote_call_executor，绝不能用批量 self.executor：klines() 把分段任务
         # submit 到 self.executor，分段内部又经 _fetch_candlesticks_api → 本函数再 submit，
@@ -457,6 +523,12 @@ class ExchangeChangQiao(Exchange):
             )
             self._rebuild_quote_ctx()
             raise
+        except Exception as exc:
+            if _is_connection_limit(exc):
+                # This is an account connection cap, not a hung transport.
+                # Rebuilding/retiring unrelated contexts cannot resolve it.
+                raise self._remember_connection_limit(exc) from exc
+            raise
 
     def _start_quote_ctx_watchdog(self, interval: float = 30.0) -> None:
         """启动后台守护线程，定期用 trading_session() 探活 QuoteContext。
@@ -467,16 +539,21 @@ class ExchangeChangQiao(Exchange):
         _self_ref = weakref.ref(self)
 
         def _watchdog():
+            from chanlun.exchange.quote_capacity import is_worker_quote_process
             while True:
                 time.sleep(interval)
                 inst = _self_ref()
                 if inst is None:
                     return  # 实例已被 GC，退出守护线程
-                if inst._quote_context is None:
+                if is_worker_quote_process():
+                    continue  # Worker scopes own short-lived contexts and their slots.
+                with inst._quote_context_lock:
+                    context = inst._quote_context
+                if context is None:
                     continue  # 尚未初始化，跳过本轮
                 try:
                     inst._quote_call(
-                        lambda: inst._quote_ctx().trading_session(),
+                        lambda: context.trading_session(),
                         timeout=5.0,
                     )
                 except (FuturesTimeoutError, TimeoutError):
@@ -814,6 +891,7 @@ class ExchangeChangQiao(Exchange):
         def _do_call():
             nonlocal attempt_number
             attempt_number += 1
+            self._raise_if_connection_limited()
             tracker = LbQuotaTracker.instance()
             limit = getattr(config, "LB_QUOTA_MONTHLY_LIMIT", 0)
             if limit <= 0 and not getattr(self, "_quota_limit_zero_warned", False):
@@ -834,6 +912,7 @@ class ExchangeChangQiao(Exchange):
             quota_started = time.perf_counter()
             limiter.wait()
             quota_done = time.perf_counter()
+            self._raise_if_connection_limited()
             context = self._quote_ctx()
             # A first history response needs the initial authenticated socket.
             # Allow the remainder of its single 20s handshake budget instead
@@ -903,6 +982,8 @@ class ExchangeChangQiao(Exchange):
                     except Exception:
                         pass
                 err_code = getattr(inner, 'code', None)
+                if _is_connection_limit(inner):
+                    raise self._remember_connection_limit(inner) from inner
                 if isinstance(inner, OpenApiException) and err_code == 301600:
                     LogUtil.warning(f"Data limit reached (301600) for {code}, stopping segment.")
                     status = "reached_origin"   # 合法到该 symbol 历史起点,非洞
@@ -1003,6 +1084,7 @@ class ExchangeChangQiao(Exchange):
         """
         获取 Kline 线 (并发优化版)
         """
+        self._raise_if_connection_limited()
         args = args or {}
         tz = pytz.timezone("Asia/Shanghai")
 
@@ -1137,6 +1219,10 @@ class ExchangeChangQiao(Exchange):
                 if seg_status == "failed":
                     failed.append((s, e))
             except Exception as ex:
+                if _is_connection_limit(ex):
+                    for pending in win:
+                        pending.cancel()
+                    raise self._remember_connection_limit(ex) from ex
                 LogUtil.error(f"Kline segment fetch error win=[{s},{e}]: {ex}")
                 failed.append((s, e))
 
@@ -1148,8 +1234,9 @@ class ExchangeChangQiao(Exchange):
                     if res:
                         all_candles.extend(res)
                     failed.remove((s, e))
-            except Exception:
-                pass
+            except Exception as exc:
+                if _is_connection_limit(exc):
+                    raise self._remember_connection_limit(exc) from exc
 
         # 完整性闸门:仍有失败段 → 本次拉取带洞不可信,返回空 DataFrame 且标 attrs['fetch_incomplete'],
         # 绝不把带洞结果当权威落盘(C1)。attrs 让 web 层区分「异常空→短退避 30s 自愈」与「真空→5min

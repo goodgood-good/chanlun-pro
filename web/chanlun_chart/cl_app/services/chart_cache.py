@@ -273,7 +273,9 @@ def _build_cache_key(market: str, code: str, frequency: str, cl_config: dict) ->
     provider = ""
     if market == "us":
         from chanlun import config
-        provider = f"_provider{_stable_hash(getattr(config, 'EXCHANGE_US', None))[:8]}"
+        source = (getattr(config, "EXCHANGE_US", None),
+                  getattr(config, "US_HISTORY_KLINE_SOURCE", "usmart"))
+        provider = f"_provider{_stable_hash(source)[:8]}"
     return (f"{source_fingerprint()}_chart{chart_producer_revision()}{provider}_{market}_{code}_{frequency}"
             f"_{_stable_hash(cl_config)}")
 

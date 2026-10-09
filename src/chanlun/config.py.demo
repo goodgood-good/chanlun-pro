@@ -157,8 +157,7 @@ def get_data_path():
 # 月度配额上限（按你的实际订阅级别填）。设为 0 表示不做预检查（仅在 301607 后被动收敛）。
 LB_QUOTA_MONTHLY_LIMIT = 100
 
-# 美股历史 K 线数据源：
-#   "longbridge" - 走长桥（默认；占用 LB_QUOTA_MONTHLY_LIMIT 配额）
-# 只支持 "longbridge"（长桥）与 "usmart"（盈立）。
-# 长桥实时报价不受影响，仍走 cq。
-US_HISTORY_KLINE_SOURCE = "longbridge"
+# 美股历史 K 线默认使用盈立，与上方 EXCHANGE_US 保持一致。
+# 只支持 "usmart"（盈立）与 "longbridge"（长桥）；长桥须显式选择。
+# 完整快照与轮询使用同一配置，不因历史长度自动切换数据源。
+US_HISTORY_KLINE_SOURCE = "usmart"

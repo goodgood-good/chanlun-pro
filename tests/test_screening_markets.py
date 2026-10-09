@@ -172,7 +172,7 @@ def test_run_status_preserves_actual_cutoffs_for_every_market_and_period(tmp_pat
     rows = [{"market": "us", "frequency": frequency, "source_closed_at": cutoff,
              "selected": [], "data_errors": []}
             for frequency, cutoff in (("1m", 1014), ("5m", 1010), ("30m", 1000))]
-    monkeypatch.setattr(runner, "bounded_scan", lambda *_: iter([({**stock, "rows": rows}, [])]))
+    monkeypatch.setattr(runner, "bounded_scan", lambda *_, **__: iter([({**stock, "rows": rows}, [])]))
     runner.run_screening(tmp_path)
     import json
     state = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
@@ -190,7 +190,7 @@ def test_monitor_reuses_verified_catalog_and_preserves_holding_priority(tmp_path
                       'holding_snapshot':{'schema':'monitor-holdings-v1','keys':['us:TSLA.US']}})
     monkeypatch.setattr(runner,'bounded_catalog',lambda *_:pytest.fail('verified monitor scope must not start another catalog process'))
     captured=[]
-    def scan(stocks,*args):
+    def scan(stocks,*args,**kwargs):
         captured.extend(stocks)
         return iter([({**stock,'rows':[{'frequency':'5m','selected':[],'data_errors':[]}]},[]) for stock in stocks])
     monkeypatch.setattr(runner,'bounded_scan',scan)

@@ -90,9 +90,22 @@
             // eslint-disable-next-line no-restricted-globals
             return Promise.race([
                 fetch(`${datafeedUrl}/${urlPath}`, options)
-                    .then((response) => {
+                    .then(async (response) => {
                     if (response.ok === false) {
-                        throw new Error(`Request failed with HTTP ${response.status}`);
+                        const error = new Error(`Request failed with HTTP ${response.status}`);
+                        try {
+                            const body = JSON.parse(await response.text());
+                            if (body?.s === 'error' && typeof body.errmsg === 'string' && body.errmsg.trim()
+                                && typeof body.error_code === 'string' && /^[a-z0-9_]+$/.test(body.error_code)) {
+                                error.userMessage = body.errmsg.trim().slice(0, 400);
+                                error.errorCode = body.error_code;
+                                const retryAfter = Number(body.retry_after);
+                                if (Number.isFinite(retryAfter) && retryAfter > 0)
+                                    error.retryAfter = Math.min(3600, Math.ceil(retryAfter));
+                            }
+                        }
+                        catch (_) { /* Keep generic HTTP errors when the body is not a typed UDF error. */ }
+                        throw error;
                     }
                     return response.text();
                 })
@@ -542,7 +555,12 @@
                         // tslint:disable-next-line:no-console
                         console.warn(`HistoryProvider: getBars() failed, error=${reasonString}`);
                     }
-                    this._emitInitialHistoryError(requestParams, requestGeneration, 'K 线请求失败，请检查行情连接后重新加载数据。');
+                    const typedError = e;
+                    const userMessage = typeof typedError?.userMessage === 'string' ? typedError.userMessage : '';
+                    const retryAfter = Number(typedError?.retryAfter);
+                    this._emitInitialHistoryError(requestParams, requestGeneration, userMessage ? userMessage + (Number.isFinite(retryAfter) && retryAfter > 0
+                        ? ` 可在 ${retryAfter} 秒后手动重试。` : '')
+                        : 'K 线请求失败，请检查行情连接后重新加载数据。');
                     reject(reasonString);
                 }
             }).finally(() => {

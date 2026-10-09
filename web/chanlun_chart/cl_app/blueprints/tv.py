@@ -39,6 +39,7 @@ from chanlun.exchange import (
     supports_bounded_stock_info,
 )
 from chanlun.tools.log_util import LogUtil
+from chanlun.exchange.errors import LongbridgeConnectionLimitError, USmartAPIError
 
 from ..services.constants import (
     frequency_maps,
@@ -1510,6 +1511,22 @@ def tv_history():
             **chart_bar_time_fields(cl_chart_data),
             **_strict_history_fields,
         }
+    except LongbridgeConnectionLimitError as exc:
+        LogUtil.warning("[tv_history] Longbridge connection capacity unavailable")
+        return {
+            "s": "error",
+            "error_code": exc.code,
+            "errmsg": "行情连接数已达上限，请稍后重试。",
+            "retry_after": exc.retry_after,
+        }, 503, {"Retry-After": str(exc.retry_after)}
+    except USmartAPIError as exc:
+        LogUtil.warning(f"[tv_history] uSMART history unavailable code={exc.code} http={exc.status_code}")
+        return {
+            "s": "error",
+            "error_code": "usmart_history_unavailable",
+            "errmsg": "盈立行情暂不可用，请稍后重试。",
+            "retry_after": 15,
+        }, 503, {"Retry-After": "15"}
     except Exception as e:
         req_qs = request.query_string.decode("utf-8", errors="ignore")
         LogUtil.error(f"[tv_history] unhandled error query={req_qs} err={e}", exc_info=True)

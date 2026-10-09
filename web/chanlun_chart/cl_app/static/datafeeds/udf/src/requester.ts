@@ -60,9 +60,22 @@ export class Requester implements IRequester {
 		// eslint-disable-next-line no-restricted-globals
 		return Promise.race([
 			fetch(`${datafeedUrl}/${urlPath}`, options)
-			.then((response: Response) => {
+			.then(async (response: Response) => {
 				if (response.ok === false) {
-					throw new Error(`Request failed with HTTP ${response.status}`);
+					const error = new Error(`Request failed with HTTP ${response.status}`) as Error & {
+						userMessage?: string; errorCode?: string; retryAfter?: number;
+					};
+					try {
+						const body = JSON.parse(await response.text());
+						if (body?.s === 'error' && typeof body.errmsg === 'string' && body.errmsg.trim()
+							&& typeof body.error_code === 'string' && /^[a-z0-9_]+$/.test(body.error_code)) {
+							error.userMessage = body.errmsg.trim().slice(0, 400);
+							error.errorCode = body.error_code;
+							const retryAfter = Number(body.retry_after);
+							if (Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfter = Math.min(3600, Math.ceil(retryAfter));
+						}
+					} catch (_) { /* Keep generic HTTP errors when the body is not a typed UDF error. */ }
+					throw error;
 				}
 				return response.text();
 			})

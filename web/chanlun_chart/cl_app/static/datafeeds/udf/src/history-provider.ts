@@ -603,8 +603,13 @@ export class HistoryProvider {
               `HistoryProvider: getBars() failed, error=${reasonString}`
             );
           }
+          const typedError = e as { userMessage?: unknown; retryAfter?: unknown } | null;
+          const userMessage = typeof typedError?.userMessage === 'string' ? typedError.userMessage : '';
+          const retryAfter = Number(typedError?.retryAfter);
           this._emitInitialHistoryError(requestParams, requestGeneration,
-            'K 线请求失败，请检查行情连接后重新加载数据。');
+            userMessage ? userMessage + (Number.isFinite(retryAfter) && retryAfter > 0
+              ? ` 可在 ${retryAfter} 秒后手动重试。` : '')
+              : 'K 线请求失败，请检查行情连接后重新加载数据。');
           reject(reasonString);
         }
       }

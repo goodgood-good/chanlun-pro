@@ -44,13 +44,37 @@
     const title = env.document.getElementById("tv_chart_transition_title");
     const detail = env.document.getElementById("tv_chart_transition_detail");
     if (!overlay) return null;
+    const spinner = overlay.querySelector?.('.ca-chart-transition__spinner');
+    const card = overlay.querySelector?.('.ca-chart-transition__card');
+    let actions = null;
+    let retryButton = null;
+    if (card && typeof env.document.createElement === 'function') {
+      actions = env.document.createElement('div');
+      actions.hidden = true;
+      actions.style.cssText = 'display:none;gap:8px;align-items:center;justify-content:center';
+      retryButton = env.document.createElement('button');
+      retryButton.type = 'button';
+      retryButton.className = 'layui-btn layui-btn-sm';
+      retryButton.textContent = '重试行情';
+      const dismiss = env.document.createElement('button');
+      dismiss.type = 'button';
+      dismiss.className = 'layui-btn layui-btn-primary layui-btn-sm';
+      dismiss.textContent = '返回图表';
+      retryButton.addEventListener('click', () => { void state.retry(); });
+      dismiss.addEventListener('click', () => state.finish());
+      actions.appendChild(retryButton);
+      actions.appendChild(dismiss);
+      card.appendChild(actions);
+    }
 
     const state = {
       active: false,
+      failed: false,
       target: null,
       expected: 0,
       ready: new Set(),
       timeout: null,
+      generation: 0,
     };
     env[STATE_KEY] = state;
 
@@ -72,31 +96,35 @@
 
       clearDeadline();
       state.active = true;
+      state.failed = false;
+      state.generation += 1;
       state.target = target;
       state.expected = count;
       state.ready.clear();
       overlay.hidden = false;
       overlay.dataset.state = "loading";
+      if (spinner) { spinner.hidden = false; spinner.style.display = ''; spinner.style.animation = ''; }
+      if (actions) { actions.hidden = true; actions.style.display = 'none'; }
       if (area) area.setAttribute("aria-busy", "true");
       if (title) title.textContent = `正在切换至 ${text(value.label) || target.code}`;
       if (detail) detail.textContent = "正在加载 K 线，线段和中枢随后补充";
       if (typeof env.setTimeout === "function") {
         const key = target.key;
+        const generation = state.generation;
         state.timeout = env.setTimeout(() => {
           state.timeout = null;
-          if (!state.active || !state.target || state.target.key !== key) return;
-          overlay.dataset.state = "delayed";
-          if (title) title.textContent = `${target.code} 加载时间较长`;
-          if (detail) detail.textContent = "正在等待行情数据，请稍候或重新选择标的";
+          if (!state.active || !state.target || state.target.key !== key || state.generation !== generation) return;
+          state.fail('行情加载超时，请重试行情或重新选择标的。');
         }, MAX_WAIT_MS);
       }
       return true;
     };
 
     state.finish = () => {
-      if (!state.active) return false;
+      if (!state.active && !state.failed) return false;
       clearDeadline();
       state.active = false;
+      state.failed = false;
       state.ready.clear();
       overlay.hidden = true;
       overlay.dataset.state = "idle";
@@ -105,17 +133,47 @@
     };
 
     state.fail = (message) => {
-      if (!state.active) return false;
+      if (!state.active && !state.failed) return false;
       clearDeadline();
+      state.active = false;
+      state.failed = true;
       overlay.hidden = false;
       overlay.dataset.state = "error";
-      if (title) title.textContent = "图表切换未完成";
+      if (area) area.setAttribute("aria-busy", "false");
+      if (spinner) { spinner.hidden = true; spinner.style.display = 'none'; spinner.style.animation = 'none'; }
+      if (actions) { actions.hidden = false; actions.style.display = 'flex'; }
+      if (retryButton) retryButton.disabled = false;
+      if (title) title.textContent = "行情暂不可用";
       if (detail) detail.textContent = text(message) || "请重新选择标的后重试";
       return true;
     };
 
+    state.retry = async () => {
+      if (!state.failed || !state.target) return false;
+      const target = state.target;
+      const managers = Object.values(env.__cm || {}).filter(manager => {
+        try {
+          return !manager._disposed && typeof manager.manualReloadData === 'function'
+            && normalizeIdentity(manager.widget?.symbolInterval?.())?.key === target.key;
+        } catch (_) { return false; }
+      });
+      if (!managers.length) {
+        state.fail('图表尚未就绪，请重新选择标的。');
+        return false;
+      }
+      state.begin({...target, expected: managers.length});
+      const generation = state.generation;
+      const results = await Promise.allSettled(managers.map(manager => Promise.resolve().then(() => manager.manualReloadData())));
+      if (generation !== state.generation || state.target?.key !== target.key) return false;
+      if (results.some(result => result.status === 'rejected' || result.value === false)) {
+        state.fail('重新加载未完成，请稍后重试或重新选择标的。');
+        return false;
+      }
+      return true;
+    };
+
     state.markReady = (value) => {
-      if (!state.active || !state.target) return false;
+      if ((!state.active && !state.failed) || !state.target) return false;
       const identity = normalizeIdentity(value, state.target);
       if (!identity || identity.key !== state.target.key) return false;
       const readyKey = text(value && value.managerId)
@@ -131,7 +189,7 @@
         const detail = event && event.detail;
         const identity = normalizeIdentity(detail);
         if (!identity) return;
-        if (!state.active) {
+        if (!state.active && !state.failed) {
           // An initial page has no symbol-switch transition yet. Match the
           // live chart owner before opening feedback for its first request.
           const manager = Object.values(env.__cm || {}).find(cm => cm.instanceId === detail.managerId);

@@ -783,7 +783,8 @@ def _external_calendar_context(market, code, observed, frequency, recent_session
 
 def _scan_worker_symbol(stock, settings, contexts, run_dir, revision, request):
     from .compute_capacity import compute_slot
-    with compute_slot(request, run_dir):
+    from chanlun.exchange.quote_capacity import worker_quote_scope
+    with worker_quote_scope(run_dir), compute_slot(request, run_dir):
         return _scan_worker_symbol_with_capacity(stock, settings, contexts, run_dir, revision, request)
 
 

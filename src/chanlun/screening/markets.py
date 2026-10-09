@@ -169,6 +169,16 @@ def _session_mask(stamps, periods, step):
 
 
 def external_frame(code, frequency, context):
+    from chanlun.exchange.quote_capacity import release_worker_quote_resources
+    try:
+        return _external_frame(code, frequency, context)
+    finally:
+        # The frame is local now. Return the remote connection slot before
+        # structure calculation so reusable CPU workers do not retain sockets.
+        release_worker_quote_resources()
+
+
+def _external_frame(code, frequency, context):
     from chanlun.exchange import get_exchange
     from chanlun.exchange.kline_completion import drop_unclosed_last_bar, normalize_completed_bar_labels
     exchange = get_exchange(Market(context["market"]))

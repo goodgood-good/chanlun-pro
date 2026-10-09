@@ -380,6 +380,30 @@ test('an empty initial history result explains the missing candles without inven
   assert.equal(result.bars[0].meta.noData, true);
 });
 
+test('typed HTTP 503 preserves the connection-limit reason without publishing no-data or retrying automatically', async () => {
+  const e=timedBundle(), failed=e.start('us:QQQ.US');
+  e.attempts[0].resolve({ok:false,status:503,text:()=>Promise.resolve(JSON.stringify({
+    s:'error',error_code:'longbridge_connection_limit',errmsg:'行情连接数已达上限，请稍后重试。',retry_after:30,
+  }))});
+  await e.advance(0);
+  assert.equal(failed.bars.length,0,'provider failure must not become authoritative empty history');
+  assert.equal(failed.errors.length,1);
+  const errors=e.events.filter(event=>event.type==='chanlun-history-error');
+  assert.equal(errors.length,1);
+  assert.match(errors[0].detail.message,/行情连接数已达上限/);
+  assert.match(errors[0].detail.message,/30 秒后手动重试/);
+  await e.advance(390_000);
+  assert.equal(e.attempts.length,1,'a connection limit does not trigger the startup timeout retry');
+  assert.equal(e.timers.size,0);
+  const recovered=e.start('us:QQQ.US');
+  e.attempts[1].resolve({ok:true,text:()=>Promise.resolve(JSON.stringify({
+    s:'ok',update:false,bar_time_label:'start',t:[2000],o:[1],h:[1],l:[1],c:[1],v:[1],fxs:[],bis:[],xds:[],
+  }))});
+  await e.advance(0);
+  assert.equal(recovered.bars.length,1);
+  assert.equal(recovered.errors.length,0);
+});
+
 test('switching during the longer cold wait aborts the old request without publishing stale bars or retrying', async () => {
   const e = timedBundle(), stale = e.start('a:SZ.000001');
   await e.advance(100_000);

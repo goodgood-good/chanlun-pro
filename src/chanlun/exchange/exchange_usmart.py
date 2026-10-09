@@ -32,6 +32,7 @@ except ImportError as _crypto_import_error:
 
 from chanlun import config
 from chanlun.exchange.exchange import Exchange, Tick
+from chanlun.exchange.errors import USmartAPIError
 from chanlun.exchange.quote_change import quote_change_rate, quote_price
 from chanlun.exchange.kline_completion import (
     drop_unclosed_last_bar,
@@ -104,15 +105,6 @@ _KLINE_COLUMNS = [
     "close",
     "volume",
 ]
-
-
-class USmartAPIError(RuntimeError):
-    """uSMART HTTP 或业务接口错误，不包含请求凭证及请求体。"""
-
-    def __init__(self, message: str, *, code: Any = None, status_code: int | None = None):
-        super().__init__(message)
-        self.code = code
-        self.status_code = status_code
 
 
 def _pem_bytes(raw_key: str, label: str) -> bytes:
