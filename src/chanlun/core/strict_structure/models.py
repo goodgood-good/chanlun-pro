@@ -258,6 +258,8 @@ class TrendCenter:
     # A native segment can touch the core internally yet end outside. Its next
     # segment may stay outside without being an independent third-class leave.
     excursion_units: tuple[ConstituentUnit, ...] = ()
+    view_id: str | None = None
+    view_available_at: datetime | None = None
 
     def _validate_recursive(self) -> None:
         object.__setattr__(self, 'source_kind', SourceKind(self.source_kind))
@@ -511,6 +513,13 @@ class TrendCenter:
             raise ValueError('center_id must match the immutable center seed')
 
     def __post_init__(self) -> None:
+        if (self.view_id is None) != (self.view_available_at is None):
+            raise ValueError('center view identity and selection clock must occur together')
+        if self.view_id is not None:
+            if not isinstance(self.view_id, str) or not self.view_id.strip():
+                raise ValueError('center view identity must be nonempty')
+            if self.available_at < self.view_available_at:
+                raise ValueError('center availability must cover its view selection')
         if SourceKind(self.source_kind) is SourceKind.TREND_TYPE or self.formation_rule == "three_core":
             return self._validate_recursive()
         if self.excursion_units:
@@ -1210,7 +1219,8 @@ class TrendCenter:
             leave,
             ret,
         )
-        return max(self.completed_at, *(item.available_at for item in evidence))
+        return max(self.completed_at, *(item.available_at for item in evidence),
+                   *((self.view_available_at,) if self.view_available_at is not None else ()))
 
     @property
     def tradable(self) -> bool:
@@ -1561,6 +1571,7 @@ class CenterLevelResult:
     locked_unit_count: int
     replay_from: int
     unprocessed_unit_ids: tuple[str, ...] = ()
+    view_selections: tuple[dict, ...] = ()
 
     @property
     def signal_centers(self) -> tuple[TrendCenter, ...]:
@@ -1572,6 +1583,7 @@ class CenterLevelResult:
         object.__setattr__(self, "previews", tuple(self.previews))
         object.__setattr__(self, "events", tuple(self.events))
         object.__setattr__(self, "unprocessed_unit_ids", tuple(self.unprocessed_unit_ids))
+        object.__setattr__(self, "view_selections", tuple(dict(item) for item in self.view_selections))
         if len({center.center_id for center in self.centers}) != len(self.centers):
             raise ValueError("center level identities must be unique")
         for index, center in enumerate(self.centers):

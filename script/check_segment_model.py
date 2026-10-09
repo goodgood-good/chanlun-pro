@@ -536,19 +536,16 @@ def check_local_reference(proof, strokes):
 def check_second_sequence(proof, strokes):
     """Rebuild from all original pens, independently of production helpers.
 
-    Pure tuples retain interval ownership. An F2 hidden inside a contained raw
-    first break must wait for its first physical exit (L071 109-124). Returning
-    through its origin rejects that turn; extending its end establishes the
-    direction without requiring a third feature fractal.
-    The checks exercise the stated interpretation of L065/L067/L078/L081,
-    rather than proving that interpretation equivalent to every original chart.
+    Pure tuples retain interval ownership. L067 85-109 and L077 388-418
+    stop at the second standard fractal, without a subsequent first-pen exit.
+    Its C leg must still contain three overlapping pens on its own side of the
+    pivot. Only the prefix through the fractal's right element is evidence;
+    a later price cannot reject an already completed boundary.
     """
     up = proof.direction == "up"
     pivot = proof.end_index + 1
     extreme = strokes[pivot].high if up else strokes[pivot].low
     standard = []
-    ignored_until = -1
-    decisions = []
     for i in range(pivot + 1, proof.witness_index + 1):
         pen_value = strokes[i]
         if pen_value.type != proof.direction:
@@ -571,7 +568,7 @@ def check_second_sequence(proof, strokes):
                 standard.append(new)
         else:
             standard.append(new)
-        if len(standard) >= 3 and i >= ignored_until:
+        if len(standard) >= 3:
             x, y, z = standard[-3:]
             found = (
                 y[0] < min(x[0], z[0]) and y[1] < min(x[1], z[1])
@@ -579,46 +576,37 @@ def check_second_sequence(proof, strokes):
                 else y[0] > max(x[0], z[0]) and y[1] > max(x[1], z[1])
             )
             if found:
-                # Use endpoints and interval exits, independently of the
-                # production feature helper and raw-break scanner.
+                # Rebuild C from raw ownership, independently of the
+                # production feature helper and reverse-triple predicate.
                 price = y[0] if up else y[1]
                 raw_start = next(j for j in y[2] if (
                     strokes[j].low if up else strokes[j].high
                 ) == price)
                 first = strokes[raw_start]
-                resolution, resolved_at = None, None
-                same_side_ends = [first.end.val]
-                for j in range(raw_start + 1, proof.witness_index + 1):
-                    endpoint = strokes[j].end.val
-                    if strokes[j].type == first.type:
-                        edge = min(same_side_ends) if up else max(same_side_ends)
-                        if endpoint > edge if up else endpoint < edge:
-                            resolution, resolved_at = 'directional-extension', j
-                            break
-                        same_side_ends.append(endpoint)
-                    elif endpoint < first.start.val if up else endpoint > first.start.val:
-                        resolution, resolved_at = 'origin-return', j
-                        break
-                assert resolution is not None, "second_first_break_unresolved"
-                if resolution == "origin-return" or resolved_at > i:
-                    decisions.append((list(standard[-3:]), raw_start, raw_start - 2,
-                                      i, resolution, resolved_at))
-                if resolution == "origin-return":
-                    ignored_until = max(i, resolved_at)
-                    crossed = pen_value.high > extreme if up else pen_value.low < extreme
-                    assert not crossed, "second_sequence_borrowed_after_invalidation"
-                    continue
-                saved = [
-                    (e.low, e.high, e.source_indices) for e in proof.second_sequence
-                ]
-                assert saved == standard[-3:], "second_sequence_reconstruction"
-                recorded = [([(e.low, e.high, e.source_indices) for e in d.fractal],
-                             d.first_pen_index, d.reference_index, d.fractal_witness_index,
-                             d.outcome, d.outcome_witness_index)
-                            for d in proof.second_sequence_breaks]
-                assert recorded == decisions, "second_first_break_history"
-                assert max(i, resolved_at) <= proof.witness_index, "second_first_break_witness"
-                return
+                count = i - raw_start + 1
+                triple = strokes[raw_start:raw_start + 3]
+                body = strokes[raw_start:i + 1]
+                qualified = count >= 3 and count % 2 == 1
+                if qualified:
+                    qualified = max(p.low for p in triple) <= min(p.high for p in triple)
+                    if up:
+                        qualified = qualified and (
+                            body[-1].end.val > first.start.val
+                            and min(p.low for p in body) >= first.start.val
+                        )
+                    else:
+                        qualified = qualified and (
+                            body[-1].end.val < first.start.val
+                            and max(p.high for p in body) <= first.start.val
+                        )
+                if qualified:
+                    saved = [
+                        (e.low, e.high, e.source_indices) for e in proof.second_sequence
+                    ]
+                    assert saved == standard[-3:], "second_sequence_reconstruction"
+                    assert not proof.second_sequence_breaks, "unexpected_second_extension_wait"
+                    assert i <= proof.witness_index, "second_fractal_witness"
+                    return
         crossed = pen_value.high > extreme if up else pen_value.low < extreme
         assert not crossed, "second_sequence_borrowed_after_invalidation"
     raise AssertionError("second_sequence_not_reconstructible")

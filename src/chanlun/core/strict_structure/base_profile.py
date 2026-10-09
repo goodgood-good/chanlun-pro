@@ -33,7 +33,7 @@ _STRICT_BASE_CONFIG: dict[str, object] = {'fractal_rule': 'three-cl-k-both-extre
  'stroke_downstream_rule': 'continuous-formal-input-and-isolated-conditional-observations-v2',
  'segment_rule': 'feature-sequence',
  'segment_start_rule': 'overlapping-origin-with-causal-unestablished-origin-recovery-v2',
- 'segment_gap_rule': 'second-feature-fractal-with-physical-turn-continuation-v4',
+ 'segment_gap_rule': 'second-feature-fractal-with-complete-reverse-three-stroke-proof-v5',
  'segment_gap_classification_rule': 'standard-gap-with-covering-first-reversal-exception-v4',
  'segment_pending_input_rule': 'explicit-first-break-hypotheses-separated-from-locked-evidence-v2',
  'segment_feature_pivot_rule': 'record-protected-break-and-standard-local-complete-fractal-v6',
@@ -45,21 +45,26 @@ _STRICT_BASE_CONFIG: dict[str, object] = {'fractal_rule': 'three-cl-k-both-extre
  'segment_scan_rule': 'earliest-complete-first-break-with-protected-second-feature-priority-v7',
  'segment_cache_rule': 'finite-values-before-source-snapshot-revalidation-v3',
  'segment_price_range_rule': 'constituent-stroke-extremes-with-actual-market-time-and-export-v2',
- 'center_seed_rule': 'physical-entry-middle-three-core-independent-leave-five-closed-single-price-v2',
- 'center_lifecycle_rule': 'external-departure-first-non-crossing-return-third-class-v2',
- 'third_class_boundary_rule': 'departure-side-contact-permitted-inclusive-return-E2-v3',
- 'center_scan_rule': 'five-role-physical-seed-causal-lifecycle-owner',
+ 'center_seed_rule': 'three-locked-segment-core-closed-overlap-including-single-price-v3',
+ 'center_lifecycle_rule': 'independent-departure-first-strict-outside-return-third-class-v3',
+ 'third_class_boundary_rule': 'closed-core-contact-is-oscillation-strict-outside-return-v4',
+ 'center_scan_rule': 'three-segment-core-causal-lifecycle-owner-v2',
+ # 操作视图的工程选择规则，不声称是原文唯一分解。只有候选上下沿均严格内缩、
+ # 有独立连接且同级离开和返回均完成，才选择该视图；原始证据仍保留。
+ 'center_operational_view_rule': 'completed_inner_view_v1',
+ 'center_operational_view_scope': 'strictly-inner-core-independent-connector-completed-same-level-departure-return',
+ 'center_operational_view_selection_rule': 'earliest-available-before-original-end-stable-seed-order-v1',
  'center_frame_role_rule': 'first-directional-departure-preserved-after-failed-return-v1',
  'center_followup_rule': 'source-ownership-separated-from-strict-return-confirmation-v1',
  'center_frame_range_rule': 'external-directional-exit-separated-from-pending-lifecycle-v2',
- 'conditional_rule_state_version': 'chanlun-local-source-conditioned-v20',
+ 'conditional_rule_state_version': 'chanlun-local-source-conditioned-v21',
  'third_point_entry_precision_rule': 'exact-lower-return-double-leg-or-trend-divergence-observation-v1',
  'centerless_source_member_rule': 'requires-complete-child-type-own-center-v1',
  'second_class_variant_rule': 'lower-first-retest-can-be-below-first-without-mandatory-divergence-v1',
  'idx_macd_fast': 12,
  'idx_macd_slow': 26,
  'idx_macd_signal': 9,
- 'chart_structure_rule': 'native-segment-centers-v2'}
+ 'chart_structure_rule': 'native-three-core-segment-centers-completed-inner-view-v3'}
 
 
 def strict_base_config() -> dict:

@@ -597,14 +597,14 @@ class CL(ICL):
     @_strict_contract_boundary
     def get_native_centers(self):
         """Calculate centers from the segments of this chart's own interval."""
-        from chanlun.core.strict_structure.center_machine import calculate_three_core_segment_centers
+        from chanlun.core.strict_structure.native_center_view import calculate_native_center_views
 
         self._validate_strict_structure_metadata()
         cached = self._strict_structure_memo.get("native_centers")
         if cached is not None:
             return cached
         units = self.get_segment_units()
-        result = calculate_three_core_segment_centers(units, 0)
+        result = calculate_native_center_views(units, 0)
         self._strict_structure_memo["native_centers"] = result
         return result
 

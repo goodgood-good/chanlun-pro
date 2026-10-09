@@ -20,6 +20,6 @@ def test_recorded_area_disagreement_uses_local_macd_reminder_only():
     assert signals
     assert all(item["divergence"]["kind"] == "native_two_center_divergence"
                and item["divergence"]["histogram_area_decayed"] is True
-               and item["rule_basis"] == "user_declared_native_center_macd_v4"
+               and item["rule_basis"] == "user_declared_native_center_macd_v5"
                and item["formal_point_issued"] is True
                and item["status"] == "confirmed" for item in signals)

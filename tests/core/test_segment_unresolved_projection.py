@@ -12,6 +12,7 @@ import pytest
 from chanlun.core.xd_calculator import XdCalculator
 from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd
 from chanlun.cl_utils.tv_chart import cl_data_to_tv_chart
+from script.check_segment_model import check_evidence
 from tests.core.test_segment_source_rules import strokes
 
 
@@ -68,27 +69,38 @@ def sh600183():
     return frame, runtime
 
 
-def test_authentic_contained_first_break_does_not_freeze_the_parent_at_8368(sh600183):
+def test_authentic_second_fractal_finishes_the_parent_before_later_origin_return(sh600183):
     frame, runtime = sh600183
     cd = runtime.cd
     lines = cd.get_xds()
-    assert len(lines) == 103 and sum(x.done for x in lines) == 102
+    assert len(lines) == 105 and sum(x.done for x in lines) == 104
     # The normalized first-break policy now completes the March boundary at
-    # 61.39 using the effective 62.85 edge. The independent May F2 rejection
-    # at 83.68 remains valid under the same unchanged second-sequence rules.
+    # 61.39 using the effective 62.85 edge. The independent May F2 already
+    # has its own reverse triple at pens 456..458, so the later new high
+    # cannot reject that completed boundary at 83.68 (L067/L077).
     march=[x for x in lines if x.start_line.index in {336,347,352}]
     assert [(x.start.val,x.end.val) for x in march]==[(65.45,61.39),(61.39,63.36),(63.36,54.75)]
     assert march[0].construction_evidence.first_break_evidence.effective_first.high==62.85
-    chain = [x for x in lines if x.start_line.index in {442, 445, 464, 469}]
+    chain = [x for x in lines if x.start_line.index in {442, 445, 456, 459, 464, 469}]
     assert [(x.start.val, x.end.val) for x in chain] == [
-        (80.42, 75.9), (75.9, 99.94), (99.94, 87.16), (87.16, 106.9)]
-    when = datetime(2026, 5, 15, 10, 10, tzinfo=ZoneInfo('Asia/Shanghai'))
+        (80.42, 75.9), (75.9, 83.68), (83.68, 81.21),
+        (81.21, 99.94), (99.94, 87.16), (87.16, 106.9)]
+    when = datetime(2026, 5, 11, 14, 45, tzinfo=ZoneInfo('Asia/Shanghai'))
     assert chain[0].locked_at == chain[1].locked_at == when
     assert all(u.locked for u in cd.get_segment_units()[:-1])
     parent = chain[0].construction_evidence
-    rejected, = parent.second_sequence_breaks
-    assert (rejected.first_pen_index, rejected.fractal_witness_index,
-            rejected.outcome, rejected.outcome_witness_index) == (456, 458, 'origin-return', 459)
+    assert parent.witness_index == 458 and not parent.second_sequence_breaks
+    pens = cd.get_contiguous_bis()
+    assert max(p.low for p in pens[456:459]) < min(p.high for p in pens[456:459])
+    assert pens[458].locked_at == when
+    assert pens[459].end.val > pens[456].start.val
+    prefix = frame.loc[frame.date <= when].copy()
+    earlier = build_strict_chart_cd(market='a', code='SH.600183', frequency='5m',
+                                    frame=prefix, last_bar_closed=True).cd
+    earlier_parent = next(x for x in earlier.get_xds() if x.start_line.index == 442)
+    assert earlier_parent.construction_evidence == parent
+    assert earlier_parent.locked_at == when
+    check_evidence(cd.xd_calculator, pens)
     state = cd.get_segment_construction_state()
     assert state['status'] == 'forming'
     assert state['tail']['start_price'] == 156.93
@@ -101,7 +113,7 @@ def test_repaired_market_history_is_covered_by_segments_instead_of_a_long_unassi
     frame, runtime = sh600183
     chart = cl_data_to_tv_chart(frame, {'chart_show_xd':'1', 'chart_show_bi':'1'},
                                market='a', code='SH.600183', frequency='5m', strict_runtime=runtime)
-    assert len(chart['xds']) == 103 and all(s['locked'] for s in chart['xds'][:-1])
+    assert len(chart['xds']) == 105 and all(s['locked'] for s in chart['xds'][:-1])
     assert not chart['xds'][-1]['locked']
     snapshot = chart['strict_structure']
     assert snapshot['unresolved_segment_ranges'] == []

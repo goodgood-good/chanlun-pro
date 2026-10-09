@@ -296,6 +296,8 @@ def _center_payload(
         "runtime_overlap_policy": overlap_policy,
         "unresolved_source_difference_ids": list(source_differences),
         "formation_rule": "recursive_three" if recursive else center.formation_rule,
+        "view_id": center.view_id,
+        "view_available_at": _optional_epoch(center.view_available_at),
         "boundary_contact": center.boundary_contact,
         "state": center.state.value,
         "tradable": bool(tradable and center.third_class_confirmed),
@@ -1291,6 +1293,7 @@ def build_native_center_snapshot(
         segment_construction,
         unresolved_segment_ranges,
         center_result.unprocessed_unit_ids,
+        center_result.view_selections,
         EXIT_PRICE_VERSION,
     )
     return with_point_exit_plans({
@@ -1309,6 +1312,7 @@ def build_native_center_snapshot(
             "unprocessed_unit_ids": list(center_result.unprocessed_unit_ids),
             "affected_center_id": center_result.centers[-1].center_id if center_result.unprocessed_unit_ids else None,
         },
+        "center_view_selections": [dict(item) for item in center_result.view_selections],
         "symbol": cd.get_code(),
         "source_frequency": interval,
         "display_frequency": interval,

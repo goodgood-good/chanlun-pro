@@ -86,7 +86,8 @@ def build_native_consolidation_alerts(units, centers, strength, *, as_of):
                    or left.direction == right.direction for left, right in zip(chain, chain[1:])):
                 continue
             known_at = max(evidence.available_at, *(unit.available_at for unit in center.establishment_units),
-                           *(unit.available_at for unit in chain))
+                           *(unit.available_at for unit in chain),
+                           *((center.view_available_at,) if center.view_available_at is not None else ()))
             if known_at > as_of:
                 continue
             direction = later.terminal_unit.direction
@@ -105,6 +106,8 @@ def build_native_consolidation_alerts(units, centers, strength, *, as_of):
                 "rule_basis": NATIVE_CONSOLIDATION_RULE_BASIS, "member_basis": "native_locked_segment",
                 "structural_level": 0, "source_kind": "segment", "direction": direction,
                 "price_basis_revision": center.price_basis_revision, "center_id": center.center_id,
+                "view_id": center.view_id,
+                "view_available_at": None if center.view_available_at is None else int(center.view_available_at.timestamp()),
                 "comparison_form": form, "core_position": "breakout" if breaks_core else "inside",
                 "center_zd_tick": center.zd_tick, "center_zg_tick": center.zg_tick,
                 "compare_leg_unit_ids": list(evidence.compare_leg_unit_ids),

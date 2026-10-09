@@ -147,6 +147,8 @@ def build_native_consolidation_previews(units, centers, strength, frame, histogr
                 "rule_basis": PREVIEW_RULE, "member_basis": "native_unlocked_segment",
                 "structural_level": 0, "source_kind": "segment", "direction": tail.direction,
                 "price_basis_revision": tail.price_basis_revision, "center_id": center.center_id,
+                "view_id": center.view_id,
+                "view_available_at": None if center.view_available_at is None else int(center.view_available_at.timestamp()),
                 "comparison_form": form,
                 "core_position": "breakout" if (tail.end_tick > center.zg_tick if up
                                                   else tail.end_tick < center.zd_tick) else "inside",

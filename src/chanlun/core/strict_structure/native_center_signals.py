@@ -20,7 +20,7 @@ from chanlun.core.strict_structure.strength import (
     compare_terminal_trend_divergence,
 )
 
-NATIVE_SIGNAL_RULE_BASIS = "user_declared_native_center_macd_v4"
+NATIVE_SIGNAL_RULE_BASIS = "user_declared_native_center_macd_v5"
 
 
 def _epoch(moment: datetime) -> int:
@@ -54,14 +54,14 @@ def _alert(
     if center_known_at is None or unit.confirmed_at is None:
         raise ValueError("confirmed center signal requires locked source clocks")
     confirmed_at = max(
-        value for value in (unit.available_at, center_known_at, source_known_at)
+        value for value in (unit.available_at, center_known_at, source_known_at, center.view_available_at)
         if value is not None
     )
     available_at = max(unit.available_at, confirmed_at)
     return {
         "schema": "chanlun-chart-point",
         "render_kind": "point_confirmed",
-        "render_id": point_id,
+        "render_id": stable_structure_id("native-point-render-v2", point_id, anchor_at, anchor_tick, available_at),
         "point_id": point_id,
         "point_type": kind,
         "side": side,
@@ -86,6 +86,9 @@ def _alert(
         "confirmed_at": _epoch(confirmed_at),
         "available_at": _epoch(available_at),
         "center_id": center.center_id,
+        "view_id": center.view_id,
+        "view_available_at": None if center.view_available_at is None else _epoch(center.view_available_at),
+        "price_anchor_basis": "return_endpoint" if kind.startswith("3") else "source_extreme",
         "center_zd_tick": center.zd_tick,
         "center_zg_tick": center.zg_tick,
         "center_ordinal": center_ordinal,
@@ -288,6 +291,7 @@ def build_native_center_signals(
             continue
         signals.append(_alert(
             kind, retest, center,
+            anchor_at=retest.market_end, anchor_tick=retest.end_tick,
             related_unit_ids=(leave.unit_id, retest.unit_id),
             evidence_codes=("native_center", "independent_leave",
                             "first_complete_return_held_core",

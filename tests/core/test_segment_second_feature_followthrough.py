@@ -1,8 +1,10 @@
-"""Raw first-break containment must survive second-sequence normalization.
+"""A second standard fractal does not need another first-pen extension.
 
-SH.600183's saved physical pen prices, indices 442 onward. L071 109-124,
-L077 367-391 and L078 208-211 are the local text basis. These expected market
-partitions are deductions, not an author-labelled market example.
+SH.600183's saved physical pen prices, indices 442 onward. The local source is
+D:/缠论/chanlun_lesson_corpus/L067...85-109 and L077...388-418. L078's
+directional/reverse-proof conditions remain separate. These market partitions
+are deductions, not an author-labelled market example. Earlier expectations
+incorrectly required a later first-pen exit after a qualified F2 already formed.
 """
 
 from dataclasses import replace
@@ -61,80 +63,77 @@ def test_covering_first_break_has_a_witnessed_effective_end_completion(mirror):
 
 
 @pytest.mark.parametrize("mirror", [False, True])
-def test_contained_third_pen_cannot_confirm_a_normalized_second_fractal(mirror):
+def test_contained_third_pen_confirms_a_complete_standard_second_fractal(mirror):
     values = strokes(PREFIX, mirror)
     calc = XdCalculator()
     calc.calculate(values)
-    assert not calc.evidence
-    assert not any(s.done for s in calc.xds)
-    assert calc.tail_state.reason == "waiting-second-feature"
-
-
-@pytest.mark.parametrize("mirror", [False, True])
-def test_return_through_first_pen_origin_rejects_the_turn_and_keeps_searching(mirror):
-    values = strokes(PREFIX + CONTINUATION, mirror)
-    calc = XdCalculator()
-    for end in range(len(PREFIX) - 1, len(values)):
-        calc.calculate(values[:end])
-        assert not calc.evidence
-    calc.calculate(values)
-    assert geometry(calc.xds) == [(0, 3, True), (3, 22, True), (22, 25, False)]
     parent, successor = calc.evidence
-    assert parent.witness_index == successor.witness_index == 24
-    (rejected,) = parent.second_sequence_breaks
-    assert (
-        rejected.first_pen_index,
-        rejected.fractal_witness_index,
-        rejected.outcome,
-        rejected.outcome_witness_index,
-    ) == (14, 16, "origin-return", 17)
+    assert parent.witness_index == successor.witness_index == 16
+    assert geometry(calc.xds) == [(0, 3, True), (3, 14, True), (14, 17, False)]
+    # C has three overlapping physical pens 14..16. Its last extreme need
+    # not pass its first extreme; F2 already establishes C's break of B.
+    assert max(p.low for p in values[14:17]) <= min(p.high for p in values[14:17])
+    assert values[16].low > values[14].low if not mirror else values[16].high < values[14].high
+    assert parent.second_sequence_breaks == ()
     assert successor.parent_key == parent.key
     check_evidence(calc, values)
-    calc.evidence = (replace(parent, second_sequence_breaks=()), successor)
-    with pytest.raises(AssertionError, match="second_first_break_history"):
-        check_evidence(calc, values)
 
 
 @pytest.mark.parametrize("mirror", [False, True])
-def test_end_break_completes_the_same_candidate_without_a_third_fractal(mirror):
+def test_later_origin_return_does_not_reject_an_already_completed_second_fractal(mirror):
+    values = strokes(PREFIX + CONTINUATION, mirror)
+    calc = XdCalculator()
+    calc.calculate(values[:len(PREFIX) - 2])
+    assert not calc.evidence
+    calc.calculate(values[:len(PREFIX) - 1])
+    frozen = tuple(calc.evidence)
+    clocks = [x.locked_at for x in calc.xds[:2]]
+    for end in range(len(PREFIX), len(values) + 1):
+        calc.calculate(values[:end])
+        assert calc.evidence[:2] == frozen
+        assert [x.locked_at for x in calc.xds[:2]] == clocks
+        check_evidence(calc, values[:end])
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_later_end_break_cannot_postpone_the_existing_confirmation(mirror):
     values = strokes(PREFIX + [82.1, 80.2], mirror)
     calc = XdCalculator()
     calc.calculate(values)
     assert geometry(calc.xds) == [(0, 3, True), (3, 14, True), (14, 19, False)]
     parent, successor = calc.evidence
-    assert parent.witness_index == successor.witness_index == 18
-    (decision,) = parent.second_sequence_breaks
-    assert decision.outcome == "directional-extension"
-    assert decision.fractal_witness_index == 16 and decision.outcome_witness_index == 18
-    assert calc.xds[0].locked_at == values[18].locked_at
+    assert parent.witness_index == successor.witness_index == 16
+    assert parent.second_sequence_breaks == ()
+    assert calc.xds[0].locked_at == values[16].locked_at
     check_evidence(calc, values)
-    forged = replace(parent, witness_index=16, second_sequence_breaks=())
-    with pytest.raises(AssertionError, match="second_first_break_unresolved"):
+    forged = replace(parent, witness_index=15)
+    with pytest.raises(AssertionError, match="second_sequence_not_reconstructible"):
         check_second_sequence(forged, values)
-    values[18].locked_at = None
+    values[16].locked_at = None
     calc.calculate(values)
     assert not any(s.done for s in calc.xds)
 
 
 @pytest.mark.parametrize("mirror", [False, True])
-def test_equal_edges_still_wait_for_the_first_strict_exit(mirror):
+def test_equal_first_pen_edge_does_not_add_a_new_confirmation_gate(mirror):
     points = PREFIX[:-1] + [80.61, 83.68, 80.61, 83.6]
     calc = XdCalculator()
     calc.calculate(strokes(points, mirror))
-    assert not calc.evidence
+    assert calc.evidence[0].witness_index == 16
+    frozen = calc.evidence[:2]
     values = strokes(points + [80.2], mirror)
     calc.calculate(values)
-    assert calc.evidence[0].witness_index == len(values) - 1
+    assert calc.evidence[:2] == frozen
     check_evidence(calc, values)
 
 
 @pytest.mark.parametrize("mirror", [False, True])
 def test_same_side_inclusion_allows_an_internal_first_pen_extreme(mirror):
-    # The 80.61 raw low stays internal, while the normalized continuation
-    # edge advances to 81.21. A later 80.90 can establish the direction.
+    # The 80.61 raw low remains real price evidence. C's third pen ending
+    # 81.21 is enough for F2; the later 80.90 is not required for A/B to end.
     values = strokes(PREFIX + [82.1, 80.90], mirror)
     calc = XdCalculator()
     calc.calculate(values)
-    assert calc.evidence[0].witness_index == 18
+    assert calc.evidence[0].witness_index == 16
     assert calc.evidence[1].end_index == 13
     check_evidence(calc, values)

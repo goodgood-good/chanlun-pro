@@ -595,10 +595,73 @@ def audit_snapshot(snapshot: dict, frame: pd.DataFrame, context: dict,
     return result
 
 
+def _native_center_view_source_valid(snapshot, center, units, positions, known_at):
+    """Bind an operational view to its independently completed source return."""
+    view_id, selected_at = center.get("view_id"), center.get("view_available_at")
+    if view_id is None:
+        return selected_at is None
+    try:
+        records = [item for item in snapshot.get("center_view_selections", ()) if item["view_id"] == view_id]
+        if len(records) != 1:
+            return False
+        record = records[0]
+        if (record["policy"] != "completed_inner_view_v1" or type(selected_at) is not int
+                or selected_at != record["available_at"] or selected_at > known_at):
+            return False
+        original = [units[key] for key in record["original_core_unit_ids"]]
+        core = [units[key] for key in record["selected_core_unit_ids"]]
+        leave, ret = units[record["leave_unit_id"]], units[record["return_unit_id"]]
+        if len(original) != 3 or len(core) != 3:
+            return False
+        for seed in (original, core):
+            if any(positions[b["unit_id"]] != positions[a["unit_id"]] + 1 for a, b in zip(seed, seed[1:])):
+                return False
+        start = positions[core[0]["unit_id"]]
+        original_end = positions[original[-1]["unit_id"]]
+        if start < original_end + 2:
+            return False
+        connection_ids = tuple(list(units)[original_end + 1:start])
+        if tuple(record.get("connection_unit_ids", ())) != connection_ids:
+            return False
+        original_zd, original_zg = max(u["low_tick"] for u in original), min(u["high_tick"] for u in original)
+        zd, zg = max(u["low_tick"] for u in core), min(u["high_tick"] for u in core)
+        if ((original_zd, original_zg) != (record["original_zd_tick"], record["original_zg_tick"])
+                or not original_zd < zd <= zg < original_zg):
+            return False
+        from chanlun.core.strict_structure.identity import build_center_id, stable_structure_id
+        def identity(seed, low, high):
+            return build_center_id(price_basis_revision=snapshot["price_basis_revision"], structural_level=0,
+                source_kind="segment", entry_unit_id=None, initial_unit_ids=tuple(u["unit_id"] for u in seed),
+                establishment_leave_unit_id=None, zd_tick=low, zg_tick=high, formation_rule="three_core")
+        if (record["original_center_id"] != identity(original, original_zd, original_zg)
+                or record["selected_center_id"] != identity(core, zd, zg)
+                or view_id != stable_structure_id(record["policy"], snapshot["price_basis_revision"], 0,
+                    record["original_center_id"], record["selected_center_id"], leave["unit_id"], ret["unit_id"])):
+            return False
+        evidence = (*original, *(units[key] for key in connection_ids), *core, leave, ret)
+        return bool(
+            all(_causally_locked_role(u, selected_at) and u.get("source_kind") == "segment"
+                and u.get("structural_level") == 0 and u.get("price_basis_revision") == snapshot["price_basis_revision"]
+                for u in evidence)
+            and positions[leave["unit_id"]] > positions[core[-1]["unit_id"]]
+            and positions[ret["unit_id"]] == positions[leave["unit_id"]] + 1
+            and leave["end_time"] == ret["start_time"] and leave["end_tick"] == ret["start_tick"]
+            and leave["direction"] != ret["direction"]
+            and max(leave["low_tick"], zd) <= min(leave["high_tick"], zg)
+            and (leave["end_tick"] > zg if leave["direction"] == "up" else leave["end_tick"] < zd)
+            and return_outside_core(direction=leave["direction"], low_tick=ret["low_tick"],
+                                    high_tick=ret["high_tick"], zd_tick=zd, zg_tick=zg)
+        )
+    except (KeyError, TypeError, ValueError, IndexError):
+        return False
+
+
 def _native_center_body_source_valid(snapshot, center, unit_by_id, unit_position, known_at):
     """Check the whole frozen center, including its immutable three-unit core."""
     try:
         if center.get("processing_complete") is False:
+            return False
+        if not _native_center_view_source_valid(snapshot, center, unit_by_id, unit_position, known_at):
             return False
         core_ids = center["core_unit_ids"]
         body_ids = center["body_unit_ids"]
@@ -710,7 +773,9 @@ def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
     owner = center_list[owner_index]
     if (owner.get("processing_complete") is False
             or owner.get("source_kind") != "segment" or owner.get("structural_level") != 0
-            or owner.get("price_basis_revision") != snapshot.get("price_basis_revision")):
+            or owner.get("price_basis_revision") != snapshot.get("price_basis_revision")
+            or point.get("view_id") != owner.get("view_id")
+            or point.get("view_available_at") != owner.get("view_available_at")):
         return False
     unit_by_id = {item["unit_id"]: item for item in units}
     unit_position = {item["unit_id"]: index for index, item in enumerate(units)}
@@ -830,6 +895,8 @@ def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
     if len(related) != 2 or not locked_chain(related):
         return False
     leave, retest = (unit_by_id[identity] for identity in related)
+    if point.get("price_anchor_basis") != "return_endpoint":
+        return False
     return bool(
         owner.get("third_class_confirmed") is True
         and type(owner.get("center_end_available_at")) is int
@@ -844,9 +911,8 @@ def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
         and (leave["direction"], retest["direction"]) == (
             ("up", "down") if point["side"] == "buy" else ("down", "up")
         )
-        and point.get("anchor_tick") == (
-            retest["low_tick"] if point["side"] == "buy" else retest["high_tick"]
-        )
+        and point.get("anchor_tick") == retest["end_tick"]
+        and point.get("anchor_at") == retest["end_time"]
         and point.get("invalidation_tick") == (
             owner["core"]["zg_tick"] if point["side"] == "buy" else owner["core"]["zd_tick"]
         )
@@ -999,6 +1065,8 @@ def native_consolidation_source_valid(snapshot, alert):
         known = alert["available_at"]
         if (not all(type(alert.get(field)) is int for field in ("anchor_at", "anchor_tick", "confirmed_at", "available_at"))
                 or not alert["anchor_at"] <= alert["confirmed_at"] == known <= snapshot["source_closed_at"]
+                or alert.get("view_id") != center.get("view_id")
+                or alert.get("view_available_at") != center.get("view_available_at")
                 or not _native_center_body_source_valid(snapshot, center, by_id, position, snapshot["source_closed_at"])):
             return False
         a_ids, c_ids = alert["compare_leg_unit_ids"], alert["signal_leg_unit_ids"]
@@ -1060,7 +1128,8 @@ def native_consolidation_source_valid(snapshot, alert):
             and all(type(area) in (int, float) and math.isfinite(area) for area in (area_a, area_c))
             and 0 < area_c < area_a
             and math.isclose(alert["macd_area_ratio"], area_c / area_a, rel_tol=1e-12)
-            and known == max(unit["available_at"] for unit in (*chain, *seed))
+            and known == max(*(unit["available_at"] for unit in (*chain, *seed)),
+                             *((center["view_available_at"],) if center.get("view_available_at") is not None else ()))
         )
     except (KeyError, TypeError, ValueError, StopIteration, IndexError):
         return False

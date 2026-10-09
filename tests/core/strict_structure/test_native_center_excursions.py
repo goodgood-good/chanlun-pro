@@ -82,7 +82,7 @@ def test_saved_center_cannot_drop_its_outside_connector_or_claim_an_incomplete_s
     from chanlun.screening.rules import _native_center_body_source_valid
 
     snapshot = snapshot_for(recorded_frame, "SH.513100", "5m", include_consolidation=True)
-    center = snapshot["levels"][0]["centers"][-1]
+    center = next(c for c in snapshot["levels"][0]["centers"] if c["excursion_unit_ids"])
     units = snapshot["screening_segments"]
     by_id = {u["unit_id"]: u for u in units}
     positions = {u["unit_id"]: i for i, u in enumerate(units)}
@@ -100,11 +100,14 @@ def test_saved_center_cannot_drop_its_outside_connector_or_claim_an_incomplete_s
     ("2026-09-22 11:25", "2026-09-15 13:25"),
     ("2026-10-09 15:00", "2026-09-15 13:25"),
 ])
-def test_recorded_513100_center_keeps_processing_after_july(recorded_frame, cutoff, expected_end):
+def test_frozen_first_core_view_keeps_real_contact_evidence(recorded_frame, cutoff, expected_end, monkeypatch):
     frame = recorded_frame[recorded_frame.date <= pd.Timestamp(cutoff, tz="Asia/Shanghai")].copy()
     cd = build_strict_chart_cd(market="a", code="SH.513100", frequency="5m", frame=frame,
                                last_bar_closed=True).cd
-    result = cd.get_native_centers()
+    result = calculate_three_core_segment_centers(tuple(cd.get_segment_units()), 0)
+    # The comparison view remains auditable even when production chooses an
+    # independently completed inner view. Its original core is never moved.
+    monkeypatch.setattr(cd, "get_native_centers", lambda: result)
     center = result.centers[-1]
     assert not result.unprocessed_unit_ids
     assert center.formation_rule == "three_core"

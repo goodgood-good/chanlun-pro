@@ -17,7 +17,6 @@ from chanlun.core.segment_evidence import (
     FeatureEvidence,
     FeatureGapEvidence,
     ObservationOriginEvidence,
-    SecondFeatureBreakEvidence,
     DirectFirstBreakEvidence,
     ReverseSegmentEvidence,
     ReturnSegmentEvidence,
@@ -1909,36 +1908,31 @@ class XdCalculator:
     # 检查第二种情况。
     # ----------------------------------------------------------
     @staticmethod
-    def _raw_first_break_followthrough(all_bis, middle, original_direction):
-        """Resolve the physical turn's own continuation after same-side inclusion.
+    def _second_fractal_has_reverse_triple(all_bis, middle, original_direction, witness):
+        """Keep C's physical three-pen proof without another extension wait.
 
-        A/C have original_direction; the standard middle locates B's turn.
-        A standard F2 can combine prices from both sides of B's actual pivot.
-        Its outgoing C must still develop on its own side of that pivot. Same-
-        side containment updates the continuation edge (L065/L079); requiring
-        a new raw first-pen extreme would wrongly reject internal extrema.
-        Returning through the pivot first rejects this B turn, without
-        rejecting A's still-pending second-sequence search.
+        D:\\缠论\\chanlun_lesson_corpus: L067 85-109 and L077 388-418
+        explicitly stop at the second standard feature fractal. They do not
+        require C to extend past the end of its first physical pen afterwards.
+        L078 40-67 and 208-220 still require a directional, connected reverse
+        structure. Check that local geometry using only the observed prefix;
+        confirmation_time separately requires every supporting pen to lock.
 
-        This combines L065/L071 with L077 367-391/L078 208-211 and L079. Strict
-        second-sequence inclusion is preserved; no third fractal is required.
+        The interval checks below formalize those prerequisites. They are not
+        an author-specified boolean formula or a third feature-sequence test.
         """
         successor_direction = "down" if original_direction == "up" else "up"
         first = _resolve_pivot_bi(middle, successor_direction)
-        down = original_direction == "down"
-        edge = first.end.val
-        for i in range(first.index + 1, len(all_bis)):
-            pen = all_bis[i]
-            if pen.type == first.type:
-                if pen.end.val < edge if down else pen.end.val > edge:
-                    return "directional-extension", i, first.index
-                # Before this first outward element, every same-direction
-                # pen is contained in the current context. Its opposite
-                # edge follows max(low) for down pens / min(high) for up pens.
-                edge = pen.end.val
-            elif pen.high > first.high if down else pen.low < first.low:
-                return "origin-return", i, first.index
-        return "pending", None, first.index
+        if first.index + 2 > witness or (witness - first.index) % 2:
+            return False
+        body = all_bis[first.index:witness + 1]
+        triple = body[:3]
+        if max(pen.low for pen in triple) > min(pen.high for pen in triple):
+            return False
+        origin, endpoint = first.start.val, body[-1].end.val
+        if original_direction == "up":
+            return endpoint > origin and all(pen.low >= origin for pen in body)
+        return endpoint < origin and all(pen.high <= origin for pen in body)
 
     def _check_type2(self, all_bis, mid_elem, seg_type) -> tuple[str, Optional[int]]:
         """返回第二种情况状态及最远因果见证笔序号。"""
@@ -1985,8 +1979,6 @@ class XdCalculator:
 
         self._second_evidence = ()
         self._second_breaks = ()
-        break_evidence = []
-        ignored_until = -1
         cs2_elems = []
         i = start_pos
         while i < len(all_bis):
@@ -2007,28 +1999,14 @@ class XdCalculator:
                 _append_feature(cs2_elems, new_elem, cs2_dir)
 
                 # 每次添加/合并后立即检查分型（仅看尾部三元素，O(1)）
-                if i >= ignored_until and _is_tail_fractal(cs2_elems):
+                if _is_tail_fractal(cs2_elems) and self._second_fractal_has_reverse_triple(
+                    all_bis, cs2_elems[-2], seg_type, i
+                ):
                     fractal = tuple(
                         FeatureEvidence.from_element(e) for e in cs2_elems[-3:]
                     )
-                    outcome, resolved_at, first_index = self._raw_first_break_followthrough(
-                        all_bis, cs2_elems[-2], seg_type
-                    )
-                    if outcome == "pending":
-                        return _TYPE2_PENDING, None
-                    if outcome == "origin-return" or resolved_at > i:
-                        break_evidence.append(SecondFeatureBreakEvidence(
-                            fractal, first_index, first_index - 2, i, outcome, resolved_at
-                        ))
-                    if outcome == "origin-return":
-                        # L071: the attempted successor did not develop. Keep
-                        # every physical pen in A's F2 normalization, but do
-                        # not borrow an interior turn from the failed context.
-                        ignored_until = max(i, resolved_at)
-                    else:
-                        self._second_evidence = fractal
-                        self._second_breaks = tuple(break_evidence)
-                        return _TYPE2_CONFIRMED, max(i, resolved_at)
+                    self._second_evidence = fractal
+                    return _TYPE2_CONFIRMED, i
 
                 # 收完后才判断"严格创新极值停止"：
                 # 此根 cs 笔创了原段方向的新极值，后续走势不可能再形成本段的反向段，
