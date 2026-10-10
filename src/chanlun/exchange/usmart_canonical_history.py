@@ -20,6 +20,7 @@ from chanlun.exchange.errors import USmartAPIError, USmartHistoryPending
 from chanlun.exchange.kline_precision import normalize_kline_precision, resolve_structure_price_quantum
 from chanlun.exchange.price_basis import attach_price_basis_metadata, build_provider_price_basis_metadata
 from chanlun.exchange.usmart_session_aggregation import aggregate_closed_us_minutes, expected_closed_window_start
+from chanlun.exchange.usmart_rate_limit import USmartRateLimitTimeout
 from chanlun.persistence.file_lock import interprocess_file_lock, InterprocessLockTimeout
 
 SOURCE_TIME_CONTRACT = 'usmart-native-open-1m-to-closed-xnys-v1'
@@ -289,6 +290,7 @@ class CanonicalUSmartHistory:
                     return self._view(raw, meta, code, frequency, cutoff, right, target_from, all_origin, target_rows)
                 head = (force or raw.empty or meta.get('tail_checked',0) < required_close.timestamp()
                         or self.clock()-meta.get('tail_checked_at',0) >= 900)
+                admission_timeout = None
                 for _ in range(max_pages):
                     if self.monotonic() >= deadline:
                         break
@@ -298,6 +300,11 @@ class CanonicalUSmartHistory:
                     cursor = required_close - pd.Timedelta(minutes=1) if head else pd.Timestamp(meta['cursor'])
                     try:
                         page = self._page(code, cursor, right, count, deadline)
+                    except USmartRateLimitTimeout as exc:
+                        # Local admission exhausted this slice, not the data
+                        # source. Previously saved minutes remain resumable.
+                        admission_timeout = exc
+                        break
                     except TimeoutError:
                         break
                     if page.empty:
@@ -315,8 +322,10 @@ class CanonicalUSmartHistory:
                     self._save(path, raw, meta)
                     head = False
                 frame, coverage = self._view(raw, meta, code, frequency, cutoff, right, target_from, all_origin, target_rows)
-                if head:
+                if head or admission_timeout is not None:
                     coverage.update(complete=False, can_resume=True, reason='deadline')
+                if admission_timeout is not None:
+                    coverage['retry_after'] = max(coverage['retry_after'], admission_timeout.retry_after)
                 return frame, coverage
         except InterprocessLockTimeout:
             raw, meta = self._load(path, code)

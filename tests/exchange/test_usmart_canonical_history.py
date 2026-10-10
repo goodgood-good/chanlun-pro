@@ -279,3 +279,62 @@ def test_quote_deadline_bounds_http_and_restores_normal_request_context(monkeypa
     assert len(calls)==1
     assert client.quote('kline',{})=={'value':1}
     assert calls[-1]['timeout']==client.timeout
+
+
+def test_initial_local_admission_timeout_is_pending_without_false_progress(tmp_path,monkeypatch):
+    from chanlun.exchange.usmart_rate_limit import USmartRateLimitTimeout
+    monkeypatch.setattr(config,'US_HISTORY_KLINE_SOURCE','usmart')
+    raw,cutoff=minutes(2);source,_=source_at(tmp_path,raw,cutoff)
+    def queued(**kwargs): raise USmartRateLimitTimeout(retry_after=7)
+    source.loader=queued
+    _,before=source.window('NVDA.US','5m',cutoff=cutoff,target_rows=3000,fetch=False)
+    frame,waiting=source.window('NVDA.US','5m',cutoff=cutoff,target_rows=3000)
+    assert frame.empty and waiting['available_rows']==0
+    assert waiting['reason']=='deadline' and waiting['can_resume'] and not waiting['complete']
+    assert waiting['retry_after']==7 and waiting['progress_token']==before['progress_token']
+    assert not source._path('NVDA.US',1).exists()
+    exchange=ExchangeUSmart('us',client=source.client);exchange._canonical_history=source
+    with pytest.raises(CanonicalHistoryPending) as raised:
+        exchange.klines('NVDA.US','5m',end_date=cutoff.isoformat())
+    assert raised.value.preparation['progress_token']==before['progress_token']
+
+
+def test_admission_timeout_after_progress_preserves_saved_cursor_and_unverified_head(tmp_path):
+    from chanlun.exchange.usmart_rate_limit import USmartRateLimitTimeout
+    raw,cutoff=minutes(12);source,pages=source_at(tmp_path,raw,cutoff)
+    _,empty=source.window('NVDA.US','5m',cutoff=cutoff,target_rows=900,fetch=False)
+    attempts=[]
+    def advance_then_wait(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts)==2: raise USmartRateLimitTimeout(retry_after=5)
+        return pages(**kwargs)
+    source.loader=advance_then_wait
+    frame,waiting=source.window('NVDA.US','5m',cutoff=cutoff,target_rows=900,max_pages=2)
+    assert waiting['available_rows']>0 and waiting['progress_token']!=empty['progress_token']
+    assert waiting['reason']=='deadline' and waiting['can_resume'] and not waiting['complete']
+    stored,meta=source._load(source._path('NVDA.US',1),'NVDA.US')
+    assert len(stored)==1000
+    saved_cursor=meta['cursor']
+    _,snapshot=source.window('NVDA.US','5m',cutoff=cutoff,target_rows=900,fetch=False)
+    assert snapshot['progress_token']==waiting['progress_token']
+    # Even if this saved window could satisfy a smaller request, a forced
+    # head refresh that never passed the gate cannot claim verification.
+    def queued(**kwargs): raise USmartRateLimitTimeout()
+    source.loader=queued
+    _,blocked=source.window('NVDA.US','5m',cutoff=cutoff,target_rows=100,force=True)
+    assert not blocked['complete'] and blocked['can_resume'] and blocked['reason']=='deadline'
+    source.loader=pages
+    _,resumed=source.window('NVDA.US','5m',cutoff=cutoff,target_rows=900,max_pages=1)
+    assert pages.calls[-1]['cursor']==pd.Timestamp(saved_cursor)
+    assert resumed['progress_token']!=waiting['progress_token']
+
+
+@pytest.mark.parametrize('status',[401,503,None],ids=['http401','http503','network'])
+def test_remote_failures_remain_failures_not_local_preparation(tmp_path,status):
+    raw,cutoff=minutes(2);source,_=source_at(tmp_path,raw,cutoff)
+    failure=USmartAPIError('fixture remote failure',status_code=status)
+    def failed(**kwargs): raise failure
+    source.loader=failed
+    with pytest.raises(USmartAPIError) as raised:
+        source.window('NVDA.US','5m',cutoff=cutoff,target_rows=3000)
+    assert raised.value is failure and not isinstance(raised.value,CanonicalHistoryPending)
