@@ -125,10 +125,45 @@
   function evidenceUrl(row, source, frequency=row.frequency) {
     return '/screening/evidence?' + new URLSearchParams({source,code:row.code,frequency,point:row.point.point_id,...(row.market&&row.market!=='a'?{market:row.market}:{})});
   }
-  function filterRows(rows, filters, reviewed={}, sectorNames={}) {
+  const POINT_PERIODS = ['1m','5m','30m'];
+  function periodPointConditions(filters) {
+    return POINT_PERIODS.flatMap(frequency => {
+      const point=filters.period_points?.[frequency];
+      return [...Object.keys(POINTS),'either'].includes(point)?[{frequency,point}]:[];
+    });
+  }
+  function currentPeriodRow(row, source) {
+    return !row.refresh_state && (!row.result_source || row.result_source===source);
+  }
+  function periodPointSymbols(rows, conditions, mode, source) {
+    const index=new Map();
+    for(const row of rows) {
+      if(row.origin==='watchlist'||!currentPeriodRow(row,source)||row.evidence_available===false||
+        pointStage(row)!=='confirmed'||['invalidated','closed','left','approaching','formed','observed','monitoring','active'].includes(row.stage)||
+        !Object.prototype.hasOwnProperty.call(POINTS,row.point?.point_type))continue;
+      const key=JSON.stringify([row.market||'a',row.code]);
+      if(!index.has(key))index.set(key,new Map());
+      const periods=index.get(key);
+      if(!periods.has(row.frequency))periods.set(row.frequency,new Set());
+      periods.get(row.frequency).add(row.point.point_type);
+    }
+    const matches=new Set();
+    for(const [key,periods] of index) {
+      const test=condition=>{
+        const points=periods.get(condition.frequency);
+        return !!points&&(condition.point==='either'?points.has('3buy')||points.has('3sell'):points.has(condition.point));
+      };
+      if(mode==='all'?conditions.every(test):conditions.some(test))matches.add(key);
+    }
+    return matches;
+  }
+  function filterRows(rows, filters, reviewed={}, sectorNames={}, source=null) {
     const query = (filters.query || '').trim().toLowerCase();
+    const conditions=periodPointConditions(filters);
+    const matchingSymbols=conditions.length?periodPointSymbols(rows,conditions,filters.period_match,source):null;
     const visible=rows.filter(row => {
       const point = row.point || {};
+      if(matchingSymbols&&(!currentPeriodRow(row,source)||!matchingSymbols.has(JSON.stringify([row.market||'a',row.code]))))return false;
       if (filters.market !== 'all' && row.market !== filters.market) return false;
       if (filters.origin === 'screening' && row.origin === 'watchlist') return false;
       if (filters.origin === 'watchlist' && row.origin !== 'watchlist') return false;
@@ -184,7 +219,8 @@
     const periodButtons=Array.from(document.querySelectorAll('[data-frequency]'));
     const state = {data:null,serial:0,version:'',rows:[],selected:null,watch:[],quotes:new Map(),
       reviews:{latest:{},history:[]},drafts:new Map(),filters:{query:'',market:'all',origin:'screening',frequency:'all',point:'all',review:'all',stage:'all',risk:'all',sector:'',
-        point_status:'confirmed',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent'},
+        point_status:'confirmed',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent',
+        period_points:{'1m':'all','5m':'all','30m':'all'},period_match:'any'},
       frequency:'5m',sectorExpanded:false,queuePage:1,chartKey:'',chartVisible:typeof window==='undefined'||typeof IntersectionObserver==='undefined',quoteRequests:new Map(),watchSerial:0,
       details:new Map(),detailPending:new Set(),detailSerial:0,
       watchGroup:'',watchLoaded:false,watchLoading:false,watchError:'',
@@ -294,7 +330,7 @@
         sectors:(state.data?.candidates.find(r=>r.code===row.code&&r.market===row.market)?.sectors||[]).filter(id=>names[id])}));
     }
     function visibleRows() {
-      return filterRows([...(state.data?.candidates||[]),...watchRows()],state.filters,state.reviews.latest,sectorNames());
+      return filterRows([...(state.data?.candidates||[]),...watchRows()],state.filters,state.reviews.latest,sectorNames(),state.data?.source);
     }
     function renderSummary() {
       if (!state.data) return;
@@ -384,6 +420,7 @@
       $('selected-sector').textContent=sectorNames()[state.filters.sector]||'全部板块';
     }
     function renderQueue() {
+      renderPeriodPointFilters();
       state.rows=visibleRows();
       const page=pageRows(state.rows,state.queuePage,state.queuePageSize);
       state.queuePage=page.page;
@@ -866,7 +903,7 @@
         const quote=node('span',undefined,'watch-price');renderQuote(quote,state.quotes.get(`${row.market}:${row.code}`));
         button.append(title,quote);
         button.addEventListener('click',()=>{state.filters.origin='all';$('origin-filter').value='all';state.filters.market='all';$('market-filter').value='all';state.filters.point='all';state.filters.sector='';state.filters.query='';$('signal-search').value='';state.filters.frequency='all';$('frequency-filter').value='all';state.filters.stage='all';$('stage-filter').value='all';state.filters.review='all';$('review-filter').value='all';
-          state.filters.risk='all';$('risk-filter').value='all';state.filters.higher='all';$('higher-context-filter').value='all';syncPoints();
+          state.filters.risk='all';$('risk-filter').value='all';state.filters.higher='all';$('higher-context-filter').value='all';resetPeriodPointFilters();syncPoints();
           selectRow(watchRows().find(r=>r.id===`watch:${row.market}:${row.code}`));renderQueue();renderSectors();mobileView('chart');});return button;
       }));
     }
@@ -990,6 +1027,35 @@
       if(state.selected)$('live-quote').textContent=quoteText(state.quotes.get(`${state.selected.market}:${state.selected.code}`));
     }
     function syncPoints(){document.querySelectorAll('[data-point]').forEach(b=>{b.classList.toggle('active',b.dataset.point===state.filters.point);b.setAttribute('aria-pressed',String(b.dataset.point===state.filters.point));});}
+    function resetPeriodPointFilters() {
+      state.filters.period_points={'1m':'all','5m':'all','30m':'all'};
+      state.filters.period_match='any';
+      for(const frequency of POINT_PERIODS)$('period-point-'+frequency).value='all';
+      $('period-point-match').value='any';
+    }
+    function renderPeriodPointFilters() {
+      const conditions=periodPointConditions(state.filters);
+      $('period-point-match').disabled=!conditions.length;
+      $('period-point-clear').disabled=!conditions.length;
+      if(!conditions.length){$('period-point-summary').textContent='未启用跨周期买卖点条件';return;}
+      const label=c=>`${c.frequency} ${c.point==='either'?'三买或三卖':POINTS[c.point]}`;
+      let text=`同一标的${state.filters.period_match==='all'?'同时满足':'满足任一'}：${conditions.map(label).join('；')}。`;
+      const settings=state.data?.status?.settings;
+      const uncovered=conditions.filter(c=>
+        Array.isArray(settings?.frequencies)&&!settings.frequencies.includes(c.frequency)||
+        Array.isArray(settings?.point_types)&&!(c.point==='either'?['3buy','3sell']:[c.point]).some(p=>settings.point_types.includes(p)));
+      if(uncovered.length)text+=` 本轮未覆盖：${uncovered.map(label).join('、')}。可在“选股条件”中选择相应周期和买卖点后重新选股。`;
+      else if(activeRun(state.data?.status?.status)||state.data?.status?.results_loading)
+        text+=' 选股进行中，条件将随已核验结果逐步匹配。';
+      $('period-point-summary').textContent=text;
+    }
+    for(const frequency of POINT_PERIODS)$('period-point-'+frequency).addEventListener('change',()=>{
+      state.filters.period_points[frequency]=$('period-point-'+frequency).value;state.queuePage=1;renderQueue();
+    });
+    $('period-point-match').addEventListener('change',()=>{
+      state.filters.period_match=$('period-point-match').value;state.queuePage=1;renderQueue();
+    });
+    $('period-point-clear').addEventListener('click',()=>{resetPeriodPointFilters();state.queuePage=1;renderQueue();});
     $('scope').addEventListener('change',updateScope);
     $('screen-strategy').addEventListener('change',updateScreenMode);
     $('screen-frequency').addEventListener('change',updateScreenMode);
@@ -1014,7 +1080,7 @@
         point_status:'confirmed',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent'});
       $('signal-search').value='';$('sector-search').value='';
       for(const id of ['market-filter','frequency-filter','review-filter','stage-filter','risk-filter','lower-status-filter','higher-context-filter','center-order-filter','age-filter','gain-filter'])$(id).value='all';
-      $('point-status-filter').value='confirmed';$('sort-filter').value='recent';$('origin-filter').value='screening';syncPoints();renderSectors();renderQueue();
+      resetPeriodPointFilters();$('point-status-filter').value='confirmed';$('sort-filter').value='recent';$('origin-filter').value='screening';syncPoints();renderSectors();renderQueue();
     });
     $('refresh').addEventListener('click',()=>{void refresh(true);void refreshQuotes();});
     $('watch-group').addEventListener('change',()=>void refreshWatch());$('watch-refresh').addEventListener('click',()=>void refreshWatch());
@@ -1096,13 +1162,16 @@
     });
     $('export').addEventListener('click',async()=>{
       if(!state.data)return;
-      const source=state.data.source,ids=new Set(state.rows.map(row=>row.id));
+      const source=state.data.source,ids=new Set(state.rows.map(row=>row.id)),filters=JSON.parse(JSON.stringify(state.filters));
+      const watch=JSON.parse(JSON.stringify(state.rows.filter(row=>row.origin==='watchlist')));
+      const reviews=JSON.parse(JSON.stringify(state.reviews.latest));
       $('export').disabled=true;
       try{
         const full=state.data.compact?await api('/screening/workbench?compact=0'):state.data;
         if(full.source!==source)throw new Error('选股批次已更新，请刷新后导出。');
-        const rows=[...full.candidates.filter(row=>ids.has(row.id)),...state.rows.filter(row=>row.origin==='watchlist')];
-        const url=URL.createObjectURL(new Blob([JSON.stringify({source,status:full.status,filters:state.filters,candidates:rows,reviews:state.reviews.latest},null,2)],{type:'application/json'}));
+        const names=Object.fromEntries((full.sectors||[]).map(sector=>[sector.id,sector.name]));
+        const rows=filterRows([...full.candidates,...watch],filters,reviews,names,source).filter(row=>ids.has(row.id));
+        const url=URL.createObjectURL(new Blob([JSON.stringify({source,status:full.status,filters,candidates:rows,reviews},null,2)],{type:'application/json'}));
         const a=node('a');a.href=url;a.download=`screening-${source}.json`;a.click();URL.revokeObjectURL(url);
       }catch(error){message(error.message);}finally{$('export').disabled=false;}
     });
@@ -1111,5 +1180,5 @@
     const quotes=()=>{void refreshQuotes();setTimeout(quotes,15000);};setTimeout(quotes,15000);
     document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshQuotes();});
   }
-  return {boot,filterRows,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows};
+  return {boot,filterRows,periodPointConditions,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows};
 });

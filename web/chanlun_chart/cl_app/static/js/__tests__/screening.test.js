@@ -22,6 +22,7 @@ class Element {
   }
   replaceChildren(...children) { this.children = children; }
   addEventListener(name, fn) { this.listeners[name] = fn; }
+  click() { this.listeners.click?.(); }
   setAttribute(name,value) {this.attributes[name]=value;}
   querySelectorAll(selector) {
     if (!selector.startsWith('.')) return [];
@@ -46,6 +47,11 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
   get('chart-periods').append(...periods);
   const timers = [], timerDelays=[];
   const clock={now:Date.now()};
+  const exports=[];
+  class PageURL extends URL {
+    static createObjectURL(blob){exports.push(blob);return 'blob:screening-test';}
+    static revokeObjectURL(){}
+  }
   class PageDate extends Date { static now(){return clock.now;} }
   const body = new Element(), documentEvents = {};
   const sandbox={
@@ -60,12 +66,12 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
         return s.endsWith(':checked')?inputs.filter(i=>i.checked):inputs;
       },
     },
-    fetch, URL, URLSearchParams, Date:PageDate, Blob, AbortSignal, location:{origin:'http://local'},
+    fetch, URL:PageURL, URLSearchParams, Date:PageDate, Blob, AbortSignal, location:{origin:'http://local'},
     AccountPreferences:preferences,WorkspaceDevice:{isPhone:phone},
     setTimeout:(fn,delay) => {timerDelays.push(delay);return timers.push(fn);}, clearTimeout:id=>{timers[id-1]=()=>{};},
   };
   vm.runInNewContext(source,sandbox);
-  return {get, timers, timerDelays, advance:ms=>{clock.now+=ms;}, periods, body, documentEvents,
+  return {get, timers, timerDelays, exports, advance:ms=>{clock.now+=ms;}, periods, body, documentEvents,
     setHidden:value=>{sandbox.document.hidden=value;for(const fn of documentEvents.visibilitychange||[])fn();}};
 }
 const response = (value, status=200) => ({ok:status>=200&&status<300, status, redirected:false, json:async () => value});
@@ -548,6 +554,80 @@ function withCandidate() {
     origin:'screening',stage:'confirmed',sectors:[],point:{point_id:'P',point_type:'3buy',anchor_at:100,available_at:200,anchor_price:12,invalidation_price:11}}];
   return data;
 }
+
+function crossPeriodCandidates() {
+  const data=withCandidate(),base=data.candidates[0];
+  data.status.settings={...data.status.settings,frequencies:['1m','5m','30m'],point_types:['1buy','2buy','3buy','1sell','2sell','3sell']};
+  data.candidates=[['a1','SH.600000','1m','1buy'],['a5','SH.600000','5m','3sell'],['a30','SH.600000','30m','3buy'],
+    ['b1','SH.600001','1m','1buy'],['b30','SH.600001','30m','3buy']].map(([id,code,frequency,point_type])=>
+    ({...base,id,code,frequency,point:{...base.point,point_id:id,point_type,status:'confirmed'}}));
+  return data;
+}
+
+test('cross-period controls compose with the main period, clear independently and reset together',async()=>{
+  const latest=crossPeriodCandidates(),calls=[];
+  const ui=page(async url=>{calls.push(url);return dispatch(latest,url);},undefined,false,true);
+  await settle();
+  const choose=(id,value)=>{ui.get(id).value=value;ui.get(id).listeners.change();};
+  choose('frequency-filter','1m');
+  choose('period-point-30m','3buy');
+  choose('period-point-5m','3sell');
+  assert.equal(ui.get('signal-list').children.length,2);
+  choose('period-point-match','all');
+  assert.equal(ui.get('signal-list').children.length,1);
+  assert.match(ui.get('period-point-summary').textContent,/同时满足.*5m 三卖.*30m 三买/);
+  ui.get('period-point-clear').listeners.click();
+  assert.equal(ui.get('frequency-filter').value,'1m');
+  assert.equal(ui.get('signal-list').children.length,2);
+  assert.equal(ui.get('period-point-match').disabled,true);
+  choose('period-point-5m','3sell');
+  ui.get('reset').listeners.click();
+  assert.equal(ui.get('signal-list').children.length,5);
+  assert.equal(ui.get('period-point-5m').value,'all');
+  assert.equal(ui.get('period-point-match').value,'any');
+  assert.equal(calls.some(url=>url==='/screening/start'),false);
+});
+
+test('uncomputed period is explained and pending old rows cannot satisfy cross-period conditions',async()=>{
+  const latest=crossPeriodCandidates();
+  latest.status.settings.frequencies=['1m','5m'];
+  latest.candidates=latest.candidates.filter(row=>row.frequency!=='30m');
+  const ui=page(async url=>dispatch(latest,url));await settle();
+  ui.get('period-point-30m').value='3buy';ui.get('period-point-30m').listeners.change();
+  assert.equal(ui.get('signal-list').children.length,0);
+  assert.match(ui.get('period-point-summary').textContent,/本轮未覆盖：30m 三买/);
+  latest.candidates.push({...crossPeriodCandidates().candidates[2],refresh_state:'pending',result_source:'older'});
+  await ui.get('refresh').listeners.click();await settle();
+  assert.equal(ui.get('signal-list').children.length,0);
+});
+
+test('export freezes the cross-period conditions with the displayed candidate identities',async()=>{
+  const latest=crossPeriodCandidates();latest.compact=true;let release;
+  const ui=page(async url=>url==='/screening/workbench?compact=0'?new Promise(resolve=>{release=resolve;}):dispatch(latest,url));
+  await settle();
+  ui.get('period-point-30m').value='3buy';ui.get('period-point-30m').listeners.change();
+  const exportJob=ui.get('export').listeners.click();await settle();
+  ui.get('period-point-5m').value='3sell';ui.get('period-point-5m').listeners.change();
+  ui.get('period-point-match').value='all';ui.get('period-point-match').listeners.change();
+  release(response({...latest,compact:false}));await exportJob;
+  const exported=JSON.parse(await ui.exports[0].text());
+  assert.equal(exported.filters.period_points['30m'],'3buy');
+  assert.equal(exported.filters.period_points['5m'],'all');
+  assert.equal(exported.filters.period_match,'any');
+  assert.equal(exported.candidates.length,5);
+});
+
+test('export rechecks period matches against fresh full results of the same run',async()=>{
+  const latest=crossPeriodCandidates();latest.compact=true;
+  const full={...latest,compact:false,candidates:latest.candidates.filter(row=>row.id!=='a30')};
+  const ui=page(async url=>url==='/screening/workbench?compact=0'?response(full):dispatch(latest,url));
+  await settle();
+  ui.get('period-point-30m').value='3buy';ui.get('period-point-30m').listeners.change();
+  assert.equal(ui.get('signal-list').children.length,5);
+  await ui.get('export').listeners.click();
+  const exported=JSON.parse(await ui.exports[0].text());
+  assert.deepEqual(exported.candidates.map(row=>row.id),['b1','b30']);
+});
 
 test('a new scan keeps the previous candidate and chart while its response is pending',async()=>{
   let latest=withCandidate(),release;
