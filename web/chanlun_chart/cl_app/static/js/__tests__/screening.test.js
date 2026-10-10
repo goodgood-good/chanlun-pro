@@ -1130,6 +1130,73 @@ test('watchlist fetch failure remains explicit when quotes refresh and differs f
   assert.equal(ui.get('watch-quote-status').textContent,'');
 });
 
+for(const phone of [false,true])
+for(const filters of [[['risk-filter','avoid']],[['higher-context-filter','up']],[['risk-filter','avoid'],['higher-context-filter','up']]])
+test(`${phone?'phone':'desktop'} watchlist clicks clear ${filters.map(([id])=>id).join(' and ')} and keep the requested stock`,async()=>{
+  const latest=withCandidate();
+  latest.candidates[0].operational_macd_risk={risk_filter_state:'basic_avoid_on_selected_period'};
+  latest.candidates[0].higher_context={category:'up_segment'};
+  const ui=page(async url=>{
+    if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
+    if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:[{market:'us',code:'AAPL.US',name:'Apple'}]});
+    return dispatch(latest,url);
+  },undefined,false,true,phone);await settle();
+  for(const [id,value] of filters){ui.get(id).value=value;ui.get(id).listeners.change();}
+  assert.match(ui.get('selected-title').textContent,/SH\.600000/);
+  ui.get('watch-list').children[0].listeners.click();await settle();
+  for(const [id] of filters)assert.equal(ui.get(id).value,'all');
+  assert.equal(ui.get('origin-filter').value,'all');
+  assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
+  const chart=new URL(ui.get('chart-frame').src,'http://local');
+  assert.equal(chart.searchParams.get('code'),'AAPL.US');
+  assert.equal(chart.searchParams.get('market'),'us');
+  assert.equal(ui.get('signal-list').children.find(row=>row.dataset.id==='watch:us:AAPL.US').classList.contains('active'),true);
+  if(phone)assert.equal(ui.get('workspace').attributes['data-mobile-view'],'chart');
+  ui.get('refresh').listeners.click();await settle();
+  assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
+  assert.equal(ui.get('chart-frame').src,chart.pathname+chart.search);
+});
+
+for(const phone of [false,true])
+for(const initial of ['pending','failed'])
+test(`${phone?'phone':'desktop'} watchlist chart opens while initial results are ${initial} and survives their arrival`,async()=>{
+  let latest=withCandidate(),reads=0,release;
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/workbench')&&++reads===1)
+      return initial==='pending'?new Promise(resolve=>{release=resolve;}):response({error:'results unavailable'},503);
+    if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
+    if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:[{market:'us',code:'AAPL.US',name:'Apple'}]});
+    return dispatch(latest,url);
+  },undefined,false,true,phone);await settle();
+  if(initial==='failed')assert.equal(ui.get('page-message').textContent,'results unavailable');
+  assert.doesNotThrow(()=>ui.get('watch-list').children[0].listeners.click());await settle();
+  assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
+  assert.equal(ui.get('selected-detail').hidden,false);
+  assert.equal(ui.get('review-fields').disabled,true);
+  assert.equal(ui.get('chart-source').value,'live');
+  assert.equal(ui.get('chart-source').disabled,true);
+  assert.equal(ui.get('exit-price-sources').children.length,0);
+  assert.equal(ui.get('confirmation-exit-detail').children.length,0);
+  ui.periods.find(button=>button.dataset.frequency==='30m').listeners.click();
+  const chart=ui.get('chart-frame').src,params=new URL(chart,'http://local').searchParams;
+  assert.equal(params.get('code'),'AAPL.US');
+  assert.equal(params.get('market'),'us');
+  assert.equal(params.get('frequency'),'30m');
+  if(initial==='pending')release(response(latest));
+  else await ui.timers[0]();
+  await settle();
+  assert.equal(ui.get('page-message').textContent,'');
+  assert.equal(ui.get('signal-count').textContent,1);
+  assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
+  assert.equal(ui.get('chart-frame').src,chart);
+  assert.equal(ui.get('signal-list').children.find(row=>row.dataset.id==='watch:us:AAPL.US').classList.contains('active'),true);
+  if(phone)assert.equal(ui.get('workspace').attributes['data-mobile-view'],'chart');
+  latest={...latest,source:'next',status:{...latest.status,run_id:'next'}};
+  await ui.timers[0]();await settle();
+  assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
+  assert.equal(ui.get('chart-frame').src,chart);
+});
+
 test('watchlist quotes start before screening results and one slow market cannot block another',async()=>{
   const latest=withCandidate(),calls=[];let releaseUs;
   const ui=page(async(url,options)=>{

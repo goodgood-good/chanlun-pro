@@ -945,7 +945,8 @@ class ExchangeUSmart(Exchange):
                 max_pages=4, timeout_seconds=min(20.,_positive_number(args.get('timeout',15),15)),
                 force=args.get('_bypass_history_cache') is True)
             if coverage['reason'] == 'minute_contract_error':
-                raise USmartAPIError('已收盘分钟源存在缺失或无效数据，不能构建高周期',code='usmart_minute_contract_error')
+                raise USmartAPIError('已收盘分钟源存在缺失或无效数据，不能构建高周期',
+                                     code='usmart_minute_contract_error',retry_after=coverage.get('retry_after'))
             if coverage['reason'] == 'source_empty':
                 raise USmartAPIError('该标的暂无已收盘分钟历史', code='usmart_history_empty')
             if not coverage['complete']:

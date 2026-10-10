@@ -338,3 +338,204 @@ def test_remote_failures_remain_failures_not_local_preparation(tmp_path,status):
     with pytest.raises(USmartAPIError) as raised:
         source.window('NVDA.US','5m',cutoff=cutoff,target_rows=3000)
     assert raised.value is failure and not isinstance(raised.value,CanonicalHistoryPending)
+
+
+def damaged_history(tmp_path, *, missing=False, origin=False):
+    """A real cache shape with synthetic prices and an old, off-head defect."""
+    good, cutoff = minutes(5)
+    bad = good.copy(deep=True)
+    stamp = bad.date.iloc[100]
+    if missing:
+        bad = bad.drop(100).reset_index(drop=True)
+    else:
+        bad.loc[100, 'high'] = 1.
+    clock = [cutoff.timestamp()]
+    pages = Pages(good)
+    source = CanonicalUSmartHistory(SimpleNamespace(quote_host='https://fixture.invalid', channel='fixture'),
+        root=tmp_path, loader=pages, clock=lambda: clock[0])
+    meta = {'frontier': bad.date.min().timestamp(), 'origin': origin,
+        'cursor': (bad.date.min()-pd.Timedelta(milliseconds=1)).isoformat(),
+        'tail_checked': cutoff.timestamp(), 'tail_checked_at': clock[0]}
+    source._save(source._path('NVDA.US', 1), bad, meta)
+    request = {'cutoff': cutoff, 'target_from': good.date.iloc[0]+pd.Timedelta(minutes=5), 'count': 300}
+    return source, pages, clock, good, bad, stamp, request
+
+
+@pytest.mark.parametrize('missing', [False, True], ids=['invalid', 'missing'])
+@pytest.mark.parametrize('frequency', ['1m', '5m', '30m'])
+def test_old_fault_recovers_only_from_provider_page(tmp_path, missing, frequency):
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path, missing=missing)
+    if frequency == '30m':
+        request['target_from'] = good.date.iloc[0]+pd.Timedelta(minutes=30)
+    clock[0] += 901  # The first page is the usual expired head, the second targets history.
+    _, result = source.window('NVDA.US', frequency, **request, max_pages=2)
+    assert result['complete'] and len(pages.calls) == 2
+    assert pages.calls[1]['cursor'] == stamp + pd.Timedelta(minutes=3)
+    stored, _ = source._load(source._path('NVDA.US', 1), 'NVDA.US')
+    pd.testing.assert_frame_equal(stored, good)
+    assert not result['source_origin']
+
+
+def test_unchanged_fault_is_throttled_across_instances_and_force_rechecks(tmp_path):
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path)
+    pages.frame = bad
+    _, first = source.window('NVDA.US', '5m', **request)
+    assert first['reason'] == 'minute_contract_error' and not first['can_resume']
+    assert first['retry_after'] == 60 and len(pages.calls) == 1
+    other = CanonicalUSmartHistory(source.client, root=tmp_path, loader=pages, clock=lambda: clock[0])
+    _, same = other.window('NVDA.US', '5m', **request)
+    assert same['retry_after'] == 60 and len(pages.calls) == 1
+    clock[0] += 60
+    _, second = other.window('NVDA.US', '5m', **request)
+    assert second['retry_after'] == 120 and len(pages.calls) == 2
+    pages.frame = good
+    _, fixed = other.window('NVDA.US', '5m', **request, force=True)
+    assert fixed['complete'] and len(pages.calls) == 4  # forced head + targeted page
+
+
+@pytest.mark.parametrize('fetch,max_pages', [(False, 4), (True, 0)])
+def test_fault_readonly_or_zero_budget_never_requests(tmp_path, fetch, max_pages):
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path)
+    path = source._path('NVDA.US', 1)
+    before = path.read_bytes()
+    _, result = source.window('NVDA.US', '5m', **request, fetch=fetch, max_pages=max_pages)
+    assert not result['complete'] and pages.calls == [] and path.read_bytes() == before
+    assert result['reason'] == ('minute_contract_error' if not fetch else 'preparing')
+
+
+def test_recovery_budget_resumes_remaining_fault_without_reporting_source_error(tmp_path):
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path)
+    bad.loc[900, 'high'] = 1.
+    path = source._path('NVDA.US', 1)
+    _, meta = source._load(path, 'NVDA.US')
+    source._save(path, bad, meta)
+    _, waiting = source.window('NVDA.US', '5m', **request, max_pages=1)
+    assert waiting['reason'] == 'preparing' and waiting['can_resume']
+    assert waiting['diagnostics']['invalid_minute_count'] == 1 and len(pages.calls) == 1
+    _, ready = source.window('NVDA.US', '5m', **request, max_pages=1)
+    assert ready['complete'] and len(pages.calls) == 2
+
+
+@pytest.mark.parametrize('failure', ['empty', 'timeout', 'network', 'gate'])
+def test_recovery_failures_do_not_invent_origin_or_change_prices(tmp_path, failure):
+    from chanlun.exchange.usmart_rate_limit import USmartRateLimitTimeout
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path)
+    def failed(**kwargs):
+        if failure == 'empty':
+            return good.iloc[:0].copy()
+        if failure == 'timeout':
+            raise TimeoutError('fixture timeout')
+        if failure == 'gate':
+            raise USmartRateLimitTimeout(retry_after=7)
+        raise USmartAPIError('fixture network failure')
+    source.loader = failed
+    if failure == 'network':
+        with pytest.raises(USmartAPIError, match='network'):
+            source.window('NVDA.US', '5m', **request)
+        _, result = source.window('NVDA.US', '5m', **request, fetch=False)
+    else:
+        _, result = source.window('NVDA.US', '5m', **request)
+    assert not result['complete'] and not result['source_origin']
+    stored, meta = source._load(source._path('NVDA.US', 1), 'NVDA.US')
+    assert _fingerprint(stored) == _fingerprint(bad)
+    assert result['reason'] == ('deadline' if failure == 'gate' else 'minute_contract_error')
+    assert result['retry_after'] == (7 if failure == 'gate' else 60)
+    if failure == 'gate':
+        assert not meta.get('recovery_attempts')
+
+
+@pytest.mark.parametrize('revision', ['price', 'volume', 'omitted'])
+def test_revised_normal_neighbour_invalidates_old_basis_before_rebuilding(tmp_path, revision):
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path, origin=True)
+    revised = good.copy(deep=True)
+    if revision == 'price':
+        revised[['open', 'high', 'low', 'close']] += 20.
+    elif revision == 'volume':
+        revised.loc[102, 'volume'] += 10.
+    else:
+        revised = revised.drop(102).reset_index(drop=True)
+    pages.frame = revised
+    _, pending = source.window('NVDA.US', '5m', **request, max_pages=1)
+    assert not pending['complete'] and not pending['source_origin'] and pending['can_resume']
+    stored, meta = source._load(source._path('NVDA.US', 1), 'NVDA.US')
+    assert stored.empty and meta['rebuilding']
+    for _ in range(3):
+        _, result = source.window('NVDA.US', '5m', **request, max_pages=4)
+        if result['complete'] or result['reason'] == 'minute_contract_error':
+            break
+    stored, _ = source._load(source._path('NVDA.US', 1), 'NVDA.US')
+    assert len(stored) == len(revised)
+    pd.testing.assert_frame_equal(stored, revised)
+    assert result['complete'] is (revision != 'omitted')
+
+
+@pytest.mark.parametrize('force', [False, True])
+def test_recovery_lock_serializes_fetch_and_keeps_readers_on_verified_snapshot(tmp_path, force):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path)
+    entered, release = Event(), Event()
+    def blocked(**kwargs):
+        entered.set()
+        assert release.wait(5)
+        return pages(**kwargs)
+    source.loader = blocked
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker = pool.submit(source.window, 'NVDA.US', '5m', **request, max_pages=1)
+        try:
+            assert entered.wait(5)
+            other = CanonicalUSmartHistory(source.client, root=tmp_path, loader=pages, clock=lambda: clock[0])
+            _, waiting = other.window('NVDA.US', '5m', **request, force=force)
+            assert waiting['lock_wait'] and not waiting['complete'] and pages.calls == []
+            assert waiting['reason'] == 'preparing' and waiting['can_resume']
+            _, readonly = other.window('NVDA.US', '5m', **request, fetch=False)
+            assert readonly['reason'] == 'minute_contract_error'
+        finally:
+            release.set()
+        _, result = worker.result(timeout=10)
+    assert result['complete'] and len(pages.calls) == 1
+
+
+def test_recovery_obeys_shared_deadline_and_leaves_unvisited_pages_pending(tmp_path):
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path)
+    bad.loc[900, 'high'] = 1.
+    path = source._path('NVDA.US', 1)
+    _, meta = source._load(path, 'NVDA.US')
+    source._save(path, bad, meta)
+    elapsed = [10.]
+    source.monotonic = lambda: elapsed[0]
+    def consumes_deadline(**kwargs):
+        assert kwargs['deadline'] == 11.
+        elapsed[0] = 12.
+        return pages(**kwargs)
+    source.loader = consumes_deadline
+    _, result = source.window('NVDA.US', '5m', **request, max_pages=4, timeout_seconds=1.)
+    assert len(pages.calls) == 1 and result['reason'] == 'preparing' and result['can_resume']
+    assert result['diagnostics']['invalid_minute_count'] == 1
+
+
+def test_insufficient_recovery_overlap_rebuilds_without_reusing_legacy_seed(tmp_path):
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path)
+    request['count'] = 1
+    _, result = source.window('NVDA.US', '5m', **request, max_pages=1)
+    assert not result['complete'] and result['can_resume']
+    source.legacy_cache = SimpleNamespace(_path=lambda _: pytest.fail('discarded basis was reseeded'))
+    request['count'] = 300
+    _, pending = source.window('NVDA.US', '5m', **request, max_pages=1)
+    assert not pending['complete'] and pending['can_resume']
+    stored, _ = source._load(source._path('NVDA.US', 1), 'NVDA.US')
+    pd.testing.assert_frame_equal(stored, good.tail(300).reset_index(drop=True))
+
+
+def test_equal_integer_provider_volume_does_not_invalidate_float_cached_basis(tmp_path):
+    source, pages, clock, good, bad, stamp, request = damaged_history(tmp_path)
+    # Actual uSMART JSON has integer volume while the old persisted caches have
+    # float volume. Both the expired head and the recovery overlap must compare
+    # values without inventing a historical revision from that dtype alone.
+    pages.frame = good.copy(deep=True)
+    pages.frame['volume'] = pages.frame.volume.astype('int64')
+    clock[0] += 901
+    _, result = source.window('NVDA.US', '5m', **request, max_pages=2)
+    assert result['complete'] and len(pages.calls) == 2
+    stored, _ = source._load(source._path('NVDA.US', 1), 'NVDA.US')
+    pd.testing.assert_frame_equal(stored, good)

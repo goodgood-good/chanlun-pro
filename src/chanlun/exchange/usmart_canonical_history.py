@@ -58,6 +58,12 @@ def _fingerprint(frame):
     return hashlib.sha256(pd.util.hash_pandas_object(frame[COLUMNS], index=False).values.tobytes()).hexdigest()
 
 
+def _same_values(left, right):
+    # Parquet/legacy minutes can store integer volume as float. Compare exact
+    # values, not pandas dtypes; no price tolerance or rounding is permitted.
+    return bool((left.eq(right) | (left.isna() & right.isna())).all().all())
+
+
 def _empty():
     frame = pd.DataFrame(columns=COLUMNS)
     frame['date'] = pd.to_datetime(frame.date, utc=True)
@@ -196,7 +202,7 @@ class CanonicalUSmartHistory:
             stable = common[common < raw.date.max() - pd.Timedelta(minutes=1)] if head else common
             covered = old.index[(old.index >= page.date.min()) & (old.index <= page.date.max())]
             conflict = (not covered.isin(fresh.index).all()
-                        or (len(stable) and not old.loc[stable, VALUES].equals(fresh.loc[stable, VALUES])))
+                        or (len(stable) and not _same_values(old.loc[stable, VALUES], fresh.loc[stable, VALUES])))
             previous_frontier = _stamp(meta.get('frontier', raw.date.min().timestamp()))
             if conflict:
                 raw = _empty() if head else raw.loc[raw.date >= previous_frontier].copy()
@@ -219,6 +225,50 @@ class CanonicalUSmartHistory:
         meta['frontier'] = frontier.timestamp()
         meta['cursor'] = (frontier - pd.Timedelta(milliseconds=1)).isoformat()
         return merged
+
+    @staticmethod
+    def _faults(coverage):
+        diagnostic = coverage['diagnostics']
+        return set(diagnostic['missing_minute_opens']) | set(diagnostic['invalid_minute_opens'])
+
+    def _recovery_due(self, meta, faults, attempted=(), *, force=False):
+        attempts = meta.get('recovery_attempts', {})
+        return sorted((stamp for stamp in faults if stamp not in attempted and
+            (force or attempts.get(str(stamp), {}).get('retry_at', 0) <= self.clock())), reverse=True)
+
+    def _record_recovery(self, meta, faults, observed, resolved=()):
+        attempts = meta.setdefault('recovery_attempts', {})
+        for stamp in resolved:
+            attempts.pop(str(stamp), None)
+        for stamp in faults & set(observed):
+            failures = min(5, attempts.get(str(stamp), {}).get('failures', 0) + 1)
+            attempts[str(stamp)] = {'failures': failures,
+                'retry_at': self.clock() + min(900, 60 * 2 ** (failures - 1))}
+
+    @staticmethod
+    def _merge_recovery(raw, page, meta, invalid):
+        """Replace a provider page only while its valid overlap has the same basis.
+
+        A change to any normal neighbour, or insufficient overlap, invalidates
+        the old cache. Rebuild from the head instead of joining revised history
+        to unverified prices elsewhere. Known invalid values are never repaired
+        locally: the entire replacement page must come from the provider.
+        """
+        old, fresh = raw.set_index('date'), page.set_index('date')
+        common = old.index.intersection(fresh.index)
+        invalid = pd.to_datetime(sorted(invalid), unit='s', utc=True)
+        stable = common.difference(invalid)
+        covered = old.index[(old.index >= page.date.min()) & (old.index <= page.date.max())]
+        conflict = (len(stable) < 3 or not covered.isin(fresh.index).all()
+                    or not _same_values(old.loc[stable, VALUES], fresh.loc[stable, VALUES]))
+        if conflict:
+            meta.clear()
+            meta['rebuilding'] = True
+            return _empty(), True
+        # Do not advance the history frontier or infer an origin from a repair.
+        merged = pd.concat([raw, page], ignore_index=True).drop_duplicates('date', keep='last').sort_values('date').reset_index(drop=True)
+        merged.attrs = {'bar_time_label': 'start'}
+        return merged, False
 
     def _view(self, raw, meta, code, frequency, cutoff, right, target_from, all_origin, target_rows):
         visible = raw
@@ -254,7 +304,13 @@ class CanonicalUSmartHistory:
             'requested_to':int(cutoff.timestamp()),'available_from':None if frame.empty else int(frame.date.min().timestamp()),
             'available_to':None if frame.empty else int(frame.date.max().timestamp()),
             'diagnostics':{key:diagnostic.get(key) for key in ('missing_minute_count','duplicate_minute_count',
-                'invalid_minute_count','leading_partial_bucket','trailing_partial_bucket','stale_source','expected_cutoff')}}
+                'invalid_minute_count','leading_partial_bucket','trailing_partial_bucket','stale_source','expected_cutoff',
+                'missing_minute_opens','invalid_minute_opens')}}
+        faults = self._faults(coverage)
+        if faults:
+            attempts = meta.get('recovery_attempts', {})
+            retry_at = min(attempts.get(str(stamp), {}).get('retry_at', 0) for stamp in faults)
+            coverage['retry_after'] = max(3, math.ceil(retry_at - self.clock()))
         frame.attrs['canonical_source_progress'] = progress
         frame.attrs['canonical_history_coverage'] = coverage
         return frame, coverage
@@ -280,7 +336,7 @@ class CanonicalUSmartHistory:
         try:
             with interprocess_file_lock(path.with_suffix('.lock'), timeout_seconds=.05):
                 raw, meta = self._load(path, code)
-                if raw.empty:
+                if raw.empty and not meta.get('rebuilding'):
                     raw = self._seed(code, right, count, legacy_pages)
                     if not raw.empty:
                         meta = {'frontier':raw.date.min().timestamp(), 'cursor':(raw.date.min()-pd.Timedelta(milliseconds=1)).isoformat()}
@@ -291,13 +347,19 @@ class CanonicalUSmartHistory:
                 head = (force or raw.empty or meta.get('tail_checked',0) < required_close.timestamp()
                         or self.clock()-meta.get('tail_checked_at',0) >= 900)
                 admission_timeout = None
+                attempted = set()
                 for _ in range(max_pages):
                     if self.monotonic() >= deadline:
                         break
                     view, coverage = self._view(raw, meta, code, frequency, cutoff, right, target_from, all_origin, target_rows)
-                    if not head and (coverage['complete'] or not coverage['can_resume']):
+                    faults = self._faults(coverage)
+                    due = self._recovery_due(meta, faults, attempted, force=force)
+                    if not head and (coverage['complete'] or (not coverage['can_resume'] and not due)):
                         return view, coverage
-                    cursor = required_close - pd.Timedelta(minutes=1) if head else pd.Timestamp(meta['cursor'])
+                    recovery = not head and bool(due)
+                    target = due[0] if recovery else None
+                    cursor = (min(required_close - pd.Timedelta(minutes=1), _stamp(target) + pd.Timedelta(minutes=3))
+                              if recovery else required_close - pd.Timedelta(minutes=1) if head else pd.Timestamp(meta['cursor']))
                     try:
                         page = self._page(code, cursor, right, count, deadline)
                     except USmartRateLimitTimeout as exc:
@@ -306,8 +368,23 @@ class CanonicalUSmartHistory:
                         admission_timeout = exc
                         break
                     except TimeoutError:
+                        if recovery:
+                            self._record_recovery(meta, faults, [target])
+                            attempted.add(target)
+                            self._save(path, raw, meta)
                         break
+                    except USmartAPIError:
+                        if recovery:
+                            self._record_recovery(meta, faults, [target])
+                            self._save(path, raw, meta)
+                        raise
                     if page.empty:
+                        if recovery:
+                            # An empty interior page is not the source origin.
+                            self._record_recovery(meta, faults, [target])
+                            attempted.add(target)
+                            self._save(path, raw, meta)
+                            continue
                         if not head or raw.empty:
                             meta['origin'] = True
                             meta['origin_before'] = cursor.isoformat()
@@ -315,13 +392,31 @@ class CanonicalUSmartHistory:
                         self._save(path, raw, meta)
                         head = False
                         break
-                    raw = self._merge(raw, page, meta, head=head)
+                    if recovery:
+                        raw, rebuild = self._merge_recovery(raw, page, meta, coverage['diagnostics']['invalid_minute_opens'])
+                        if rebuild:
+                            self._save(path, raw, meta)
+                            head = True
+                            continue
+                    else:
+                        raw = self._merge(raw, page, meta, head=head)
                     if head:
                         meta.update(tail_checked=required_close.timestamp(), tail_checked_at=self.clock())
+                        meta.pop('rebuilding', None)
                     meta['page_rows'] = max(len(page), meta.get('page_rows',0))
+                    _, updated = self._view(raw, meta, code, frequency, cutoff, right, target_from, all_origin, target_rows)
+                    remaining = self._faults(updated)
+                    observed = {stamp for stamp in remaining if page.date.min().timestamp() <= stamp <= cursor.timestamp()}
+                    if recovery:
+                        observed.add(target)
+                    attempted.update(observed)
+                    self._record_recovery(meta, remaining, observed, faults - remaining)
                     self._save(path, raw, meta)
                     head = False
                 frame, coverage = self._view(raw, meta, code, frequency, cutoff, right, target_from, all_origin, target_rows)
+                if self._recovery_due(meta, self._faults(coverage), attempted, force=force):
+                    # More interior pages can advance in another bounded slice.
+                    coverage.update(complete=False, can_resume=True, reason='preparing')
                 if head or admission_timeout is not None:
                     coverage.update(complete=False, can_resume=True, reason='deadline')
                 if admission_timeout is not None:
@@ -331,6 +426,8 @@ class CanonicalUSmartHistory:
             raw, meta = self._load(path, code)
             frame, coverage = self._view(raw, meta, code, frequency, cutoff, right, target_from, all_origin, target_rows)
             coverage['lock_wait'] = True
-            if force:
+            if force or self._faults(coverage):
+                # Another writer may be verifying the bad page. Lock admission
+                # is preparation work, not another failed source observation.
                 coverage.update(complete=False, can_resume=True, reason='preparing')
             return frame, coverage
