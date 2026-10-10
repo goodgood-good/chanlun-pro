@@ -38,9 +38,12 @@ class _FakeDB:
         self.inserted = None
 
     def klines(self, code, frequency, args=None):
-        return self._df.copy()
+        result = self._df.copy()
+        if args and args.get('precision_revision'):
+            result.attrs['kline_storage_precision_revision'] = args['precision_revision']
+        return result
 
-    def insert_klines(self, code, frequency, klines):
+    def insert_klines(self, code, frequency, klines, *, precision_revision=None):
         self.inserted = klines
 
 

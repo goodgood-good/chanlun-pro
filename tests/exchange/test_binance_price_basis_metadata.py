@@ -16,6 +16,7 @@ from chanlun.exchange.exchange_binance_common import (
     normalize_binance_kline_frame,
 )
 from chanlun.exchange.exchange_binance_spot import ExchangeBinanceSpot
+from chanlun.exchange.price_basis import build_provider_price_basis_metadata
 
 
 def _real_cls(wrapper):
@@ -45,9 +46,12 @@ class _FakeDB:
         self.frame = frame
 
     def klines(self, _code, _frequency, args=None):
-        return self.frame.copy()
+        result = self.frame.copy()
+        if args and args.get('precision_revision'):
+            result.attrs['kline_storage_precision_revision'] = args['precision_revision']
+        return result
 
-    def insert_klines(self, _code, _frequency, _klines):
+    def insert_klines(self, _code, _frequency, _klines, *, precision_revision=None):
         return None
 
 
@@ -85,6 +89,15 @@ def test_binance_price_basis_revision_is_stable_and_market_specific():
     assert futures.attrs["price_basis_revision"] != spot.attrs[
         "price_basis_revision"
     ]
+
+
+def test_both_binance_markets_get_a_new_native_precision_basis():
+    for market in ('currency_spot', 'currency'):
+        previous = build_provider_price_basis_metadata(provider='binance', market=market, code='BTC/USDT',
+            adjustment='none', structure_price_quantum=Decimal('0.00000001'),
+            normalization_revision='kline-precision-round-half-up-v1')
+        current = normalize_binance_kline_frame(_frame(), market=market, code='BTC/USDT')
+        assert current.attrs['price_basis_revision'] != previous.price_basis_revision
 
 
 @pytest.mark.parametrize(

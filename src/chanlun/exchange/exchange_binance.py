@@ -114,8 +114,12 @@ class ExchangeBinance(Exchange):
         if "use_online" in args.keys() and args["use_online"]:
             return self.online_klines(code, frequency, start_date, end_date, args)
 
+        from chanlun.persistence.kline_precision_schema import KLINE_BINARY64_REVISION
         try:
-            db_klines = self.db_exchange.klines(code, frequency, args={"limit": 10000})
+            db_klines = self.db_exchange.klines(code, frequency,
+                args={"limit": 10000, 'precision_revision': KLINE_BINARY64_REVISION})
+            if db_klines.attrs.get('kline_storage_precision_revision') != KLINE_BINARY64_REVISION:
+                db_klines = db_klines.iloc[:0].copy()
             if len(db_klines) == 0:
                 online_klines = self.increment_klines_by_online(
                     code, frequency, start_date=None
@@ -126,7 +130,8 @@ class ExchangeBinance(Exchange):
                     return normalize_binance_kline_frame(
                         pd.DataFrame(), market="currency", code=code
                     )
-                self.db_exchange.insert_klines(code, frequency, online_klines)
+                self.db_exchange.insert_klines(code, frequency, online_klines,
+                                               precision_revision=KLINE_BINARY64_REVISION)
                 online_klines = normalize_binance_kline_frame(
                     online_klines, market="currency", code=code
                 )
@@ -147,7 +152,8 @@ class ExchangeBinance(Exchange):
                     # history itself is the complete result for this request.
                     klines = db_klines.copy()
                 else:
-                    self.db_exchange.insert_klines(code, frequency, online_klines)
+                    self.db_exchange.insert_klines(code, frequency, online_klines,
+                                                   precision_revision=KLINE_BINARY64_REVISION)
                     klines = pd.concat(
                         [db_klines, online_klines], ignore_index=True
                     )
@@ -224,8 +230,9 @@ class ExchangeBinance(Exchange):
                     all_klines = kline + all_klines
                     break
 
-                # 下一页的结束时间 = 当前页最早一条的时间戳
-                current_end = kline[0][0]
+                # Exclude the previous opening boundary while retaining the
+                # original ten-page cap, as in the Spot cache rebuild.
+                current_end = kline[0][0] - 1
 
                 all_klines = kline + all_klines
 

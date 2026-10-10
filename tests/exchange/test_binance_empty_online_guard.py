@@ -48,9 +48,12 @@ class _FakeDB:
         self._df = df
 
     def klines(self, code, frequency, args=None):
-        return self._df.copy()
+        result = self._df.copy()
+        if args and args.get('precision_revision'):
+            result.attrs['kline_storage_precision_revision'] = args['precision_revision']
+        return result
 
-    def insert_klines(self, code, frequency, klines):
+    def insert_klines(self, code, frequency, klines, *, precision_revision=None):
         # 复刻生产 db.klines_insert 首行 klines.empty: 若守卫失效被喂 None 则 AttributeError
         # (证明修复真的挡住了 None, 而非测试恰好不触发)
         _ = klines.empty

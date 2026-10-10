@@ -112,9 +112,10 @@ class ExchangeDB(Exchange):
             return dict(BINANCE_SUPPORTED_FREQUENCIES)
         return {"d": "D", "30m": "30m"}
 
-    def insert_klines(self, code, frequency, klines):
+    def insert_klines(self, code, frequency, klines, *, precision_revision=None):
         """批量写入 K 线数据到数据库。"""
-        db.klines_insert(self.market, code, frequency, klines)
+        options = {'precision_revision': precision_revision} if precision_revision is not None else {}
+        db.klines_insert(self.market, code, frequency, klines, **options)
         return True
 
     def klines(
@@ -142,8 +143,10 @@ class ExchangeDB(Exchange):
             start_date = fun.str_to_datetime(start_date)
         if end_date is not None:
             end_date = fun.str_to_datetime(end_date)
+        precision_revision = args.get('precision_revision')
+        options = {'precision_revision': precision_revision} if precision_revision is not None else {}
         klines = db.klines_query(
-            self.market, code, frequency, start_date, end_date, limit, order
+            self.market, code, frequency, start_date, end_date, limit, order, **options
         )
         kline_pd = []
         for _k in klines:
@@ -163,6 +166,8 @@ class ExchangeDB(Exchange):
             kline_pd = pd.DataFrame(
                 [], columns=["date", "code", "high", "low", "open", "close", "volume"]
             )
+            if precision_revision is not None:
+                kline_pd.attrs['kline_storage_precision_revision'] = precision_revision
             return kline_pd
 
         kline_pd = pd.DataFrame(kline_pd)
@@ -179,6 +184,8 @@ class ExchangeDB(Exchange):
         kline_pd = kline_pd.reset_index(drop=True)
 
         kline_pd = normalize_kline_precision(kline_pd, self.market, code)
+        if precision_revision is not None:
+            kline_pd.attrs['kline_storage_precision_revision'] = precision_revision
         return kline_pd
 
     def __convert_date(self, dt: datetime.datetime):

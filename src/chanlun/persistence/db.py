@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import os
 import pathlib
@@ -11,7 +12,7 @@ import pandas as pd
 from sqlalchemy import (
     Column,
     DateTime,
-    Float,
+    Double,
     String,
     UniqueConstraint,
     event,
@@ -29,6 +30,7 @@ from chanlun import config, fun
 from chanlun.market import Market
 from chanlun.config import get_data_path
 from chanlun.tools.log_util import LogUtil
+from chanlun.persistence.kline_precision_schema import precision_table_name
 
 warnings.filterwarnings("ignore")
 
@@ -302,7 +304,7 @@ class DB(object):
                     self._last_dt_cache_generation.get(key, 0) + 1
                 )
 
-    def klines_tables(self, market: str, stock_code: str):
+    def klines_tables(self, market: str, stock_code: str, *, precision_revision=None):
         stock_code = (
             stock_code.replace(".", "_")
             .replace("-", "_")
@@ -327,6 +329,8 @@ class DB(object):
         else:
             raise Exception(f"市场错误：{market}")
 
+        table_name = precision_table_name(table_name, market, precision_revision)
+
         if table_name in self.__cache_tables:
             return self.__cache_tables[table_name]
 
@@ -344,31 +348,54 @@ class DB(object):
                 "__table_args__": (
                     UniqueConstraint("code", "dt", "f", name="table_code_dt_f_unique"),
                     # 频繁的 (code,f,dt) 查询与排序，建立复合索引
-                    Index("idx_code_f_dt", "code", "f", "dt"),
+                    Index("idx_code_f_dt_" + hashlib.sha256(table_name.encode()).hexdigest()[:12], "code", "f", "dt"),
                     {"mysql_collate": "utf8mb4_general_ci"},
                 ),
                 "code": Column(String(20), primary_key=True, comment="标的代码"),
                 "dt": Column(DateTime, primary_key=True, comment="日期"),
                 "f": Column(String(5), primary_key=True, comment="周期"),
-                "o": Column(Float),
-                "c": Column(Float),
-                "h": Column(Float),
-                "l": Column(Float),
-                "v": Column(Float),
+                "o": Column(Double),
+                "c": Column(Double),
+                "h": Column(Double),
+                "l": Column(Double),
+                "v": Column(Double),
             }
 
             if market == Market.FUTURES.value:
                 # 期货市场，添加持仓列
-                table_attributes["p"] = Column(Float, comment="持仓量")
+                table_attributes["p"] = Column(Double, comment="持仓量")
 
             # A fixed inner-class name makes SQLAlchemy replace the previous
             # class-registry entry every time a different market table is
             # declared.  Give each table model a stable, distinct diagnostic
             # identity while retaining the same metadata and cache contract.
-            TableByKlines = type(orm_class_name, (Base,), table_attributes)
+            if table_name in Base.metadata.tables:
+                # A failed CREATE or another DB instance may already have
+                # registered the model. Do not register duplicate indexes.
+                existing = Base.metadata.tables[table_name]
+                TableByKlines = next((mapper.class_ for mapper in Base.registry.mappers
+                                     if mapper.local_table is existing), None)
+                if TableByKlines is None:
+                    TableByKlines = type(orm_class_name, (Base,), {
+                        "__module__":__name__, "__tablename__":table_name, "__table__":existing})
+            else:
+                TableByKlines = type(orm_class_name, (Base,), table_attributes)
 
+            if precision_revision is None:
+                Base.metadata.create_all(self.engine)
+            else:
+                from chanlun.persistence.file_lock import interprocess_file_lock
+                identity = self.engine.url.render_as_string(hide_password=True) + '|' + table_name
+                lock = get_data_path()/'db'/'schema_locks'/(hashlib.sha256(identity.encode()).hexdigest()+'.lock')
+                # Only this new namespace is created; old data is never ALTERed
+                # or copied. Serialize cold starts across process workers.
+                with interprocess_file_lock(lock, timeout_seconds=15):
+                    TableByKlines.__table__.create(self.engine, checkfirst=True)
+                    if self.engine.dialect.name in {'mysql','mariadb'}:
+                        columns = {c['name']:c['type'] for c in inspect(self.engine).get_columns(table_name)}
+                        if any(not isinstance(columns.get(key), Double) for key in ('o','c','h','l','v')):
+                            raise RuntimeError('native precision cache requires DOUBLE columns')
             self.__cache_tables[table_name] = TableByKlines
-            Base.metadata.create_all(self.engine)
             return TableByKlines
 
     def klines_query(
@@ -381,6 +408,7 @@ class DB(object):
         limit: int = 5000,
         order: str = "desc",
         auto_reverse: bool = False,
+        *, precision_revision=None,
     ) -> List:
         """
         获取k线数据。
@@ -404,7 +432,8 @@ class DB(object):
         :param auto_reverse: 仅在 ``order='desc'`` 时生效，将结果反转为升序返回。
         """
         with self.Session() as session:
-            table = self.klines_tables(market, code)
+            table = (self.klines_tables(market, code) if precision_revision is None else
+                     self.klines_tables(market, code, precision_revision=precision_revision))
             filter = (table.code == code, table.f == frequency)
             if start_date is not None:
                 filter += (table.dt >= start_date,)
@@ -422,8 +451,15 @@ class DB(object):
                 rows = list(reversed(rows))
             return rows
 
-    def klines_last_datetime(self, market, code, frequency):
+    def klines_last_datetime(self, market, code, frequency, *, precision_revision=None):
         """查询指定标的 K 线表中最新一条记录的日期字符串，无数据时返回 None。"""
+        if precision_revision is not None:
+            # Legacy last-datetime entries cannot certify a new source cache.
+            # Precision readers use its own indexed table directly.
+            table = self.klines_tables(market, code, precision_revision=precision_revision)
+            with self.Session() as session:
+                value = session.query(func.max(table.dt)).filter(table.code == code, table.f == frequency).scalar()
+                return None if value is None else value.strftime('%Y-%m-%d %H:%M:%S')
         while True:
             cached, generation = self._get_last_dt_cache_snapshot(
                 market, code, frequency
@@ -461,11 +497,12 @@ class DB(object):
     KLINES_INSERT_BATCH_SIZE = 1000
 
     def klines_insert(
-        self, market: str, code: str, frequency: str, klines: pd.DataFrame
+        self, market: str, code: str, frequency: str, klines: pd.DataFrame, *, precision_revision=None
     ):
         """
         插入k线 (性能优化版)
         """
+        precision_table_name('', market, precision_revision)
         if klines.empty:
             return True
 
@@ -510,7 +547,8 @@ class DB(object):
         data_to_insert = df[final_columns].to_dict(orient="records")
 
         with self.Session() as session:
-            table = self.klines_tables(market, code)
+            table = (self.klines_tables(market, code) if precision_revision is None else
+                     self.klines_tables(market, code, precision_revision=precision_revision))
 
             # SQLite 也用方言级原子 upsert(on_conflict_do_update),与下方 MySQL 分支对齐:
             # 原"逐行 query→add/update"在多 worker(default 池 10 线程)并发写同一 (code,dt,f)
@@ -537,7 +575,8 @@ class DB(object):
                         session.execute(upsert_stmt)
                     session.commit()
                     # 必须在 commit 返回后失效；否则并发读可在提交窗口把旧值重新写回缓存。
-                    self._invalidate_last_dt_cache(market, code, frequency)
+                    if precision_revision is None:
+                        self._invalidate_last_dt_cache(market, code, frequency)
                 except Exception as e:
                     session.rollback()
                     LogUtil.error(f"SQLite Batch Upsert Error: {e}")
@@ -565,7 +604,8 @@ class DB(object):
                 raise
 
         # MySQL 分支同样只在提交成功后失效；失败回滚时保留原缓存仍与数据库一致。
-        self._invalidate_last_dt_cache(market, code, frequency)
+        if precision_revision is None:
+            self._invalidate_last_dt_cache(market, code, frequency)
         return True
 
     def klines_delete(
@@ -574,11 +614,13 @@ class DB(object):
         code: str,
         frequency: str = None,
         dt: datetime.datetime = None,
+        *, precision_revision=None,
     ):
         """删除 K 线记录；frequency/dt 为空时删除该标的全部数据。"""
         with self.Session() as session:
             try:
-                table = self.klines_tables(market, code)
+                table = (self.klines_tables(market, code) if precision_revision is None else
+                         self.klines_tables(market, code, precision_revision=precision_revision))
                 q = session.query(table).filter(table.code == code)
                 if frequency is not None:
                     q = q.filter(table.f == frequency)
@@ -591,7 +633,8 @@ class DB(object):
                 raise
 
         # commit 成功后再失效；frequency=None 表示本标的全部周期。
-        self._invalidate_last_dt_cache(market, code, frequency)
+        if precision_revision is None:
+            self._invalidate_last_dt_cache(market, code, frequency)
         return True
 
     def zx_get_global_groups(self) -> List[TableByZxGroup]:

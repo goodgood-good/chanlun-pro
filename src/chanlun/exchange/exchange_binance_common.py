@@ -22,7 +22,7 @@ BINANCE_SPOT_PUBLIC_API_URL = "https://data-api.binance.vision/api/v3"
 # The strict-structure runtime hashes this revision together with market, symbol,
 # adjustment and price quantum.  Bump it whenever Binance OHLC normalization
 # semantics change so cached structure snapshots cannot cross price bases.
-BINANCE_OHLC_NORMALIZATION_REVISION = "kline-precision-round-half-up-v1"
+BINANCE_OHLC_NORMALIZATION_REVISION = "kline-precision-round-half-up-v1;native-binary64-v1"
 
 
 # Project frequency -> CCXT/Binance native timeframe.  The three entries whose
