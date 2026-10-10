@@ -2176,6 +2176,7 @@ class SignalMonitor:
             urgent=self._pending_notification_symbols(state,now.timestamp())
             cutoffs, errors, pending, retries, recent = {}, [], [], set(), set()
             due_retry_periods, due_notification_periods = {}, {}
+            revision_only_periods = {}
             scope_index = build_minute_scope_index(state)
             schedulable_periods = {}
             minute_decisions = {}
@@ -2229,10 +2230,26 @@ class SignalMonitor:
                 deferred = set(state.get('deferred_monitor_periods', {}).get(key, [])) & available
                 minute_override = '1m' in available and key in state.get('minute_force_pending', {})
                 minute_first_check = minute_decisions.get(key, {}).get('reason') == 'new_candidate'
-                if waiting_interval and not (deferred or minute_override or minute_first_check or due or urgent_due or is_recent and (attempted is None or closed > attempted)):
+                # Another market's latest run may already use the new source,
+                # so a pool-wide source-current flag cannot own every period's
+                # first recheck. Admit only periods never checked/attempted at
+                # this revision; current attempts retain their normal backoff.
+                revision_periods = {frequency for frequency in available if revision and
+                    state['selection_checks'].get(f'{key}:{frequency}', {}).get('revision') != revision
+                    and state.get('attempted_monitor_periods', {}).get(f'{key}:{frequency}', {}).get('revision') != revision}
+                revision_due = bool(revision_periods)
+                ordinary_wakeup = (deferred or minute_override or minute_first_check or due or urgent_due
+                                   or is_recent and (attempted is None or closed > attempted))
+                ordinary_fresh = (state['force'] or key in previous_calendar_errors
+                                  or key in state.get('force_pending_symbols', []) or deferred
+                                  or minute_override or minute_first_check or attempted != closed)
+                if revision_due and not ((ordinary_fresh or due or urgent_due)
+                                         and (not waiting_interval or ordinary_wakeup)):
+                    revision_only_periods[key] = revision_periods
+                if waiting_interval and not (deferred or minute_override or minute_first_check or revision_due or due or urgent_due or is_recent and (attempted is None or closed > attempted)):
                     continue
                 fresh = (state["force"] or key in previous_calendar_errors or key in state.get("force_pending_symbols", [])
-                         or bool(deferred) or minute_override or minute_first_check or attempted != closed)
+                         or bool(deferred) or minute_override or minute_first_check or revision_due or attempted != closed)
                 if fresh or due or urgent_due:
                     pending.append(symbol)
                     cutoffs[key] = closed
@@ -2270,6 +2287,8 @@ class SignalMonitor:
                 needed = []
                 for frequency in ('30m', '5m', '1m'):
                     if frequency not in available:
+                        continue
+                    if key in revision_only_periods and frequency not in revision_only_periods[key]:
                         continue
                     check = state['selection_checks'].get(f'{key}:{frequency}', {})
                     try:
