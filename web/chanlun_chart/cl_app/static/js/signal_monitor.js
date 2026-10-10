@@ -669,7 +669,7 @@
       const delivery=result.delivery;
       if(delivery){
         $('analytics-timings').append(node('p',delivery.error||`近 ${delivery.days} 天通知处理统计；以平台成功回执为准，文字、图文与独立图片分别统计。手机实际到达时间和历史记录缺少的阶段时间不作估算。`));
-        const labels={cutoff_to_sent:'行情截止至平台回执',schedule_wait:'截止至调度',worker_wait:'等待计算',fetch:'取数',compute:'计算与保存',result_wait:'结果读取',detection_to_sent:'发现至平台回执',queue:'发送排队',provider:'发送处理',queue_before_first_claim:'入队至首次处理',validation:'末次发送前复核',validation_total:'累计发送前复核',send_preparation:'复核后发送准备',request:'平台请求'};
+        const labels={cutoff_to_sent:'行情截止至平台回执',schedule_wait:'截止至调度',worker_wait:'等待计算',fetch:'取数',compute:'计算与保存',result_wait:'结果读取',detection_to_sent:'发现至平台回执',queue:'发送排队',provider:'发送处理',queue_before_first_claim:'入队至首次处理',validation:'本收据末次发送前复核',validation_total:'本收据累计复核（不含拆分前批次）',send_preparation:'复核后发送准备',request:'平台请求'};
         for(const row of delivery.groups||[]){
           const parts=Object.entries(row.measures||{}).map(([name,v])=>`${labels[name]||name} ${v.average_seconds.toFixed(2)} 秒（P95 ${v.p95_seconds.toFixed(2)}，${v.samples} 次）`);
           $('analytics-timings').append(node('p',`${row.market} ${row.frequency} · ${row.kind==='combined'?'图文':row.kind==='chart'?'图片':'文字'} · ${row.samples} 条：${parts.join('；')}`));

@@ -1,4 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+import json
 from pathlib import Path
 import threading
 import time
@@ -130,3 +132,94 @@ def test_memory_budget_is_shared_and_invalid_destinations_cannot_be_written(tmp_
     with pytest.raises(ValueError):
         capacity.update_resource_budget({**budget,'root':str(tmp_path/'elsewhere')})
     assert not (tmp_path/'elsewhere').exists()
+
+
+def test_late_old_owner_release_preserves_a_newer_owner_lease(resource_budget, monkeypatch):
+    capacity.update_resource_budget(resource_budget)
+    original = capacity.interprocess_file_lock
+    entered, resume = threading.Event(), threading.Event()
+
+    @contextmanager
+    def delayed(path, **kwargs):
+        if Path(path).name == 'monitor_demand.lock' and threading.current_thread().name.startswith('old-owner'):
+            entered.set()
+            assert resume.wait(5)
+        with original(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(capacity, 'interprocess_file_lock', delayed)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix='old-owner') as pool:
+        old = pool.submit(capacity.publish_monitor_demand, resource_budget, demand=0, owner='old')
+        try:
+            assert entered.wait(2)
+            capacity.publish_monitor_demand(resource_budget, demand=16, owner='new')
+            path = Path(resource_budget['root']) / capacity.DEMAND_FILE
+            before = json.loads(path.read_text())['leases']['new']
+        finally:
+            resume.set()
+        released = old.result(timeout=3)
+    assert json.loads(path.read_text())['leases'] == {'new': before}
+    assert released['monitor_capacity'] == 12 and released['screening_capacity'] == 4
+
+
+def test_demand_reader_does_not_discard_lease_newer_than_callers_timestamp(resource_budget):
+    capacity.update_resource_budget(resource_budget)
+    stale_now = time.time() - 1
+    capacity.publish_monitor_demand(resource_budget, demand=16, owner='new')
+    observed = capacity._with_roles({'limit':16, 'background_until':time.time()+10},
+                                    Path(resource_budget['root']), 16, stale_now)
+    assert observed['monitor_demand'] == 16 and observed['monitor_capacity'] == 12
+
+
+@pytest.mark.parametrize('limit,live,scan', [(0,0,0),(1,1,1),(2,1,1),(4,3,1),(8,7,1),(16,15,1)])
+def test_overdue_pressure_preserves_global_limit_and_one_scanning_slot(limit, live, scan):
+    roles = capacity.role_limits(limit, demand=16, screening_active=True, overdue_pressure=True)
+    assert (roles['monitor_capacity'], roles['screening_capacity']) == (live, scan)
+    assert capacity.role_limits(limit, demand=16, overdue_pressure=True)['monitor_capacity'] == limit
+
+
+def test_boost_uses_each_owners_actual_demand_and_releases_to_normal_share(resource_budget):
+    capacity.update_resource_budget(resource_budget)
+    capacity.publish_monitor_demand(resource_budget, demand=16, owner='normal')
+    small = capacity.publish_monitor_demand(resource_budget, demand=2, owner='urgent', overdue_pressure=True)
+    assert small['monitor_capacity'] == 12
+    thirteen = capacity.publish_monitor_demand(resource_budget, demand=13, owner='urgent', overdue_pressure=True)
+    assert (thirteen['monitor_capacity'], thirteen['screening_capacity']) == (13, 3)
+    high = capacity.publish_monitor_demand(resource_budget, demand=16, owner='urgent', overdue_pressure=True)
+    assert (high['monitor_capacity'], high['screening_capacity']) == (15, 1)
+    normal = capacity.publish_monitor_demand(resource_budget, demand=16, owner='urgent', overdue_pressure=False)
+    assert (normal['monitor_capacity'], normal['screening_capacity']) == (12, 4)
+    with pytest.raises(ValueError):
+        capacity.publish_monitor_demand(resource_budget, demand=16, overdue_pressure='yes')
+
+
+def test_owner_publication_failure_releases_acquired_os_slot(resource_budget, tmp_path, monkeypatch):
+    def fail(*args):
+        raise OSError('owner marker publication failed')
+    with monkeypatch.context() as fault:
+        fault.setattr(capacity, '_record_slot_owner', fail)
+        with pytest.raises(OSError, match='owner marker publication failed'):
+            with capacity.compute_slot({'compute_budget':resource_budget}, tmp_path):
+                pytest.fail('unregistered owner entered calculation')
+    with capacity.compute_slot({'compute_budget':resource_budget}, tmp_path) as slot:
+        assert slot == 0
+    assert not list(Path(resource_budget['root']).glob('*.owner.json'))
+
+
+def test_unknown_preupgrade_slot_counts_conservatively_until_it_releases(resource_budget, tmp_path):
+    root = Path(resource_budget['root'])
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = time.time()
+    (root / capacity.RESOURCE_FILE).write_text(json.dumps({'schema':'screening-memory-budget-v1',
+        'limit':4, 'updated_at':stamp, 'changed_at':stamp, 'background_until':stamp+60}))
+    capacity.publish_monitor_demand(resource_budget, demand=16, owner='scheduler')
+    entered = threading.Event()
+    def scanning_task():
+        with capacity.compute_slot({'compute_budget':resource_budget}, tmp_path):
+            entered.set()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with capacity.interprocess_file_lock(root/'slot_0.lock'):
+            task = pool.submit(scanning_task)
+            assert not entered.wait(.1)
+        task.result(timeout=3)
+    assert entered.is_set()

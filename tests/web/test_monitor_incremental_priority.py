@@ -362,10 +362,16 @@ def test_incremental_candidate_historical_signal_is_visible_without_notification
     service, manual, live, clock = monitor
     publish_candidate(manual)
     consume_increment(service, manual, clock)
-    for _ in range(2):
+    # Key periods now rotate at the same close; consume the actual requested
+    # 5m task instead of assuming it is the second whole-symbol batch.
+    for _ in range(3):
         service._schedule_monitor(clock[0], None)
-        live.rows = [signal('SZ.000001')]
+        selected = any(s['code'] == 'SZ.000001' and '5m' in s.get('_monitor_periods', live.state['settings']['frequencies'])
+                       for s in live.started[-1]['symbols'])
+        live.rows = [signal('SZ.000001')] if selected else []
         finish(service, live, clock)
+        if selected:
+            break
     events = [event for event in service._load()['events'] if event['code'] == 'SZ.000001']
     assert len(events) == 1
     assert events[0]['external_notifications'] is False

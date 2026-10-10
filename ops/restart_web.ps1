@@ -14,6 +14,7 @@ param(
 
 
     [switch]$EnableFullSymbolCatalog,
+    [switch]$DisableFullSymbolCatalog,
 
 
     [ValidateRange(30, 1800)]
@@ -34,7 +35,7 @@ if (-not $PreflightOnly -and -not $DeploymentWorker) {
         ('"{0}"' -f $PSCommandPath), '-DeploymentWorker',
         '-WebReadinessTimeoutSeconds', [string]$WebReadinessTimeoutSeconds
     )
-    foreach ($name in @('SkipWatchdog', 'OpenBrowser', 'EnableFullSymbolCatalog')) {
+    foreach ($name in @('SkipWatchdog', 'OpenBrowser', 'EnableFullSymbolCatalog', 'DisableFullSymbolCatalog')) {
         if (Get-Variable -Name $name -ValueOnly) { $workerArguments += ('-' + $name) }
     }
     $workerRoot = Split-Path -Parent $PSScriptRoot
@@ -201,6 +202,8 @@ function Register-LimitedWebLaunchTask {
 
     if ($FullSymbolCatalogEnabled) {
         $argumentParts += '-EnableFullSymbolCatalog'
+    } else {
+        $argumentParts += '-DisableFullSymbolCatalog'
     }
 
     $arguments = $argumentParts -join ' '
@@ -575,18 +578,11 @@ try {
     )
     Import-ProjectDotEnv -Path (Join-Path $ProjectRoot '.env') `
         -OverrideNames $deploymentManagedNames
-    # Identity-catalog enumeration is independent from strategy/full-coverage
-    # authorization.  A normal restart always restores the explicit 12-symbol
-    # cohort after .env import so stale process/user values cannot enumerate a
-    # whole exchange during cold start, periodic refresh, or search fallback.
+    # Identity metadata scope remains separate from strategy execution. The
+    # matching saved deployment choice is restored below after resolving port.
     [Environment]::SetEnvironmentVariable(
         'CHANLUN_SYMBOL_CATALOG_VALIDATION_CODES',
         'SZ.000932,SZ.000923,SH.600516,SZ.001203,SZ.000783,SZ.000987,SH.601377,SH.601628,SZ.002377,SH.601808,SZ.000698,SH.600583',
-        'Process'
-    )
-    [Environment]::SetEnvironmentVariable(
-        'CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED',
-        $(if ($EnableFullSymbolCatalog) { '1' } else { '0' }),
         'Process'
     )
     Import-UserEnvironmentFallback -Names @(
@@ -618,6 +614,23 @@ if (-not [string]::IsNullOrWhiteSpace($env:CHANLUN_WEB_PORT)) {
     $webPort = $parsedWebPort
 }
 $env:CHANLUN_WEB_PORT = [string]$webPort
+try {
+    if ($EnableFullSymbolCatalog -and $DisableFullSymbolCatalog) {
+        throw 'EnableFullSymbolCatalog and DisableFullSymbolCatalog are mutually exclusive'
+    }
+    $catalogChoice = $null
+    if ($EnableFullSymbolCatalog) { $catalogChoice = $true }
+    if ($DisableFullSymbolCatalog) { $catalogChoice = $false }
+    $EnableFullSymbolCatalog = Resolve-DeploymentCatalogScope -Path $watchdogScopePath `
+        -ProjectRoot $ProjectRoot -Port $webPort -ExplicitValue $catalogChoice
+    $env:CHANLUN_SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED = $(if ($EnableFullSymbolCatalog) { '1' } else { '0' })
+    $readyMarkets = @('a', 'us') + @($env:CHANLUN_READINESS_MARKETS -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $env:CHANLUN_READINESS_MARKETS = ($readyMarkets | Select-Object -Unique) -join ','
+    Log ('catalog full={0}; readiness markets={1}' -f [bool]$EnableFullSymbolCatalog, $env:CHANLUN_READINESS_MARKETS)
+} catch {
+    Log ('ERROR: deployment scope preflight failed: {0}' -f $_.Exception.Message)
+    exit 1
+}
 if ([string]::IsNullOrWhiteSpace($env:CHANLUN_WEB_HOST)) {
     $env:CHANLUN_WEB_HOST = '127.0.0.1'
 }

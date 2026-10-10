@@ -34,7 +34,7 @@ from .monitor_view import validate_page_options
 from .screening_pool_recovery import independent_members, pending_members, suspend_pending, resolve_pending
 from .monitor_scope import build_minute_scope_index, minute_cadence, record_minute_checkpoint
 from . import monitor_requests
-from .monitor_fairness import plan_batch, task_lane, SERVICE_PATTERN
+from .monitor_fairness import plan_batch, task_lane, SERVICE_PATTERN, remember_pending, record_costs, service_pressure
 
 
 ACTIVE = {"starting", "running"}
@@ -51,6 +51,7 @@ _PRIVATE_SNAPSHOT_FIELDS = frozenset({
     'unverified_signals', 'holding_evidence', 'holding_risk_plans', 'startup_errors', 'last_check_event_refs',
     'minute_cadence_checkpoints', 'minute_force_pending', 'active_minute_override_tokens',
     'minute_cadence_policy_version',
+    'monitor_pending_deadlines',
 })
 
 
@@ -168,6 +169,9 @@ def configure_periods(state, frequencies, stamp):
             state[name] = {key: item for key, item in state.get(name, {}).items()
                            if key.rsplit(':', 1)[-1] not in removed
                            or state.get('holding_risk_plans', {}).get(key, {}).get('active')}
+        state['monitor_pending_deadlines'] = {key: value for key, value in state.get('monitor_pending_deadlines', {}).items()
+            if key.rsplit(':', 1)[-1] not in removed
+            or key.rsplit(':', 1)[-1] in _bound_risk_periods(state, key.rsplit(':', 1)[0])}
         state['errors'] = [item for item in state.get('errors', [])
                            if item.get('frequency') not in removed
                            or state.get('holding_risk_plans', {}).get(
@@ -1335,21 +1339,32 @@ class SignalMonitor:
     def poll_interval(self):
         return .5 if self._busy_poll else 3
 
-    def _monitor_capacity(self, demand, screening_active):
+    def _monitor_capacity(self, demand, screening_active, *, overdue_pressure=False, service_estimate=None):
         """Publish bounded live demand; isolated explicit roots use pure limits."""
         demand = 0 if self._stop.is_set() else max(0, int(demand))
         if demand:
             with self._lock:
                 configured = self._load()['settings'].get('monitor_workers', MAX_WORKERS)
             demand = min(demand, configured, cpu_capacity())
-        limits = role_limits(cpu_capacity(), demand, screening_active)
+        limits = role_limits(cpu_capacity(), demand, screening_active, overdue_pressure=overdue_pressure)
         self._busy_poll = demand > 0
         if self._publish_compute_budget:
             if self._compute_budget is None:
                 self._compute_budget = budget_request()
             try:
                 pressure = publish_monitor_demand(self._compute_budget, demand=demand,
-                    expires_in=12, owner=self._compute_budget_owner)
+                    expires_in=12, owner=self._compute_budget_owner, overdue_pressure=overdue_pressure)
+                actual_limit = pressure.get('limit', cpu_capacity())
+                needed = min(demand, (service_estimate or {}).get('required_workers', demand))
+                normal = role_limits(actual_limit, needed, True)['monitor_capacity']
+                if (demand and actual_limit > 1 and screening_active and not overdue_pressure
+                        and (service_estimate or {}).get('boost_ready') and needed > normal):
+                    # Memory can shrink the shared budget after planning. The
+                    # same measured demand must be compared to that real split.
+                    overdue_pressure, demand = True, needed
+                    pressure = publish_monitor_demand(self._compute_budget, demand=demand,
+                        expires_in=12, owner=self._compute_budget_owner, overdue_pressure=True)
+                    limits = role_limits(cpu_capacity(), demand, screening_active, overdue_pressure=True)
                 limits['monitor_capacity'] = min(limits['monitor_capacity'], pressure['monitor_capacity'])
                 for key in ('screening_capacity', 'monitor_reserved', 'limit'):
                     if key in pressure:
@@ -1358,7 +1373,8 @@ class SignalMonitor:
                 # The worker's shared slot locks remain authoritative even if
                 # this advisory demand update could not be published.
                 LOG.warning('monitor compute demand update unavailable')
-        self._last_compute_limits = {**limits, 'monitor_demand': demand, 'observed_at': self.now().timestamp()}
+        self._last_compute_limits = {**limits, 'monitor_demand': demand, 'overdue_pressure': overdue_pressure,
+                                     'observed_at': self.now().timestamp()}
         return limits['monitor_capacity']
 
     def scheduling_activity(self):
@@ -1376,6 +1392,8 @@ class SignalMonitor:
                     'planned_at': state.get('monitor_queue_at') if enabled_pool else None,
                     'allocation': deepcopy(self._last_compute_limits),
                     'weights': {'hot': 8, 'critical': 3, 'cold': 1},
+                    'pressure': deepcopy(state.get('monitor_service_pressure', {})) if enabled_pool else {},
+                    'period_costs': deepcopy(state.get('monitor_period_costs', {})),
                     'poll_seconds': self.poll_interval()}
 
     def _notification_worker_health(self):
@@ -1763,6 +1781,8 @@ class SignalMonitor:
                 state.get('attempted_monitor_periods', {}).items() if key.rsplit(':', 1)[0] in pool}
             for name in ('minute_cadence_checkpoints', 'minute_force_pending'):
                 state[name] = {key: value for key, value in state.get(name, {}).items() if key in pool}
+            state['monitor_pending_deadlines'] = {key: value for key, value in state.get('monitor_pending_deadlines', {}).items()
+                                                   if key.rsplit(':', 1)[0] in pool}
             state["next_check_at"] = 0
             state["selection_checks"] = {key: value for key, value in state["selection_checks"].items()
                                          if value.get("symbol") in pool}
@@ -2128,7 +2148,12 @@ class SignalMonitor:
                     live_active = active & set(state.get('active_live_symbols', []))
                     demand = (len(live_active) + state.get('pending_live_tasks', 0)
                               + min(2, len(active - live_active) + state.get('pending_background_tasks', 0))) if state['enabled'] else 0
-                self._monitor_capacity(max(1, demand) if demand else 0, manual['status'] in ACTIVE)
+                    pressure = state.get('monitor_service_pressure', {})
+                    boosted = bool(demand and pressure.get('overdue_pressure'))
+                    if boosted:
+                        demand = min(demand, pressure.get('required_workers', demand))
+                self._monitor_capacity(max(1, demand) if demand else 0, manual['status'] in ACTIVE,
+                                       overdue_pressure=boosted, service_estimate=pressure)
             self._yield_live_for_priority(now, monitor_status, control_version,
                                           expected_seed, expected_run)
             self._yield_background_for_live(now,monitor_status,control_version,
@@ -2327,6 +2352,8 @@ class SignalMonitor:
                     state.update(force=False, pending_symbols_count=0)
                     self._save()
                 return
+            if remember_pending(state, planned_periods, planned_targets, minute_decisions, revision, now.timestamp()):
+                self._save()
             # Live clocks precede historical rebuilds. Within each class keep
             # holdings/watchlist priority, bounded retries and queue rotation.
             backlog = len(pending)
@@ -2338,34 +2365,23 @@ class SignalMonitor:
             live_work = sum(len(planned_periods[_symbol_key(symbol)]) for symbol in live_pending)
             historical_work = sum(len(value) for value in planned_periods.values()) - live_work
             demand = live_work + min(2, historical_work)
-            workers = min(role_limits(cpu_capacity(), demand, screening_active)['monitor_capacity'],
+            available_capacity = min(cpu_capacity(), self._last_compute_limits.get('limit', cpu_capacity()))
+            pressure = service_pressure(state, planned_periods, planned_targets, minute_decisions,
+                                        recent, now.timestamp(), available_capacity)
+            if pressure['overdue_pressure']:
+                demand = min(demand, pressure['required_workers'])
+            workers = min(role_limits(cpu_capacity(), demand, screening_active,
+                                      overdue_pressure=pressure['overdue_pressure'])['monitor_capacity'],
                           state['settings'].get('monitor_workers', MAX_WORKERS))
-            batch_size = min(MONITOR_BATCH_SIZE, workers * MONITOR_WORKER_WAVES)
             mode='live' if live_pending else 'background'
-            fair_cursor = state.get('monitor_fair_cursor', 0)
-            plan_options = dict(state=state, targets=planned_targets, minute_decisions=minute_decisions,
-                                urgent=urgent, now=now.timestamp())
-            if live_pending:
-                historical=[symbol for symbol in pending if _symbol_key(symbol) not in recent]
-                protected=sum(_symbol_key(symbol) in state['holding_symbols'] or _symbol_key(symbol) in urgent
-                              for symbol in live_pending)
-                # Continuous live candles must not starve an already approved
-                # historical/version recheck. Reserve at most one worker wave
-                # and a quarter of the existing batch, without displacing
-                # holdings/urgent live checks or the last live slot. Preserve
-                # the sorted order: live work starts first; attempted cutoffs
-                # and the existing force queue rotate the remaining members.
-                reserved=min(workers,max(1,batch_size//4),len(historical),
-                             max(0,batch_size-max(1,protected)))
-                tasks, fair_cursor = plan_batch(live_pending, planned_periods,
-                    limit=batch_size-reserved, cursor=fair_cursor, **plan_options)
-                old_tasks, fair_cursor = plan_batch(historical, planned_periods,
-                    limit=reserved, cursor=fair_cursor, **plan_options)
-                tasks.extend(old_tasks)
-            else:
-                batch_size=min(batch_size,workers*MONITOR_BACKGROUND_WAVES)
-                tasks, fair_cursor = plan_batch(pending, planned_periods,
-                    limit=batch_size, cursor=fair_cursor, **plan_options)
+            fair_plan = deepcopy({'symbols':pending, 'periods':planned_periods, 'targets':planned_targets,
+                'decisions':minute_decisions, 'urgent':urgent, 'recent':recent, 'cutoffs':cutoffs,
+                'now':now.timestamp(), 'capacity':workers, 'cursor':state.get('monitor_fair_cursor', 0),
+                'state':{name:state.get(name, {}) for name in ('selection_checks', 'attempted_cutoffs',
+                    'monitor_pending_deadlines', 'holding_symbols', 'monitor_critical_cursor')},
+                'minute_requests':{key:monitor_requests.snapshot(state,key) for key in planned_periods},
+                'risk_periods':{key:sorted(_bound_risk_periods(state,key)) for key in planned_periods}})
+            tasks, fair_cursor, critical_cursor = self._fair_batch(fair_plan, workers)
             pending = [task['symbol'] for task in tasks]
             queue_counts = Counter(task_lane(frequency, minute_decisions.get(key, {}))
                                    for key, frequencies in planned_periods.items() for frequency in frequencies)
@@ -2415,9 +2431,11 @@ class SignalMonitor:
                 'minute_overrides': minute_overrides,
                 'minute_request_snapshots': minute_snapshots,
                 'fair_cursor': fair_cursor,
+                'critical_cursor': critical_cursor, 'fair_plan': fair_plan,
                 'service_lanes': {task['key']: task['lane'] for task in tasks},
                 'service_deadlines': {task['key']: task['deadline'] for task in tasks},
                 'compute_demand': demand, 'screening_active': screening_active,
+                'pressure': pressure,
                 'active_live_symbols': sorted(set(cutoffs) & recent),
                 'pending_live_tasks': max(0, live_work - len(set(cutoffs) & recent)),
                 'pending_background_tasks': max(0, historical_work - len(set(cutoffs) - recent)),
@@ -2427,8 +2445,73 @@ class SignalMonitor:
         self._dispatch_monitor(launch)
 
     @staticmethod
+    def _fair_batch(plan, capacity):
+        """Choose the fair shares using the effective worker budget."""
+        recent = set(plan['recent'])
+        live = [s for s in plan['symbols'] if _symbol_key(s) in recent]
+        history = [s for s in plan['symbols'] if _symbol_key(s) not in recent]
+        cursor = plan['cursor']
+        critical = plan['state'].get('monitor_critical_cursor') or 0
+        options = dict(state=plan['state'], targets=plan['targets'], minute_decisions=plan['decisions'],
+                       urgent=plan['urgent'], now=plan['now'])
+        limit = min(MONITOR_BATCH_SIZE, capacity*(MONITOR_WORKER_WAVES if live else MONITOR_BACKGROUND_WAVES))
+        if not live:
+            tasks, cursor = plan_batch(history, plan['periods'], limit=limit, cursor=cursor,
+                                       critical_cursor=critical, **options)
+        else:
+            protected = sum(_symbol_key(s) in plan['state']['holding_symbols'] or _symbol_key(s) in plan['urgent'] for s in live)
+            reserved = min(capacity, max(1,limit//4), len(history), max(0,limit-max(1,protected)))
+            tasks, cursor = plan_batch(live, plan['periods'], limit=limit-reserved, cursor=cursor,
+                                       critical_cursor=critical, **options)
+            old, cursor = plan_batch(history, plan['periods'], limit=reserved, cursor=cursor,
+                critical_cursor=critical+sum(t['lane']=='critical' for t in tasks), **options)
+            tasks.extend(old)
+        return tasks, cursor, (critical+sum(t['lane']=='critical' for t in tasks)) % 2
+
+    @staticmethod
     def _trim_launch(launch, capacity):
         """A lower live memory budget must not leave an oversized queued wave."""
+        if launch.get('fair_plan'):
+            plan = launch['fair_plan']
+            if capacity == plan['capacity']:
+                return
+            tasks, cursor, critical = SignalMonitor._fair_batch(plan, capacity)
+            chosen = {task['key'] for task in tasks}
+            due = {task['key']:[task['frequency']] for task in tasks}
+            launch['settings']['symbols'] = [task['symbol'] for task in tasks]
+            runtime = {key:value for key,value in plan['risk_periods'].items()
+                       if key in chosen and set(value)-set(launch['settings']['frequencies'])}
+            subset = any(set(frequencies) != (set(launch['settings']['frequencies']) | set(runtime.get(key, [])))
+                         for key, frequencies in due.items())
+            if subset:
+                launch['options']['due_periods'] = due
+            else:
+                launch['options'].pop('due_periods', None)
+            if runtime:
+                launch['options']['monitor_periods'] = runtime
+            else:
+                launch['options'].pop('monitor_periods', None)
+            launch['cutoffs'] = {key:plan['cutoffs'][key] for key in chosen}
+            launch['waiting'] = set(plan['periods'])-chosen
+            launch['deferred_periods'] = {key:[f for f in plan['periods'][key] if f not in due[key]] for key in chosen}
+            launch['period_targets'] = {f"{task['key']}:{task['frequency']}":plan['targets'][f"{task['key']}:{task['frequency']}"] for task in tasks}
+            launch['minute_request_snapshots'] = {key:deepcopy(plan['minute_requests'][key]) for key in chosen if '1m' in due[key]}
+            for key, generation in launch['minute_overrides'].items():
+                if key in launch['minute_request_snapshots']:
+                    launch['minute_request_snapshots'][key]['sources']['recheck'] = deepcopy(generation)
+            launch['notification_rechecks'] = chosen & set(plan['urgent'])
+            launch['fair_cursor'], launch['critical_cursor'] = cursor, critical
+            launch['service_lanes'] = {task['key']:task['lane'] for task in tasks}
+            launch['service_deadlines'] = {task['key']:task['deadline'] for task in tasks}
+            live = chosen & set(plan['recent'])
+            launch['active_live_symbols'] = sorted(live)
+            live_work = sum(len(fs) for key,fs in plan['periods'].items() if key in plan['recent'])
+            launch['pending_live_tasks'] = live_work-len(live)
+            launch['pending_background_tasks'] = sum(map(len,plan['periods'].values()))-live_work-len(chosen-live)
+            counts = Counter(task_lane(f,plan['decisions'].get(key,{})) for key,fs in plan['periods'].items() for f in fs)
+            counts.subtract(task['lane'] for task in tasks)
+            launch['queue_counts'] = dict(counts)
+            return
         waves = MONITOR_WORKER_WAVES if launch['mode'] == 'live' else MONITOR_BACKGROUND_WAVES
         limit = min(MONITOR_BATCH_SIZE, max(1, capacity) * waves)
         symbols = launch['settings']['symbols']
@@ -2474,9 +2557,13 @@ class SignalMonitor:
                     return
             try:
                 capacity = self._monitor_capacity(launch.get('compute_demand', len(launch['cutoffs'])),
-                                                  launch.get('screening_active', False))
+                                                  launch.get('screening_active', False),
+                                                  overdue_pressure=launch.get('pressure', {}).get('overdue_pressure', False),
+                                                  service_estimate=launch.get('pressure'))
                 if capacity < 1:
                     return
+                if launch.get('pressure'):
+                    launch['pressure']['overdue_pressure'] = self._last_compute_limits.get('overdue_pressure', False)
                 launch['settings']['workers'] = min(launch['settings']['workers'], capacity)
                 self._trim_launch(launch, launch['settings']['workers'])
                 launched=monitor.start(launch['settings'],**launch['options'])
@@ -2523,6 +2610,8 @@ class SignalMonitor:
                     newer_full_check=self._check_requests.get(None,0)!=launch['check_requests'].get(None,0)
                     state.update(force=state['force'] if newer_full_check else False,last_error='',
                                  monitor_fair_cursor=launch.get('fair_cursor', state.get('monitor_fair_cursor', 0)),
+                                 monitor_critical_cursor=launch.get('critical_cursor', 0),
+                                 monitor_service_pressure=deepcopy(launch.get('pressure', {})),
                                  pending_live_tasks=launch.get('pending_live_tasks', 0),
                                  pending_background_tasks=launch.get('pending_background_tasks', 0),
                                  monitor_queue_counts=launch.get('queue_counts', {}),
@@ -3067,6 +3156,11 @@ class SignalMonitor:
                     "revision": result.get("source_revision"), "identities": identities, "error": False,
                     "input_fingerprint": period.get('input_fingerprint') or (period.get('evidence') or {}).get('input_fingerprint'),
                 }
+                record_costs(state, [period])
+                pending_age = state.get('monitor_pending_deadlines', {}).get(period_key, {})
+                if (pending_age.get('revision') == result.get('source_revision')
+                        and (pending_age.get('target') is None or period['source_closed_at'] >= pending_age['target'])):
+                    state['monitor_pending_deadlines'].pop(period_key, None)
                 if period['frequency'] == '1m':
                     record_minute_checkpoint(state, symbol, result.get('source_revision'), period['source_closed_at'])
                 if symbol in state['holding_symbols'] and period.get('evidence'):

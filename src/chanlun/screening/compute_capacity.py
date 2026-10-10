@@ -19,24 +19,30 @@ MAX_DEMAND_TTL_SECONDS = 60.0
 _DEMAND_OWNER = f'{os.getpid()}:{uuid4().hex}'
 
 
-def role_limits(limit, demand=0, screening_active=False):
+def role_limits(limit, demand=0, screening_active=False, *, overdue_pressure=False):
     """Pure, work-conserving allocation; actual slots are shared OS locks."""
-    if type(limit) is not int or not 0 <= limit <= MAX_WORKERS or type(demand) is not int or demand < 0:
+    if (type(limit) is not int or not 0 <= limit <= MAX_WORKERS
+            or type(demand) is not int or demand < 0 or type(overdue_pressure) is not bool):
         raise ValueError('invalid role capacity')
-    reserved = min(demand, (3 * limit + 3) // 4, max(0, limit - 1))
+    share = max(0, limit - 1) if overdue_pressure else (3 * limit + 3) // 4
+    reserved = min(demand, share, max(0, limit - 1))
     return {'monitor_capacity': reserved if reserved and screening_active else limit,
             'screening_capacity': limit - reserved,
             'monitor_reserved': reserved}
 
 
-def _demand_leases(root, now):
+def _demand_leases(root):
     try:
         data = json.loads((root / DEMAND_FILE).read_text(encoding='utf-8'))
         if data.get('schema') != 'monitor-compute-demand-v1' or not isinstance(data.get('leases'), dict):
             return {}
+        # Read time after the file: a writer may publish between a caller's
+        # timestamp and this read. Its new lease is not a future/corrupt lease.
+        now = time.time()
         return {owner: lease for owner, lease in data['leases'].items()
                 if isinstance(owner, str) and 0 < len(owner) <= 128 and isinstance(lease, dict)
                 and type(lease.get('demand')) is int and 0 < lease['demand'] <= MAX_WORKERS
+                and type(lease.get('overdue_pressure', False)) is bool
                 and all(type(lease.get(key)) in (int, float) and math.isfinite(lease[key])
                         for key in ('updated_at', 'expires_at'))
                 and 0 <= now - lease['updated_at']
@@ -47,15 +53,21 @@ def _demand_leases(root, now):
 
 
 def _with_roles(state, root, maximum, now):
-    leases = _demand_leases(root, now)
+    leases = _demand_leases(root)
     demand = max((item['demand'] for item in leases.values()), default=0)
-    return {**state, **role_limits(state['limit'], demand, state.get('background_until', 0) > now),
+    # Each owner bounds its own demand. A low-demand boosted owner cannot
+    # boost an unrelated owner's larger ordinary demand by combining fields.
+    candidates = [role_limits(state['limit'], item['demand'], state.get('background_until', 0) > now,
+                             overdue_pressure=item.get('overdue_pressure', False))
+                  for item in leases.values()]
+    roles = max(candidates, key=lambda item: item['monitor_reserved']) if candidates else role_limits(state['limit'])
+    return {**state, **roles,
             'monitor_demand': demand,
             'demand_expires_at': max((item['expires_at'] for item in leases.values()), default=0),
             'maximum': maximum}
 
 
-def publish_monitor_demand(budget, *, demand, expires_in=12.0, owner=None):
+def publish_monitor_demand(budget, *, demand, expires_in=12.0, owner=None, overdue_pressure=False):
     """Renew one scheduler's short lease; zero releases only that owner.
 
     A failed/exited scheduler automatically loses its reservation after expiry.
@@ -64,20 +76,20 @@ def publish_monitor_demand(budget, *, demand, expires_in=12.0, owner=None):
     root = _budget_root(budget)
     if (type(demand) is not int or demand < 0
             or type(expires_in) not in (int, float) or not math.isfinite(expires_in)
-            or not 0 < expires_in <= MAX_DEMAND_TTL_SECONDS):
+            or not 0 < expires_in <= MAX_DEMAND_TTL_SECONDS or type(overdue_pressure) is not bool):
         raise ValueError('invalid monitor demand lease')
     owner = _DEMAND_OWNER if owner is None else owner
     if not isinstance(owner, str) or not 0 < len(owner) <= 128:
         raise ValueError('invalid monitor demand owner')
-    now = time.time()
     with interprocess_file_lock(root / 'monitor_demand.lock', timeout_seconds=.25, poll_seconds=.01):
-        leases = _demand_leases(root, now)
+        leases = _demand_leases(root)
         leases.pop(owner, None)
         if demand:
             if len(leases) >= 32:
                 raise ValueError('too many active monitor demand owners')
+            now = time.time()
             leases[owner] = {'demand': min(demand, budget['limit']), 'updated_at': now,
-                             'expires_at': now + expires_in}
+                             'expires_at': now + expires_in, 'overdue_pressure': overdue_pressure}
         temporary = root / f'.monitor-demand.{os.getpid()}.{uuid4().hex}.tmp'
         try:
             temporary.write_text(json.dumps({'schema': 'monitor-compute-demand-v1', 'leases': leases}), encoding='utf-8')
@@ -220,6 +232,55 @@ def _try_slot_lock(path):
             handle.close()
 
 
+def _slot_owner_path(root, index):
+    return root / f'slot_{index}.owner.json'
+
+
+def _slot_owner(root, index):
+    try:
+        value = json.loads(_slot_owner_path(root, index).read_text(encoding='utf-8'))
+        if (value.get('schema') == 'screening-slot-owner-v1'
+                and value.get('role') in {'monitor', 'screening'}
+                and type(value.get('pid')) is int and value['pid'] > 0
+                and isinstance(value.get('token'), str) and len(value['token']) == 32):
+            return value
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    return None
+
+
+def _record_slot_owner(root, index, role, token):
+    destination = _slot_owner_path(root, index)
+    temporary = root / f'.slot-owner.{index}.{token}.tmp'
+    try:
+        temporary.write_text(json.dumps({'schema': 'screening-slot-owner-v1', 'role': role,
+                                         'pid': os.getpid(), 'token': token}), encoding='utf-8')
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _clear_slot_owner(root, index, token):
+    # Called while our OS slot lock is still held. No new owner can replace
+    # this marker yet. A failed cleanup is harmless once the OS lock is free:
+    # only physically occupied slots contribute role counts.
+    if token is None:
+        return
+    try:
+        owner = _slot_owner(root, index)
+        if owner is not None and owner['token'] == token:
+            _slot_owner_path(root, index).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _release_slot(root, index, token, acquired):
+    try:
+        _clear_slot_owner(root, index, token)
+    finally:
+        acquired.close()
+
+
 @contextmanager
 def compute_slot(request, run_dir):
     budget = request.get('compute_budget')
@@ -229,6 +290,7 @@ def compute_slot(request, run_dir):
     expected = _budget_root(budget)
     maximum = min(budget['limit'], cpu_capacity())
     monitor = request.get('worker_runtime') is not None
+    role = 'monitor' if monitor else 'screening'
     # File locks are released by the OS if a timed-out worker is terminated.
     # Only active computations hold slots; idle reusable workers hold none.
     while True:
@@ -236,6 +298,8 @@ def compute_slot(request, run_dir):
             raise RuntimeError('Computation cancelled while waiting for capacity')
         acquired = ExitStack()
         admitted = False
+        owner_token = None
+        index = None
         try:
             # Serialize only admission, never a calculation. During a memory
             # downgrade, older occupied slots still count toward the new limit;
@@ -250,31 +314,36 @@ def compute_slot(request, run_dir):
                 # an uncounted extra lane during a downgrade or role switch.
                 protected = list(range(MAX_WORKERS - reserved, MAX_WORKERS))
                 shared = list(range(ordinary))
-                if monitor:
-                    slots = (protected + shared if pressure['monitor_capacity'] == limit else protected)
-                else:
-                    slots = shared
-                occupied = 0
-                if limit < MAX_WORKERS:
-                    for index in range(MAX_WORKERS):
-                        with _try_slot_lock(expected / f'slot_{index}.lock') as free:
-                            occupied += not free
-                if occupied < limit:
+                preferred = protected + shared if monitor else shared
+                slots = preferred + [item for item in range(MAX_WORKERS) if item not in preferred]
+                occupied, same_role = 0, 0
+                for probe in range(MAX_WORKERS):
+                    with _try_slot_lock(expected / f'slot_{probe}.lock') as free:
+                        if not free:
+                            occupied += 1
+                            owner = _slot_owner(expected, probe)
+                            # A pre-upgrade or damaged owner marker is counted
+                            # conservatively against both role allowances.
+                            same_role += owner is None or owner['role'] == role
+                allowance = role_capacity(limit, monitor=monitor, pressure=pressure)
+                if occupied < limit and same_role < allowance:
                     for index in slots:
                         if acquired.enter_context(_try_slot_lock(expected / f'slot_{index}.lock')):
+                            owner_token = uuid4().hex
+                            _record_slot_owner(expected, index, role, owner_token)
                             admitted = True
                             break
         except InterprocessLockTimeout:
-            acquired.close()
+            _release_slot(expected, index, owner_token, acquired)
             time.sleep(.01)
             continue
         except BaseException:
-            acquired.close()
+            _release_slot(expected, index, owner_token, acquired)
             raise
         try:
             if admitted:
                 yield index
                 return
         finally:
-            acquired.close()
+            _release_slot(expected, index, owner_token, acquired)
         time.sleep(.01)

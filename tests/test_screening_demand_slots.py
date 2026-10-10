@@ -171,9 +171,9 @@ def configured(tmp_path, monkeypatch):
     return tmp_path, capacity.budget_request()
 
 
-@pytest.mark.parametrize("maximum,reserved", [(4, 3), (16, 12)])
+@pytest.mark.parametrize("maximum,reserved,boost", [(4, 3, False), (16, 12, False), (16, 15, True)])
 def test_spawned_live_demand_waits_for_old_work_then_gets_reserved_fixed_slots(
-    configured, monkeypatch, maximum, reserved
+    configured, monkeypatch, maximum, reserved, boost
 ):
     root, budget = configured
     monkeypatch.setattr(capacity.os, "cpu_count", lambda: maximum)
@@ -193,7 +193,7 @@ def test_spawned_live_demand_waits_for_old_work_then_gets_reserved_fixed_slots(
         first = actors.receive("acquired", old_names)
         assert {row[2] for row in first} == set(range(maximum))
         pressure = capacity.publish_monitor_demand(
-            budget, demand=maximum, owner="scheduler", expires_in=60
+            budget, demand=maximum, owner="scheduler", expires_in=60, overdue_pressure=boost
         )
         assert (pressure["monitor_capacity"], pressure["screening_capacity"]) == (
             reserved,
@@ -205,12 +205,12 @@ def test_spawned_live_demand_waits_for_old_work_then_gets_reserved_fixed_slots(
         assert all(actors.items[label][0].is_alive() for label in old_names)
         actors.release(*old_names)
         second = actors.receive("acquired", scan_names + live_names)
-        assert {row[2] for row in second if row[1].startswith("scan")} == set(
-            range(maximum - reserved)
-        )
-        assert {row[2] for row in second if row[1].startswith("live")} == set(
-            range(capacity.MAX_WORKERS - reserved, capacity.MAX_WORKERS)
-        )
+        # Roles may safely use each other's free physical slot during return
+        # of borrowed slots. Quotas apply to occupied roles, not slot numbers.
+        assert len({row[2] for row in second}) == maximum
+        for row in second:
+            owner = capacity._slot_owner(root / 'compute_budget', row[2])
+            assert owner['role'] == ('screening' if row[1].startswith('scan') else 'monitor')
         assert actors.counters[1] == maximum
     finally:
         actors.close()
@@ -312,5 +312,36 @@ def test_one_cpu_keeps_both_roles_runnable_without_overlapping(
         actors.release(first)
         (row,) = actors.receive("acquired", [second])
         assert row[2] == 0 and row[3] == 1 and actors.counters[1] == 1
+    finally:
+        actors.close()
+
+
+def test_scan_can_borrow_a_free_slot_while_old_monitor_keeps_borrowed_low_slot(configured):
+    root, budget = configured
+    publish_memory(root, 4, active_scan=False)
+    capacity.publish_monitor_demand(budget, demand=4, owner='scheduler', expires_in=60)
+    actors = Actors(root, 4)
+    old_names = ['old0', 'old1', 'old2', 'old3']
+    try:
+        for name in old_names + ['new0', 'new1']:
+            actors.add(name, monitor=True)
+        actors.add('scan')
+        actors.receive('ready', actors.items)
+        actors.start(*old_names)
+        old = actors.receive('acquired', old_names)
+        borrowed = next(row[1] for row in old if row[2] == 0)
+        released = [row[1] for row in old if row[2] != 0]
+        publish_memory(root, 4, active_scan=True)
+        actors.release(*released)
+        actors.receive('released', released)
+        actors.start('new0', 'new1')
+        current = actors.receive('acquired', ['new0', 'new1'])
+        assert actors.counters[0] == 3 and actors.items[borrowed][0].is_alive()
+        actors.start('scan')
+        scan, = actors.receive('acquired', ['scan'])
+        assert scan[2] != 0 and scan[3] == 4
+        assert scan[2] not in {row[2] for row in current}
+        assert actors.items[borrowed][0].is_alive()
+        assert actors.counters[1] == 4
     finally:
         actors.close()

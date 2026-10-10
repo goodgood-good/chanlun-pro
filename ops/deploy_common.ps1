@@ -21,6 +21,28 @@
     }
 }
 
+function Resolve-DeploymentCatalogScope {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Nullable[bool]]$ExplicitValue = $null
+    )
+    if ($null -ne $ExplicitValue) { return [bool]$ExplicitValue }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $scope = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($scope.schema -ne 'chanlun-web-watchdog-deployment-scope-v1' -or
+        $scope.enable_full_symbol_catalog -isnot [bool] -or
+        [int]$scope.web_port -ne $Port -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$scope.project_root).TrimEnd('\'),
+            [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Persisted deployment catalog scope does not match this application'
+    }
+    return [bool]$scope.enable_full_symbol_catalog
+}
+
 function Get-ApplicationFileSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
 

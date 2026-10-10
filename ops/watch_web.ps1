@@ -204,23 +204,25 @@ function Test-WebHealth {
     } catch {
         return [pscustomobject]@{Healthy=$false; FailureClass='liveness_failed'; RecoveryRecommended=$true; Detail=$_.Exception.Message; AppPid=$null}
     }
-    try {
-        $health = Get-JsonHttpResponse -Uri $healthUri -TimeoutSeconds $ReadinessTimeoutSeconds
-    } catch {
-        return [pscustomobject]@{Healthy=$false; FailureClass='readiness_failed'; RecoveryRecommended=$true; Detail=$_.Exception.Message; AppPid=$null}
+    $details = @()
+    foreach ($market in (@($ReadinessMarket, 'a', 'us') | Select-Object -Unique)) {
+        $marketUri = 'http://127.0.0.1:{0}/readyz?market={1}' -f $WebPort, [Uri]::EscapeDataString($market)
+        try {
+            $health = Get-JsonHttpResponse -Uri $marketUri -TimeoutSeconds $ReadinessTimeoutSeconds
+        } catch {
+            return [pscustomobject]@{Healthy=$false; FailureClass='readiness_failed'; RecoveryRecommended=$true; Detail=('{0}: {1}' -f $market, $_.Exception.Message); AppPid=$null}
+        }
+        $ready = $health.status -eq 'ready'
+        # Provider degradation must be visible without repeatedly restarting Web.
+        $runtimeFailed = $health.components.runtime.required -eq $true -and $health.components.runtime.ready -ne $true
+        $monitorFailed = $health.components.monitor.required -eq $true -and $health.components.monitor.recovery_recommended -eq $true
+        $recoveryNeeded = $runtimeFailed -or $monitorFailed
+        $details += ('{0}: pid={1}; revision={2}; reasons={3}' -f $market, $health.pid, $health.revision, ($health.reasons -join ','))
+        if (-not $ready) {
+            return [pscustomobject]@{Healthy=$false; FailureClass=$(if ($recoveryNeeded) {'readiness_failed'} else {'operational_degraded'}); RecoveryRecommended=$recoveryNeeded; Detail=($details -join '; '); AppPid=$health.pid}
+        }
     }
-    $ready = $health.status -eq 'ready'
-    # Data-provider availability is not repaired by repeatedly restarting the Web app.
-    $runtimeFailed = $health.components.runtime.required -eq $true -and $health.components.runtime.ready -ne $true
-    $monitorFailed = $health.components.monitor.required -eq $true -and $health.components.monitor.recovery_recommended -eq $true
-    $recoveryNeeded = $runtimeFailed -or $monitorFailed
-    return [pscustomobject]@{
-        Healthy = $ready
-        FailureClass = $(if ($ready) {'healthy'} elseif ($recoveryNeeded) {'readiness_failed'} else {'operational_degraded'})
-        RecoveryRecommended = $recoveryNeeded
-        Detail = ('pid={0}; revision={1}; reasons={2}' -f $health.pid, $health.revision, ($health.reasons -join ','))
-        AppPid = $health.pid
-    }
+    return [pscustomobject]@{Healthy=$true; FailureClass='healthy'; RecoveryRecommended=$false; Detail=($details -join '; '); AppPid=$health.pid}
 }
 
 function Invoke-WebRecovery {
@@ -241,6 +243,8 @@ function Invoke-WebRecovery {
 
     if ($EnableFullSymbolCatalog) {
         $arguments += '-EnableFullSymbolCatalog'
+    } else {
+        $arguments += '-DisableFullSymbolCatalog'
     }
 
     $restartProcess = Start-Process `

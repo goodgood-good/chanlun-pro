@@ -1,4 +1,8 @@
-"""Actual dispatch receipts; no estimates for missing historical timestamps."""
+"""Actual dispatch receipts; no estimates for missing historical timestamps.
+
+Receipt-local counters belong to one outbox id. A deferred subset gets a new
+receipt and does not inherit the parent batch's earlier verification timings.
+"""
 
 from collections import defaultdict
 import json
@@ -93,6 +97,9 @@ def summarize(rows):
                 "frequency": frequency,
                 "kind": kind,
                 "samples": group["samples"],
+                "receipt_local_measures": [name for name in measures if name in (
+                    'queue', 'provider', 'queue_before_first_claim', 'validation',
+                    'validation_total', 'send_preparation', 'request')],
                 "measures": measures,
             }
         )

@@ -90,6 +90,9 @@ def signal_status_lines(row):
 
 class DeliveryError(Exception):
     """A diagnostic that contains no credentials or raw provider response."""
+    def __init__(self, message='', *, request_attempted=True):
+        self.request_attempted = request_attempted
+        super().__init__(message)
 
 
 class DingTalkTransport:
@@ -115,7 +118,7 @@ class DingTalkTransport:
 
     def _send(self, content, *, title=None):
         if not self.configuration()["configured"]:
-            raise DeliveryError("未配置有效的应用钉钉 Webhook")
+            raise DeliveryError("未配置有效的应用钉钉 Webhook", request_attempted=False)
         url = urlsplit(os.environ["CHANLUN_DINGTALK_WEBHOOK"].strip())
         query = dict(parse_qsl(url.query))
         secret = os.environ.get("CHANLUN_DINGTALK_SECRET", "").strip()
@@ -129,7 +132,7 @@ class DingTalkTransport:
         if keyword and keyword not in content:
             text = content + "\n\n" + keyword if title is not None else keyword + " · " + content
         if len(text.encode("utf-8")) > 3800:
-            raise DeliveryError("通知内容超过长度上限")
+            raise DeliveryError("通知内容超过长度上限", request_attempted=False)
         payload = ({"msgtype": "markdown", "markdown": {"title": _clean(title, 100), "text": text}, "at": {"isAtAll": False}}
                    if title is not None else {"msgtype": "text", "text": {"content": text}, "at": {"isAtAll": False}})
         try:
@@ -554,17 +557,46 @@ class DingTalkOutbox:
         return result
 
     def deliver_one(self):
+        """Serialize one queue dispatch across processes sharing this outbox.
+
+        Producers never take this lock. Keep it through the transport receipt
+        commit so an expired SQLite claim lease cannot overlap a live sender.
+        """
+        if not self.path.is_file():
+            return
+        from chanlun.persistence.file_lock import interprocess_file_lock, InterprocessLockTimeout
+        try:
+            canonical = self.path.resolve()
+            with interprocess_file_lock(canonical.with_name(canonical.name + '.dispatch.lock'),
+                                        timeout_seconds=.01, poll_seconds=.01):
+                return self._deliver_one()
+        except InterprocessLockTimeout:
+            return self.now() + .1
+
+    def _deliver_one(self):
         """Process one receipt, or return the next attempt time when not yet due."""
         if not self.path.is_file():
             return
         stamp = self.now()
         with self._lock, self._connect() as db:
             db.execute("UPDATE outbox SET status='expired',error='通知已过期，未补发旧信号' WHERE status IN ('pending','retry','sending') AND expires<=?", (stamp,))
-            # A persisted lease lets a restarted worker recover an interrupted
-            # send. Keep normal traffic below the robot's per-minute budget.
-            previous = db.execute("SELECT MAX(next_try-30) FROM outbox WHERE status='sending'").fetchone()[0]
+            # The dispatch lock is now ours, so a remaining request marker is
+            # an interrupted transport/receipt commit. Its exact finish time
+            # is unknown: establish a fresh four-second recovery fence once.
+            next_request = db.execute("SELECT value FROM delivery_settings WHERE key='next_request_at'").fetchone()
+            next_request = next_request[0] if next_request else 0
+            inflight = db.execute("SELECT value FROM delivery_settings WHERE key='request_inflight'").fetchone()
+            if inflight and inflight[0]:
+                next_request = max(next_request, stamp + 4)
+                db.execute("INSERT OR REPLACE INTO delivery_settings VALUES ('next_request_at',?)", (next_request,))
+                db.execute("INSERT OR REPLACE INTO delivery_settings VALUES ('request_inflight',0)")
+            # Preserve conservative recovery for old leases which predate
+            # timing records. A known current validation-only lease is not an
+            # HTTP attempt and must not create a four-second send cooldown.
+            previous = db.execute("SELECT MAX(o.next_try-30) FROM outbox o LEFT JOIN delivery_timings t "
+                                  "ON t.outbox_id=o.id WHERE o.status='sending' AND t.outbox_id IS NULL").fetchone()[0]
             last_sent = db.execute("SELECT MAX(sent) FROM outbox").fetchone()[0]
-            allowed_at = max([stamp] + [value + 4 for value in (previous, last_sent) if value is not None])
+            allowed_at = max([stamp, next_request] + [value + 4 for value in (previous, last_sent) if value is not None])
             if allowed_at > stamp:
                 return allowed_at
             # A deferred validity check must yield to work already waiting.
@@ -688,6 +720,7 @@ class DingTalkOutbox:
                 db.execute('UPDATE signal_payloads SET events=? WHERE outbox_id=?',
                            (json.dumps(final_events,ensure_ascii=False,allow_nan=False),row['id']))
             db.execute('UPDATE outbox SET send_started=? WHERE id=?',(dispatch_stamp,row['id']))
+            db.execute("INSERT OR REPLACE INTO delivery_settings VALUES ('request_inflight',1)")
         # A contended commit can itself cross a deadline. Recheck after all
         # formatting/storage work, immediately before handing off to transport.
         dispatch_now=self.now()
@@ -696,6 +729,7 @@ class DingTalkOutbox:
                 or row['kind'] in {'signals','chart'} and len(surviving)!=len(final_events)):
             retry=bool(surviving) and current['expires']>dispatch_now
             with self._lock,self._connect() as db:
+                db.execute("INSERT OR REPLACE INTO delivery_settings VALUES ('request_inflight',0)")
                 db.execute("UPDATE outbox SET status=?,attempts=?,next_try=?,send_started=NULL,error=? "
                            "WHERE id=? AND status='sending'",
                            ('retry' if retry else 'expired',row['attempts'],dispatch_now,
@@ -718,10 +752,18 @@ class DingTalkOutbox:
                 self.transport.send(text)
         except DeliveryError as exc:
             error = str(exc)
+            if not getattr(exc, 'request_attempted', True):
+                request_started = None
         except Exception as exc:
             error = f"通知发送失败（{type(exc).__name__}）"
         finished = self.now()
         with self._lock, self._connect() as db:
+            # Success, provider rejection and transport exceptions consume the
+            # same global budget. Persist it with the receipt before releasing
+            # the cross-process dispatch lock. Preparation failures do not.
+            if request_started is not None:
+                db.execute("INSERT OR REPLACE INTO delivery_settings VALUES ('next_request_at',?)", (finished + 4,))
+            db.execute("INSERT OR REPLACE INTO delivery_settings VALUES ('request_inflight',0)")
             db.execute('UPDATE delivery_timings SET request_started=?,request_finished=? WHERE outbox_id=?',
                        (request_started, finished if request_started is not None else None, row['id']))
             if error:

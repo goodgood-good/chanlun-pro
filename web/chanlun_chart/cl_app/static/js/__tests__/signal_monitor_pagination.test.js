@@ -131,7 +131,7 @@ test('delivery metrics label measured stages and do not claim phone arrival',asy
   await wait();app.get('analytics-refresh').handlers.click();await wait();
   const text=app.get('analytics-timings').children.map(child=>child.textContent).join('\n');
   assert.match(text,/手机实际到达时间.*不作估算/);
-  for(const label of ['入队至首次处理','末次发送前复核','累计发送前复核','复核后发送准备','平台请求'])assert.ok(text.includes(label));
+  for(const label of ['入队至首次处理','本收据末次发送前复核','本收据累计复核（不含拆分前批次）','复核后发送准备','平台请求'])assert.ok(text.includes(label));
   assert.doesNotMatch(text,/queue_before_first_claim|validation_total|send_preparation/);
 });
 
