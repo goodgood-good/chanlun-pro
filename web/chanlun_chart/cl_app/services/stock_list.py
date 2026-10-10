@@ -269,6 +269,14 @@ def get_cached_processed_stock(exchange: str, code: str):
     return None
 
 
+def require_preload_markets(markets):
+    """Health-checked markets must load identities even if optional preload is off."""
+    global PRELOAD_EXCHANGES
+    required = [market for market in markets if market in _ALL_PRELOAD_EXCHANGES]
+    with _stock_cache_lock:
+        PRELOAD_EXCHANGES = list(dict.fromkeys([*PRELOAD_EXCHANGES, *required]))
+
+
 def get_symbol_readiness(exchange: str):
     """Return an in-memory snapshot without triggering a refresh or external I/O."""
     with _stock_cache_lock:

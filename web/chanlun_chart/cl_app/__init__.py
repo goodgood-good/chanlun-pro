@@ -544,7 +544,7 @@ def create_app(test_config=None):
             symbol_count = int(symbol_state.get("count", 0))
             symbols_component = {
                 "market": market,
-                "ready": bool(symbol_state.get("ready")),
+                "ready": bool(symbol_state.get("ready")) and symbol_count > 0,
                 "status": str(symbol_state.get("status") or "not_ready"),
                 "count": max(0, symbol_count),
                 "catalog_mode": str(
@@ -807,6 +807,7 @@ def create_app(test_config=None):
             metadata_warmup_thread = metadata_handles[0]
             runtime_state["metadata"] = metadata_handles
             _ensure_start_is_current()
+            stock_list_service.require_preload_markets(readiness_markets)
             runtime_state["symbols"] = stock_list_service.start_symbol_preload_thread()
             _ensure_start_is_current()
             runtime_state["ticks"] = [

@@ -93,3 +93,44 @@ def test_us_readiness_exposes_its_own_failure_without_provider_calls(monkeypatch
         assert app.test_client().get("/readyz?market=us").status_code == 200
     finally:
         app.extensions["shutdown_runtime_services"]()
+
+
+def test_required_us_catalog_cannot_be_ready_when_optional_preload_is_disabled(
+    monkeypatch,
+):
+    monkeypatch.setattr(stock_list, "PRELOAD_EXCHANGES", ["a"])
+    monkeypatch.setattr(stock_list, "stock_cache", {})
+    monkeypatch.setattr(stock_list, "_symbol_states", {})
+    monkeypatch.setattr(stock_list, "_disk_cache_metadata", {})
+    app = create_app(
+        test_config={
+            "TESTING": True,
+            "LOGIN_DISABLED": True,
+            "VALIDATE_WEB_SECURITY": False,
+            "READINESS_MARKETS": "a,us",
+            "SYMBOL_CATALOG_FULL_REFRESH_AUTHORIZED": True,
+        }
+    )
+    for mapping in (constants.market_frequencys, constants.market_default_codes):
+        monkeypatch.setattr(mapping, "status", lambda market: {"ready": True})
+    app.extensions["readiness"].record_ticks_success("us")
+    loads = []
+
+    def cached_rows(market):
+        loads.append(market)
+        return [
+            {"code": "AAPL.US" if market == "us" else "SH.600519", "name": "sample"}
+        ]
+
+    monkeypatch.setattr(stock_list, "_load_stocks_from_disk", cached_rows)
+    monkeypatch.setattr(stock_list, "_save_stocks_to_disk", lambda *args: None)
+    try:
+        assert stock_list.get_symbol_readiness("us")["status"] == "disabled"
+        assert app.test_client().get("/readyz?market=us").status_code == 503
+        stock_list.require_preload_markets(app.config["READINESS_MARKETS"])
+        stock_list._warm_cache_from_disk()
+        assert loads == ["a", "us"]
+        assert app.test_client().get("/readyz?market=us").status_code == 200
+        assert stock_list.get_symbol_readiness("us")["count"] == 1
+    finally:
+        app.extensions["shutdown_runtime_services"]()
