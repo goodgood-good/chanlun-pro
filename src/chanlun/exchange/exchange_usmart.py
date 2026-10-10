@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import base64
+from contextvars import ContextVar
 import datetime as dt
+import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -35,6 +38,18 @@ from chanlun.exchange.exchange import Exchange, Tick
 from chanlun.exchange.errors import USmartAPIError
 from chanlun.exchange.lb_priority import quote_request_priority
 from chanlun.exchange.quote_change import quote_change_rate, quote_price
+
+_REQUEST_DEADLINE = ContextVar('usmart_request_deadline', default=None)
+
+
+def _request_remaining():
+    deadline = _REQUEST_DEADLINE.get()
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('uSMART request deadline reached')
+    return remaining
 from chanlun.exchange.kline_completion import (
     drop_unclosed_last_bar,
     normalize_completed_bar_labels,
@@ -239,7 +254,9 @@ class USmartClient:
 
         self._signer: USmartSigner | None = None
         self._signer_lock = threading.Lock()
-        self._login_lock = threading.Lock()
+        self._login_lock = threading.RLock()
+        self._auth_refresh_generation = 0
+        self._auth_refresh_failure = None
         self._request_id_lock = threading.Lock()
         self._last_request_ids: Dict[int, int] = {}
 
@@ -281,12 +298,13 @@ class USmartClient:
         return self._signer
 
     def _post(self, url: str, body: str, headers: Mapping[str, str]):
+        remaining = _request_remaining()
         try:
             return self.session.post(
                 url,
                 data=body.encode("utf-8"),
                 headers=dict(headers),
-                timeout=self.timeout,
+                timeout=self.timeout if remaining is None else min(self.timeout, remaining / 2),
             )
         except requests.RequestException as exc:
             raise USmartAPIError(
@@ -369,32 +387,113 @@ class USmartClient:
             self.token = token
             return token
 
-    def quote(self, endpoint: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Retry one transient read failure; never retry login or business errors."""
-        # Login is intentionally outside the retry loop. Each retry signs a
-        # fresh request ID, and only the failed page is repeated, not history.
+    def _can_refresh_token(self) -> bool:
+        return all((self.channel, self.phone, self.login_password, self.public_key, self.private_key))
+
+    @staticmethod
+    def _refresh_failure_error(failure):
+        status = failure['status_code']
+        detail = failure['error_type'] + (f", HTTP {status}" if status is not None else "")
+        return USmartAPIError(f"uSMART token refresh failed ({detail})",
+                             code='usmart_auth_refresh_failed', status_code=status, retry_after=failure['retry_after'])
+
+    def _quote_auth_snapshot(self):
+        with self._login_lock:
+            return self.token or self.login(), self._auth_refresh_generation
+
+    def _remember_rejected_refresh(self, token, generation):
+        with self._login_lock:
+            if self.token != token or self._auth_refresh_generation != generation:
+                return  # A late reply cannot mark a later credential invalid.
+            self._auth_refresh_failure = {
+                'token_hash': hashlib.sha256(token.encode()).hexdigest(),
+                'retry_at': time.monotonic() + 30, 'retry_after': 30,
+                'status_code': 401, 'error_type': 'USmartAPIError'}
+
+    def _refresh_rejected_token(self, rejected_token: str, request_generation: int) -> str:
+        # Only the token used by the failed request may be invalidated. A late
+        # 401 from another thread must not clear credentials already renewed.
+        with self._login_lock:
+            if self.token and self.token != rejected_token:
+                return self.token
+            if (self.token and request_generation < self._auth_refresh_generation
+                    and self._auth_refresh_failure is None):
+                return self.token  # A renewal may retain the same opaque token value.
+            token_hash = hashlib.sha256(rejected_token.encode()).hexdigest()
+            failure = self._auth_refresh_failure
+            if (failure and failure['token_hash'] == token_hash
+                    and (request_generation < self._auth_refresh_generation
+                         or time.monotonic() < failure['retry_at'])):
+                raise self._refresh_failure_error(failure) from None
+            self._auth_refresh_generation += 1
+            self.token = ""
+            try:
+                token = self.login()
+            except Exception as exc:
+                # Keep subsequent calls inside this coordinator. Clearing the
+                # token after a failed renewal would make every waiter login.
+                self.token = rejected_token
+                retry_after = max(30, (exc.retry_after or 0) if isinstance(exc, USmartAPIError) else 0)
+                failure = {'token_hash': token_hash, 'retry_at': time.monotonic() + retry_after,
+                           'retry_after': retry_after,
+                           'status_code': exc.status_code if isinstance(exc, USmartAPIError) else None,
+                           'error_type': type(exc).__name__}
+                self._auth_refresh_failure = failure
+                # The provider's login body/message is deliberately excluded.
+                raise self._refresh_failure_error(failure) from None
+            self._auth_refresh_failure = None
+            return token
+
+    def quote(self, endpoint: str, payload: Mapping[str, Any], *, transient_retries: int = 1,
+              deadline: float | None = None) -> Mapping[str, Any]:
+        if deadline is None:
+            return self._quote_with_retry(endpoint, payload, transient_retries=transient_retries)
+        if type(deadline) not in (int, float) or not math.isfinite(deadline):
+            raise ValueError('quote deadline must be a finite monotonic timestamp')
+        token = _REQUEST_DEADLINE.set(deadline)
+        try:
+            _request_remaining()
+            return self._quote_with_retry(endpoint, payload, transient_retries=transient_retries)
+        finally:
+            _REQUEST_DEADLINE.reset(token)
+
+    def _quote_with_retry(self, endpoint: str, payload: Mapping[str, Any], *, transient_retries: int = 1) -> Mapping[str, Any]:
+        """Bound read retries to one transient failure and one renewable HTTP 401."""
+        # Login failures themselves are never retried. Each quote retry signs
+        # a fresh request ID and repeats only the failed page, not history.
         if not self.channel:
             raise RuntimeError("USMART_CHANNEL is required")
-        if not self.token:
-            self.login()
-        for attempt in range(2):
+        if type(transient_retries) is not int or transient_retries not in (0, 1):
+            raise ValueError("transient_retries must be 0 or 1")
+        transient_retried, auth_retried = transient_retries == 0, False
+        for _ in range(2 + transient_retries):
+            request_token, request_generation = self._quote_auth_snapshot()
             try:
-                return self._quote_once(endpoint, payload)
+                return self._quote_once(endpoint, payload, token=request_token)
             except USmartAPIError as exc:
+                if exc.status_code == 401 and auth_retried:
+                    self._remember_rejected_refresh(request_token, request_generation)
+                if exc.status_code == 401 and not auth_retried and self._can_refresh_token():
+                    auth_retried = True
+                    self._refresh_rejected_token(request_token, request_generation)
+                    continue
                 transient = (exc.status_code in {502, 503, 504}
                              or isinstance(exc.__cause__, (requests.Timeout, requests.ConnectionError)))
-                if attempt or not transient or (exc.retry_after is not None and exc.retry_after > 1):
+                if transient_retried or not transient or (exc.retry_after is not None and exc.retry_after > 1):
                     raise
+                transient_retried = True
                 time.sleep(max(0.25, exc.retry_after or 0))
 
-    def _quote_once(self, endpoint: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    def _quote_once(self, endpoint: str, payload: Mapping[str, Any], *, token: str | None = None) -> Mapping[str, Any]:
         """调用基础行情接口并返回响应的 data 字典。"""
         if not self.channel:
             raise RuntimeError("USMART_CHANNEL is required")
-        token = self.token or self.login()
+        token = token or self.token or self.login()
+        remaining = _request_remaining()
         self._rate_limiter.wait(
             host=self.quote_host, channel=self.channel, endpoint=endpoint,
             priority=quote_request_priority(),
+            **({} if remaining is None else {'timeout': min(10., remaining / 2)}),
         )
         signer = self._get_signer()
         body = self._json_body(payload)
@@ -540,6 +639,25 @@ class ExchangeUSmart(Exchange):
         from chanlun.exchange.minute_source_receipt import matches_minute_source
 
         return matches_minute_source(frame, owner=self._canonical_minute_owner, code=code, args=dict(args or {}))
+
+    def _canonical_source(self):
+        source = getattr(self, '_canonical_history', None)
+        if source is None:
+            from chanlun.exchange.usmart_canonical_history import CanonicalUSmartHistory
+            source = CanonicalUSmartHistory(self.client, legacy_cache=self._history_cache)
+            self._canonical_history = source
+        return source
+
+    def notification_history_window(self, code, frequency, *, cutoff, target_from=None,
+                                    all_origin=False, max_pages=4, timeout_seconds=20,
+                                    fetch=True, args=None):
+        """Bounded canonical source coverage; never reinterpret a frozen signal."""
+        if self.market != 'us' or self._us_history_source != 'usmart':
+            raise ValueError('native canonical history requires the uSMART US source')
+        return self._canonical_source().window(code, frequency, cutoff=cutoff,
+            right=self._right_type(dict(args or {})), target_from=target_from, all_origin=all_origin,
+            max_pages=max_pages, timeout_seconds=timeout_seconds, fetch=fetch,
+            force=(args or {}).get('_bypass_history_cache') is True)
 
     def default_code(self) -> str:
         return {
@@ -810,20 +928,29 @@ class ExchangeUSmart(Exchange):
             result = frame.loc[mask].copy().reset_index(drop=True)
             result.attrs = dict(frame.attrs)
             return result
-        if (self._history_cache is not None and self.market == "us" and start_date is None
-                and frequency in {"1m","5m","30m"}
-                and not (set(args)-{"count","pages","right","fq","fq_type","timeout","_bypass_history_cache"})):
-            end = (_to_local_timestamp(end_date,self.tz,end_of_day=True) if end_date is not None
-                   else pd.Timestamp.now(tz=self.tz))
-            return self._history_cache.read(
-                code=code,frequency=frequency,end=end,host=self.client.quote_host,channel=self.client.channel,
-                right=right_type,
-                count=_positive_number(args.get("count",getattr(config,"USMART_KLINE_PAGE_SIZE",1000)),1000,integer=True),
-                pages=_positive_number(args.get("pages",getattr(config,"USMART_KLINE_MAX_PAGES",10)),10,integer=True),
-                force=args.get("_bypass_history_cache") is True,
-                loader=lambda start:self._fetch_native_klines(code,frequency,start,end.isoformat(),
-                    args if start is None else {**args,"_history_keep_overlap":True}),
-            )
+        if self.market == 'us' and frequency in {'1m', '5m', '30m'}:
+            from chanlun.exchange.usmart_canonical_history import CanonicalHistoryPending
+            from chanlun.exchange._lookback import get_lookback_timedelta
+            observed = pd.Timestamp.now(tz=self.tz)
+            end = observed if end_date is None else min(observed, _to_local_timestamp(end_date, self.tz, end_of_day=True))
+            start = (end-get_lookback_timedelta(frequency) if start_date is None
+                     else _to_local_timestamp(start_date,self.tz))
+            count = min(1000, _positive_number(args.get('count',getattr(config,'USMART_KLINE_PAGE_SIZE',1000)),1000,integer=True))
+            pages = _positive_number(args.get('pages',getattr(config,'USMART_KLINE_MAX_PAGES',10)),10,integer=True)
+            # The native service returns at most300 rows per page. Retain the
+            # prior high-period window, not3000 minutes divided into600/100 bars.
+            rows = None if start_date is not None else min(count,300)*pages
+            frame, coverage = self._canonical_source().window(code, frequency, cutoff=end,
+                right=right_type, target_from=start, target_rows=rows, count=count, legacy_pages=pages,
+                max_pages=4, timeout_seconds=min(20.,_positive_number(args.get('timeout',15),15)),
+                force=args.get('_bypass_history_cache') is True)
+            if coverage['reason'] == 'minute_contract_error':
+                raise USmartAPIError('已收盘分钟源存在缺失或无效数据，不能构建高周期',code='usmart_minute_contract_error')
+            if coverage['reason'] == 'source_empty':
+                raise USmartAPIError('该标的暂无已收盘分钟历史', code='usmart_history_empty')
+            if not coverage['complete']:
+                raise CanonicalHistoryPending(coverage)
+            return frame
         result = self._fetch_native_klines(code,frequency,start_date,end_date,args)
         from chanlun.exchange.usmart_history_cache import public_history_frame
         return public_history_frame(result)

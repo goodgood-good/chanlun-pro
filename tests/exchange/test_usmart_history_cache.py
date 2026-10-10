@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from chanlun.exchange.errors import USmartAPIError
-from chanlun.exchange.usmart_history_cache import USmartHistoryCache,FETCH,META,RAW_CONTRACT
+from chanlun.exchange.usmart_history_cache import USmartHistoryCache,FETCH,META,RAW_CONTRACT,public_history_frame
 from chanlun.screening.cache import input_fingerprint
 
 
@@ -23,6 +23,16 @@ def prices(end, count=100):
     frame.attrs.update(price_basis_provider='usmart',price_basis_adjustment='forward',
                        price_basis_revision='fixture-basis',structure_price_quantum='0.001')
     return frame
+
+
+def raw_cached(cache, adapter, code, frequency, end, options):
+    """Exercise raw persistence, never the production canonical adapter route."""
+    def loader(start):
+        return adapter._fetch_native_klines(code, frequency, start_date=start,
+            end_date=end.isoformat(), args={**options, '_history_keep_overlap':True})
+    return cache.read(code=code, frequency=frequency, end=end,
+        host=adapter.client.quote_host, channel=adapter.client.channel, right=1,
+        count=options['count'], pages=options['pages'], loader=loader)
 
 
 @pytest.fixture
@@ -245,7 +255,7 @@ def test_capped_window_does_not_gain_an_extra_bar_when_provider_returns_a_future
     assert history.calls[-1] is not None
 
 
-def test_adapter_reuses_bounded_history_and_fetches_only_one_overlap_page(tmp_path,monkeypatch):
+def test_raw_parser_cache_reuses_bounded_history_and_fetches_only_one_overlap_page(tmp_path,monkeypatch):
     from chanlun import config
     from chanlun.exchange.exchange_usmart import ExchangeUSmart,_timestamp_to_api_time,_parse_api_time
     import pytz
@@ -263,17 +273,18 @@ def test_adapter_reuses_bounded_history_and_fetches_only_one_overlap_page(tmp_pa
                         **{name:getattr(row,name) for name in ('open','high','low','close','volume')}}
                        for row in page.itertuples(index=False)]}
     client=SimpleNamespace(quote=quote,quote_host='https://quote.example',channel='fixture')
-    adapter=ExchangeUSmart('us',client=client,
-                           history_cache=USmartHistoryCache(tmp_path,clock=lambda:source['clock']))
+    cache=USmartHistoryCache(tmp_path,clock=lambda:source['clock'])
+    adapter=ExchangeUSmart('us',client=client)
     options={'count':100,'pages':3}
-    first=adapter.klines('MSFT.US','1m',end_date=end.isoformat(),args=options)
+    first=raw_cached(cache,adapter,'MSFT.US','1m',end,options)
     assert len(first)==60 and len(calls)==3
     end+=pd.Timedelta(minutes=1);source['clock']+=60
     added=prices(end,1)
     source['frame']=pd.concat([source['frame'],added],ignore_index=True)
-    cached=adapter.klines('MSFT.US','1m',end_date=end.isoformat(),args=options)
+    cached=raw_cached(cache,adapter,'MSFT.US','1m',end,options)
     assert len(calls)==4 and len(cached)==60
-    cold=ExchangeUSmart('us',client=client).klines('MSFT.US','1m',end_date=end.isoformat(),args=options)
+    cold=public_history_frame(ExchangeUSmart('us',client=client)._fetch_native_klines(
+        'MSFT.US','1m',end_date=end.isoformat(),args=options))
     assert len(calls)==7
     pd.testing.assert_frame_equal(cached,cold)
     assert input_fingerprint(cached,'MSFT.US','1m')==input_fingerprint(cold,'MSFT.US','1m')
@@ -283,13 +294,14 @@ def test_adapter_reuses_bounded_history_and_fetches_only_one_overlap_page(tmp_pa
     ('1m','ORCL_US_1m_raw_20261006.parquet'),
     ('5m','ORCL_US_5m_raw_20261009.parquet'),
 ])
-def test_recorded_auction_anomaly_is_raw_cacheable_but_each_consumer_still_validates(
+def test_recorded_provider_anomaly_is_raw_cacheable_but_not_structurally_approved(
     tmp_path,monkeypatch,frequency,filename,
 ):
     from chanlun import config
     from chanlun.exchange.exchange_usmart import ExchangeUSmart,_timestamp_to_api_time,_parse_api_time
-    from chanlun.screening.markets import market_context,_session_mask
+    from chanlun.screening.markets import market_context
     from chanlun.screening.rules import validate_frame
+    from chanlun.exchange.usmart_session_aggregation import aggregate_closed_us_minutes
     import pytz
     monkeypatch.setattr(config,'US_HISTORY_KLINE_SOURCE','usmart')
     source=pd.read_parquet(Path(__file__).parents[1]/'fixtures/usmart_history'/filename)
@@ -306,10 +318,10 @@ def test_recorded_auction_anomaly_is_raw_cacheable_but_each_consumer_still_valid
                        for row in page.itertuples(index=False)]}
     client=SimpleNamespace(quote=quote,quote_host='https://quote.example',channel='fixture')
     cache=USmartHistoryCache(tmp_path,clock=lambda:clock[0])
-    warm=ExchangeUSmart('us',client=client,history_cache=cache)
+    warm=ExchangeUSmart('us',client=client)
     cold=ExchangeUSmart('us',client=client)
     options={'count':30,'pages':10}
-    result=warm.klines('ORCL.US',frequency,end_date=end.isoformat(),args=options)
+    result=raw_cached(cache,warm,'ORCL.US',frequency,end,options)
     assert len(calls)==10
     for position in (-2,-1):
         if frequency=='1m':
@@ -318,11 +330,12 @@ def test_recorded_auction_anomaly_is_raw_cacheable_but_each_consumer_still_valid
         else:
             clock[0]+=3  # Beyond coalescing; refresh the same source cutoff.
         before=len(calls)
-        result=warm.klines('ORCL.US',frequency,end_date=end.isoformat(),args=options)
+        result=raw_cached(cache,warm,'ORCL.US',frequency,end,options)
         assert len(calls)-before==1
     assert len(calls)==12  # Three independent cold reads would require thirty pages.
     before=len(calls)
-    independent=cold.klines('ORCL.US',frequency,end_date=end.isoformat(),args=options)
+    independent=public_history_frame(cold._fetch_native_klines(
+        'ORCL.US',frequency,end_date=end.isoformat(),args=options))
     assert len(calls)-before==10
     pd.testing.assert_frame_equal(result,independent)
     assert input_fingerprint(result,'ORCL.US',frequency)==input_fingerprint(independent,'ORCL.US',frequency)
@@ -336,24 +349,44 @@ def test_recorded_auction_anomaly_is_raw_cacheable_but_each_consumer_still_valid
     assert META not in result.attrs and FETCH not in result.attrs
     context=market_context('us','ORCL.US',end.to_pydatetime(),frequency)
     assert 'INVALID_BARS' in validate_frame(result,context)
-    mask=_session_mask(result.date.astype('int64')//1_000_000_000,
-                       context['session_periods'],int(frequency[:-1])*60)
-    regular=result.loc[mask].copy()
     if frequency=='1m':
-        assert not regular.date.eq(stamp).any()
-        assert validate_frame(regular,context)==[]
-    else:
-        assert regular.date.eq(stamp).any()
+        # Native 09:30 is the first regular minute's OPEN. It becomes 09:31,
+        # so the old end-label assumption must not hide this bad OHLC row as
+        # an auction. Source values stay unchanged and strict validation fails.
+        native=result.copy(deep=True);native.attrs['bar_time_label']='start'
+        cutoff=end+pd.Timedelta(minutes=1)
+        regular,coverage=aggregate_closed_us_minutes(native,'1m',cutoff)
+        actual=regular.loc[regular.date==stamp+pd.Timedelta(minutes=1)].iloc[0]
+        assert actual.open==143.3 and actual.low==143.37
+        assert coverage['invalid_minute_count']>=1
+        context=market_context('us','ORCL.US',cutoff.to_pydatetime(),'1m')
         assert validate_frame(regular,context)==['INVALID_BARS']
+    else:
+        # Legacy native 5m remains inspectable raw evidence; it cannot become
+        # the production 5m source merely because a cache preserved its rows.
+        assert validate_frame(result,context)==['INVALID_BARS']
 
 
-def test_explicit_history_query_keeps_its_range_and_bypasses_source_cache(tmp_path,monkeypatch):
+@pytest.mark.parametrize('frequency',['1m','5m','30m'])
+def test_explicit_range_routes_to_canonical_source_without_legacy_raw_cache(tmp_path,monkeypatch,frequency):
     from chanlun import config
     from chanlun.exchange.exchange_usmart import ExchangeUSmart
     monkeypatch.setattr(config,'US_HISTORY_KLINE_SOURCE','usmart')
     cache=SimpleNamespace(read=lambda **_:pytest.fail('explicit historical ranges cannot reuse the live source cache'))
     adapter=ExchangeUSmart('us',client=SimpleNamespace(quote=lambda *_:{'list':[]}),history_cache=cache)
-    assert adapter.klines('MSFT.US','1m',start_date='2025-01-01',end_date='2025-01-02').empty
+    calls=[]
+    expected=prices(pd.Timestamp('2025-01-02T16:00:00-05:00'),5)
+    expected['frequency']=frequency
+    def window(code,period,**kwargs):
+        calls.append((code,period,kwargs))
+        return expected.copy(deep=True),{'reason':'target_reached','complete':True}
+    adapter._canonical_history=SimpleNamespace(window=window)
+    returned=adapter.klines('MSFT.US',frequency,start_date='2025-01-01',end_date='2025-01-02')
+    pd.testing.assert_frame_equal(returned,expected)
+    assert len(calls)==1 and calls[0][:2]==('MSFT.US',frequency)
+    assert calls[0][2]['target_from']==pd.Timestamp('2025-01-01T00:00:00-05:00')
+    assert calls[0][2]['cutoff']==pd.Timestamp('2025-01-02T23:59:59.999999-05:00')
+    assert calls[0][2]['target_rows'] is None
 
 
 @pytest.mark.parametrize('fail',[False,True])
@@ -379,14 +412,15 @@ def test_incomplete_full_response_cannot_be_returned_as_usable_history(history,t
     assert not list(tmp_path.glob('*.parquet'))
 
 
-def test_explicit_range_also_rejects_malformed_source_rows(monkeypatch):
+def test_explicit_raw_parser_range_also_rejects_malformed_source_rows(monkeypatch):
     from chanlun import config
     from chanlun.exchange.exchange_usmart import ExchangeUSmart
     monkeypatch.setattr(config,'US_HISTORY_KLINE_SOURCE','usmart')
     client=SimpleNamespace(quote=lambda *_:{'list':[{'latestTime':'invalid','open':10,'high':11,'low':9,'close':10}]})
     # No usable row at all must also preserve the malformed-source diagnosis.
     with pytest.raises(USmartAPIError):
-        ExchangeUSmart('us',client=client).klines('MSFT.US','1m',start_date='2026-10-08',end_date='2026-10-09')
+        public_history_frame(ExchangeUSmart('us',client=client)._fetch_native_klines(
+            'MSFT.US','1m',start_date='2026-10-08',end_date='2026-10-09'))
 
 
 def test_same_source_thread_wait_has_a_real_deadline(tmp_path):

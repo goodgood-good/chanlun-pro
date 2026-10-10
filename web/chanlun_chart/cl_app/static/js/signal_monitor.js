@@ -131,7 +131,7 @@
     $('notifications-next').disabled=inbox.pending||inbox.searchPending||(pagination.has_more!==undefined?!pagination.has_more:page>=(pagination.pages||1));
   }
   function inboxMessage(value){$('notifications-message').textContent=value||'';}
-  function notificationVersion(row){return JSON.stringify([row.id,row.updated_at,row.status,row.delivery_status,row.sent_at,row.error,row.image_count,row.images,row.chart_role,row.chart_coverage_status,row.chart_missing_periods]);}
+  function notificationVersion(row){return JSON.stringify([row.id,row.updated_at,row.status,row.delivery_status,row.sent_at,row.error,row.image_count,row.images,row.chart_role,row.chart_coverage_status,row.chart_missing_periods,row.chart_missing_history_periods,row.chart_history_status]);}
   function renderNotificationList(result){
     inbox.data=result;
     const summary=result.summary||{},pagination=result.pagination||{},rows=result.items||[];
@@ -164,7 +164,12 @@
         const meta=node('div',undefined,'notification-row-meta'),signal=node('span',[row.frequency,notificationLabel(row),notificationStage(row)].filter(Boolean).join(' · '),signalColor(row));
         if(row.holding)signal.append(node('span','我的持仓','monitor-holding-badge'));
         meta.append(signal,notificationBadge(row));
-        if(row.chart_coverage_status==='partial')meta.append(node('span','部分图 · 缺 '+(row.chart_missing_periods||[]).join(' / '),'muted'));
+        if(row.chart_coverage_status==='partial'){
+          const notes=[];
+          if(row.chart_missing_periods?.length)notes.push('缺 '+row.chart_missing_periods.join(' / '));
+          if(row.chart_missing_history_periods?.length)notes.push(row.chart_history_status==='limited'?'历史范围受限':'历史范围待补齐');
+          meta.append(node('span','部分图'+(notes.length?' · '+notes.join(' · '):''),'muted'));
+        }
         else if(row.chart_role==='completion')meta.append(node('span','补全图表','muted'));
         button.append(meta);
         const summary=notificationSummary(row);if(summary)button.append(node('p',summary,'notification-row-summary'));

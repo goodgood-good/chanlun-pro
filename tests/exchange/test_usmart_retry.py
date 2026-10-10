@@ -22,6 +22,7 @@ def client_for(monkeypatch, replies):
             raise reply
         return reply
     client = USmartClient(channel='fixture', token='fixture-token',
+                         phone='', login_password='', private_key='', public_key='',
                          session=SimpleNamespace(post=post),
                          rate_limiter=SimpleNamespace(wait=lambda **_: None))
     monkeypatch.setattr(client, '_get_signer', lambda: SimpleNamespace(sign=lambda *_a, **_k: 'fixture-signature'))

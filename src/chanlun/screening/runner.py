@@ -650,11 +650,19 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
                     pass
             timings['persistence'] = (time.monotonic()-persistence_started)*1000
         except Exception as exc:
+            from chanlun.exchange.errors import USmartHistoryPending
             reason = ("EVIDENCE_WRITE_FAILED" if phase == "evidence" else
                       exc.reason if isinstance(exc, MarketDataContractError) else
+                      "DATA_SOURCE_PREPARING" if phase == "fetch" and isinstance(exc, USmartHistoryPending) else
                       "DATA_SOURCE_UNAVAILABLE" if phase == "fetch" else "ENGINE_ERROR")
             row.update(selected=[], observations=[], consolidation_alerts=[], data_errors=[reason],
                        error=f"{type(exc).__name__}: {exc}")
+            if reason == "DATA_SOURCE_PREPARING":
+                preparation = getattr(exc, 'preparation', {})
+                row['source_preparation'] = {
+                    key: preparation[key] for key in ('progress_token', 'available_rows', 'required_rows')
+                    if isinstance(preparation, dict) and key in preparation
+                }
         finally:
             row['processing_timeline']['calculation_finished_at'] = time.time()
             row['timings_ms'] = {**{k:round(v,2) for k,v in timings.items()},

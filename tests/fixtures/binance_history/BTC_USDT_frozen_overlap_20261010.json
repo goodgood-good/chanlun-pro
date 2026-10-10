@@ -1,0 +1,42 @@
+{
+  "source_url": "https://data-api.binance.vision/api/v3/klines",
+  "request": {
+    "symbol": "BTCUSDT",
+    "interval": "1m",
+    "endTime": 1791537600000,
+    "limit": 1000
+  },
+  "frequency": "1m",
+  "code": "BTC/USDT",
+  "official_raw_bar": [
+    1791477660000,
+    "81421.91000000",
+    "81438.01000000",
+    "81375.17000000",
+    "81384.01000000",
+    "7.47803000",
+    1791477719999,
+    "608795.97344190",
+    2253,
+    "5.32550000",
+    "433567.46915490",
+    "0"
+  ],
+  "captured_frozen_bar": {
+    "date": "2026-10-08T16:42:00+00:00",
+    "open": 81421.9,
+    "high": 81438.0,
+    "low": 81375.2,
+    "close": 81384.0,
+    "volume": 7.47803
+  },
+  "attrs": {
+    "structure_price_quantum": "0.00000001",
+    "price_basis_revision": "sha256:f2bbb5021860714936a65953cf0a31159c20508add447dd3686e19a7d351c558",
+    "price_basis_provider": "binance",
+    "price_basis_adjustment": "none",
+    "bar_time_label": "end",
+    "screening_market": "currency_spot"
+  },
+  "note": "Actual old frozen archive differs from native public precision; must reject joining, not round native prices to force equality."
+}

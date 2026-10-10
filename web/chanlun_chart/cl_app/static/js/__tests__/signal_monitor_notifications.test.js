@@ -108,6 +108,20 @@ test('an unfinished chart with no PNG shows generation status without inventing 
   assert.equal(byTag(ui.get('notification-detail-content'),'img').length,0);
 });
 
+test('three period images do not imply the requested history range is already complete',async()=>{
+  const receipt=row('range',{chart_coverage_status:'partial',chart_missing_periods:[],
+    chart_missing_history_periods:['1m'],chart_history_status:'pending'});
+  const ui=fixture(async url=>url.endsWith('/range')?response(detail('range',{images:[{
+    label:'首张图 · 1m / 5m / 30m',periods:['1m','5m','30m'],status:'ready',
+    url:'/monitor/notifications/range/images/0.png?version='+'a'.repeat(64),
+    status_note:'首张部分图已发送；历史范围尚未完成：1m；补图等待重试',
+  }]})):dispatch(url,listing([receipt])));
+  await settle();await settle();
+  assert.match(text(ui.get('notifications-list')),/历史范围待补齐/);
+  assert.doesNotMatch(text(ui.get('notifications-list')),/部分图 · 缺 /);
+  assert.match(text(ui.get('notification-detail-content')),/历史范围尚未完成：1m/);
+});
+
 test('background refresh preserves the selected detail, page and chart element',async()=>{
   let data=listing([row('a'),row('b')],{pagination:{page:2,size:25,pages:3,total:60,has_more:true}});
   const ui=fixture(async url=>dispatch(url,data));await settle();await settle();

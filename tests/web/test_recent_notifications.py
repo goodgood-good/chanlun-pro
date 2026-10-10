@@ -447,6 +447,43 @@ def test_real_chart_writer_and_reader_preserve_first_receipt_across_completion(t
     assert len(transport.images) == 2 and reader.list({'kind':'chart'})['pagination']['total'] == 2
 
 
+def test_three_available_periods_are_still_partial_when_the_requested_history_is_pending(records):
+    from cl_app.services.dingtalk_notifications import signal_key
+    root, reader = records; value = event()
+    digest, url, _ = chart_asset(root, b'three short periods', ['1m','5m','30m'], [])
+    metadata = root/'chart_images'/(digest+'.json')
+    saved = json.loads(metadata.read_text(encoding='utf8'))
+    ranges = {p: {'state':'target_reached','target_reached':True,'target_days':30 if p=='1m' else 90,
+                  'available_from':NOW-86400,'available_to':NOW-60} for p in ('1m','5m','30m')}
+    ranges['1m'].update(state='pending',target_reached=False,private_path='D:/must-not-expose',cursor={'secret':'no'})
+    saved.update(schema='notification-chart-coverage-v2',history_coverage=ranges)
+    metadata.write_text(json.dumps(saved),encoding='utf8')
+    add(root,'chart:'+signal_key(value),[value],kind='chart',content=json.dumps({'text':f'![short]({url})'}))
+    item=reader.list({})['items'][0]
+    assert item['chart_coverage_status']=='partial' and item['chart_missing_periods']==[]
+    assert item['chart_missing_history_periods']==['1m'] and item['chart_history_status']=='pending'
+    image=reader.detail(item['id'])['images'][0]
+    assert image['history_coverage']['1m']['state']=='pending'
+    assert '历史范围尚未完成：1m' in image['status_note']
+    assert 'private_path' not in image['history_coverage']['1m'] and 'cursor' not in image['history_coverage']['1m']
+
+
+def test_source_exhaustion_is_distinct_from_meeting_the_requested_duration(records):
+    from cl_app.services.dingtalk_notifications import signal_key
+    root, reader = records; value = event()
+    digest,url,_=chart_asset(root,b'actual short source',['1m','5m','30m'],[])
+    metadata=root/'chart_images'/(digest+'.json');saved=json.loads(metadata.read_text(encoding='utf8'))
+    ranges={p:{'state':'source_exhausted','source_origin':True,'target_reached':False,
+               'target_days':30 if p=='1m' else 90,'source_label':'QMT 本机可用历史'} for p in ('1m','5m','30m')}
+    saved.update(schema='notification-chart-coverage-v2',history_coverage=ranges)
+    metadata.write_text(json.dumps(saved),encoding='utf8')
+    add(root,'chart:'+signal_key(value),[value],kind='chart',content=json.dumps({'text':f'![source]({url})'}))
+    item=reader.list({})['items'][0];image=reader.detail(item['id'])['images'][0]
+    assert item['chart_history_status']=='complete' and item['chart_coverage_status']=='complete'
+    assert image['history_coverage']['1m']['target_reached'] is False
+    assert 'QMT 本机可用历史已取尽' in image['status_note'] and '不足目标范围' in image['status_note']
+
+
 def test_history_routes_require_login_and_do_not_dispatch(records,monkeypatch):
     from cl_app import create_app
     root,_=records

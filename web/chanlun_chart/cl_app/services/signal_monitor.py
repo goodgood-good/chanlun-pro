@@ -1985,6 +1985,28 @@ class SignalMonitor:
                 "retry_at": stamp + delay if failures < MONITOR_MAX_FAILURES else None,
             }
 
+    def _record_source_preparation(self, keys, errors, stamp, run_id):
+        """Bound each warm-up slice without exhausting the transient failure budget."""
+        state = self._load()
+        for key in keys & set((state.get('seed') or {}).get('codes', [])):
+            cutoff = state.get('active_cutoffs', {}).get(key)
+            if type(cutoff) is not int:
+                continue
+            previous = state['retry_symbols'].get(key, {})
+            if previous.get('run_id') == run_id and previous.get('cutoff') == cutoff:
+                continue
+            tokens = sorted((str(error.get('frequency', '')),
+                             str(error.get('source_preparation', {}).get('progress_token', ''))[:256])
+                            for error in errors if _symbol_key(error) == key)
+            token = hashlib.sha256(json.dumps(tokens).encode()).hexdigest()
+            advanced = any(value for _, value in tokens) and token != previous.get('preparation_token')
+            stalls = 0 if advanced else min(4, previous.get('preparation_stalls', 0) + 1)
+            state['retry_symbols'][key] = {
+                'cutoff':cutoff, 'failures':0, 'run_id':run_id,
+                'retry_at':stamp + (3 if advanced else min(300, 30 * 2 ** (stalls - 1))),
+                'preparation_token':token, 'preparation_stalls':stalls,
+            }
+
     def _monitor_read_failure(self, status, after, error):
         with self._lock:
             state=self._load()
@@ -2234,7 +2256,11 @@ class SignalMonitor:
                            if not error.get('frequency') or error['frequency'] in
                                _available_monitor_periods(state, _symbol_key(error), revision)} | risk_retries) & checked
             retry_keys = {key for key in retry_keys if _available_monitor_periods(state, key, revision)}
-            self._record_failures(retry_keys,
+            preparation_keys = {key for key in retry_keys - risk_retries
+                                if all(error.get('reasons') == ['DATA_SOURCE_PREPARING']
+                                       for error in result.get('errors', []) if _symbol_key(error) == key)}
+            self._record_source_preparation(preparation_keys, result.get('errors', []), stamp, result['run_id'])
+            self._record_failures(retry_keys - preparation_keys,
                                    stamp, result["run_id"])
             for key in checked:
                 if key not in retry_keys:

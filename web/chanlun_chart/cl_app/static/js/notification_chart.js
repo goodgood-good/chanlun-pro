@@ -7,6 +7,9 @@
     window.__CHANLUN_SSE_ENABLED = false;
     window.__CHANLUN_SCREENING_EVIDENCE = {source: 'notification', point: 'notification'};
     const cm = window.notificationChartManager = new ChartManager('notification');
+    // Background candles/indicators have their own provenance. This isolated
+    // export must not draw or validate them as a frozen signal structure.
+    if (data.background_data_only) cm.draw_chanlun = function () {};
     // Fit the requested history into the native exported canvas on every period.
     cm.exportMinBarSpacing = 0.01;
     cm.getCustomIndicators = function (PineJS) {
@@ -17,6 +20,11 @@
     cm.init();
     function complete() {
         const chartData = cm.chart && cm.getChartData();
+        if(data.background_data_only){
+            const snapshot=chartData?.barsResult?.strict_structure;
+            return cm._initialLoadDone&&snapshot?.analysis_scope==='notification_background'
+                &&snapshot.source_closed_at===data.cutoff;
+        }
         return cm._initialLoadDone && chartData && cm._strictStructureStatus?.state === 'ready'
             && !cm._automaticShapeCreateCount && cm._strictReconcileComplete()
             && cm._baseStructureEntitiesMatch(chartData, data.resolution);
@@ -104,6 +112,7 @@
         if (!window.__notificationReady || !complete()) throw new Error('chart is not ready for export');
         const history = cm.getChartData().barsResult;
         if (history.strict_structure?.source_closed_at !== data.cutoff) throw new Error('snapshot cutoff mismatch');
+        if(data.background_only&&(history.strict_structure?.display_scope||history.strict_structure?.analysis_scope)!=='notification_background')throw new Error('background scope mismatch');
         await settleHistoryRange();
         const canvas = await cm.widget.takeClientScreenshot({hideStudiesFromLegend: false});
         return canvas.toDataURL('image/png');

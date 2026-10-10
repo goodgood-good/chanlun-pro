@@ -163,19 +163,23 @@ def test_daily_delegate_and_incomplete_empty_marker_are_not_normalized(delegated
     assert empty.attrs["fetch_incomplete"] is True
 
 
-def test_native_usmart_end_label_is_unchanged(monkeypatch):
+def test_native_usmart_open_minute_is_normalized_to_canonical_close(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "US_HISTORY_KLINE_SOURCE", "usmart")
     responses = iter([
-        [{"latestTime": 20260904160000000, "open": 100.0, "high": 101.0,
+        [{"latestTime": 20260904155900000, "open": 100.0, "high": 101.0,
           "low": 99.0, "close": 100.5, "volume": 1000}],
         [],
     ])
-    client = SimpleNamespace(quote=lambda *_a, **_k: {"list": next(responses)})
+    client = SimpleNamespace(quote_host='https://fixture.invalid',channel='fixture',
+        quote=lambda *_a, **_k: {'market':'us','symbol':'AAPL','type':1,'right':1,"list": next(responses)})
     ex = ExchangeUSmart("us", client=client)
+    from chanlun.exchange.usmart_canonical_history import CanonicalUSmartHistory, SOURCE_TIME_CONTRACT
+    ex._canonical_history = CanonicalUSmartHistory(client, root=tmp_path)
     result = ex.klines("AAPL.US", "1m", start_date="2026-09-04", end_date="2026-09-04")
     assert len(result) == 1
     assert result.iloc[0].date == pd.Timestamp("2026-09-04T20:00:00Z")
     assert result.attrs["price_basis_provider"] == "usmart"
+    assert result.attrs['source_time_contract']==SOURCE_TIME_CONTRACT
 
 
 def _canonical_head_rows(delegated):

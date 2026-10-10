@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from copy import deepcopy
 from bisect import bisect_left
 from datetime import datetime
 from decimal import Decimal
@@ -12,6 +13,7 @@ import math
 import mimetypes
 import os
 from pathlib import Path
+import re
 import secrets
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -24,6 +26,8 @@ VIEW = "/?screening_source=notification&default_study=MACD"
 PERIODS = ("1m", "5m", "30m")
 # Calendar windows are consistent across regular and continuously traded markets.
 VISIBLE_DAYS = {"1m": 30, "5m": 90, "30m": None}
+HISTORY_RESOLVED = {'target_reached', 'source_exhausted'}
+PANEL_ID = re.compile(r'(?:(?:proof|context):)?(?:1m|5m|30m)\Z|history:(?:1m|5m|30m):[a-f0-9]{64}\Z')
 
 
 class PanelImageCache:
@@ -39,12 +43,12 @@ class PanelImageCache:
         output = {}
         try:
             saved = json.loads((self.root / 'panels.json').read_text(encoding='utf-8'))
-            if saved.get('schema') != 'notification-frozen-panels-v1' or saved.get('event_sha256') != self.identity:
+            if saved.get('schema') not in ('notification-frozen-panels-v1', 'notification-frozen-panels-v2') or saved.get('event_sha256') != self.identity:
                 return output
             for frequency, digest in saved.get('panels', {}).items():
-                if frequency not in PERIODS or not isinstance(digest, str):
+                if not isinstance(frequency, str) or not PANEL_ID.fullmatch(frequency) or not isinstance(digest, str):
                     continue
-                image = (self.root / (frequency + '.png')).read_bytes()
+                image = (self.root / (frequency.replace(':', '_') + '.png')).read_bytes()
                 if image.startswith(b'\x89PNG\r\n\x1a\n') and hashlib.sha256(image).hexdigest() == digest:
                     output[frequency] = 'data:image/png;base64,' + base64.b64encode(image).decode('ascii')
                     self.entries[frequency] = digest
@@ -53,14 +57,15 @@ class PanelImageCache:
         return output
 
     def save(self, frequency, data):
-        if frequency not in PERIODS or not isinstance(data, str) or not data.startswith('data:image/png;base64,'):
+        if not isinstance(frequency, str) or not PANEL_ID.fullmatch(frequency) or not isinstance(data, str) or not data.startswith('data:image/png;base64,'):
             raise ValueError('invalid frozen panel result')
         image = base64.b64decode(data.split(',', 1)[1], validate=True)
         if not image.startswith(b'\x89PNG\r\n\x1a\n') or len(image) > 8 * 1024 * 1024:
             raise ValueError('invalid frozen panel PNG')
         self.root.mkdir(parents=True, exist_ok=True)
-        target = self.root / (frequency + '.png')
-        temporary = self.root / (frequency + '.' + secrets.token_hex(6) + '.tmp')
+        filename = frequency.replace(':', '_')
+        target = self.root / (filename + '.png')
+        temporary = self.root / (filename + '.' + secrets.token_hex(6) + '.tmp')
         try:
             temporary.write_bytes(image)
             os.replace(temporary, target)
@@ -70,7 +75,7 @@ class PanelImageCache:
         record = self.root / 'panels.json'
         temporary = self.root / ('panels.' + secrets.token_hex(6) + '.tmp')
         try:
-            temporary.write_text(json.dumps({'schema': 'notification-frozen-panels-v1',
+            temporary.write_text(json.dumps({'schema': 'notification-frozen-panels-v2',
                                              'event_sha256': self.identity, 'panels': self.entries}), encoding='utf-8')
             os.replace(temporary, record)
         finally:
@@ -210,6 +215,140 @@ def prepare_periods(event, runs_root, *, reused_images=None):
     return {'panels': panels}
 
 
+def history_description(frequency, coverage):
+    """Describe the actual obtained range without treating a budget as origin."""
+    from chanlun.screening.rules import CN
+    def day(value):
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(value, CN).strftime('%Y-%m-%d')
+        return str(value or '未知')[:10]
+    target = f"近 {VISIBLE_DAYS[frequency]} 天" if VISIBLE_DAYS[frequency] else '当前来源全部可用历史'
+    state = coverage.get('state', 'pending')
+    span = f"{day(coverage.get('available_from'))} 至 {day(coverage.get('available_to'))}"
+    if state == 'target_reached':
+        return f'{frequency} {target} · 已取数据 {span}'
+    if state == 'source_exhausted':
+        short = '；不足目标范围' if coverage.get('target_reached') is False and VISIBLE_DAYS[frequency] else ''
+        return f'{frequency} {coverage.get("source_label") or "当前来源"}已取尽 · 已取数据 {span}{short}'
+    text = {'pending': '历史范围正在补齐', 'unsupported': '该来源暂不支持扩展',
+            'invalid': '历史校验未通过', 'source_error': '历史来源请求失败，等待重试',
+            'render_error': '长期背景导出失败，等待重试'}.get(state, '历史范围待核验')
+    return f'{frequency} {target} · {text}'
+
+
+def _background_panel(event, frame, snapshot, coverage):
+    structure = snapshot.get('analysis_scope') == 'native_centers' and snapshot.get('display_scope') == 'notification_background'
+    data_only = snapshot.get('analysis_scope') == 'notification_background'
+    if not structure and not data_only:
+        raise ValueError('background indicators must have an independent scope')
+    panel = _prepare_panel(event, frame, snapshot,
+        {'anchor_at': snapshot['source_closed_at'], 'anchor_price': float(frame.close.iloc[-1])}, context=True)
+    frequency = snapshot['source_frequency']
+    from chanlun.screening.rules import CN
+    visible_from = datetime.fromtimestamp(panel['settings']['from'], CN).strftime('%Y-%m-%d')
+    visible_to = datetime.fromtimestamp(panel['settings']['cutoff'], CN).strftime('%Y-%m-%d %H:%M:%S')
+    caption = (history_description(frequency, coverage)
+               + f'\n画面 {visible_from} 至 {visible_to}（北京时间）'
+               + '\n截至原通知行情时刻；不复制原买卖点或止损线')
+    if data_only:
+        caption += '\n背景结构未提供，仅显示K线与指标'
+    panel['settings'].update(background_only=True, background_data_only=data_only, panel_id='history:'+frequency,
+        cache_key='history:'+frequency+':'+coverage['scope'], purpose='independent_background',
+        title=f'{frequency} · 长期背景（{"仅K线与指标" if data_only else "结构与指标独立计算"}） · {event.get("name") or event["code"]}',
+        caption=caption,
+        marker=False, label='', stop_price=None, stop_label='', reference_anchor_at=None)
+    return panel
+
+
+def prepare_history_layout(event, runs_root, *, reused_images=None, history_period=None):
+    """Three period groups; preserve proof pixels and add independent history.
+
+    At most one background period advances a bounded fetch slice per call.
+    A normal first render does not start long-history paging.
+    """
+    from .notification_charts import load_chart_evidence
+    from .notification_periods import background_evidence, context_evidence, HistoryPending, HistoryUnavailable
+    primary_frame, primary_snapshot, primary_signal = load_chart_evidence(event, runs_root)
+    reused = reused_images or {}
+    panels, histories, history_panels = [], {}, {}
+    primary = event['frequency']
+
+    def frozen(frequency, frame=None, snapshot=None, signal=None):
+        purpose = 'proof' if frequency == primary else 'context'
+        key = purpose+':'+frequency
+        image = reused.get(key) or reused.get(frequency)
+        if image:
+            return {'settings': {'frequency': frequency, 'panel_id': key, 'cache_key': key,
+                     'purpose': 'frozen_signal' if purpose == 'proof' else 'frozen_context',
+                     'signal_panel': purpose == 'proof'}, 'cached_image': image}
+        panel = _prepare_panel(event, frame, snapshot, signal, context=purpose != 'proof')
+        panel['settings'].update(panel_id=key, cache_key=key,
+                                 purpose='frozen_signal' if purpose == 'proof' else 'frozen_context')
+        return panel
+
+    for frequency in PERIODS:
+        frame = primary_frame if frequency == primary else None
+        snapshot = primary_snapshot if frequency == primary else None
+        if frequency == primary:
+            panels.append(frozen(frequency, frame, snapshot, primary_signal))
+        background = None
+        try:
+            background = background_evidence(event, runs_root, frequency, primary_frame.attrs,
+                                               anchor_frame=frame, fetch=frequency == history_period)
+        except HistoryPending as exc:
+            histories[frequency] = dict(exc.coverage)
+        except HistoryUnavailable as exc:
+            histories[frequency] = dict(exc.coverage)
+        except Exception as exc:
+            histories[frequency] = {'state': 'invalid', 'reason': 'background_preparation_failed',
+                                    'error_code': type(exc).__name__, 'target_days': VISIBLE_DAYS[frequency]}
+        if background is not None:
+            history_frame, history_snapshot, coverage = background
+            histories[frequency] = dict(coverage)
+            key = 'history:'+frequency+':'+coverage['scope']
+            if key in reused:
+                panel = {'settings': {'frequency': frequency, 'panel_id': 'history:'+frequency,
+                         'cache_key': key, 'purpose': 'independent_background', 'signal_panel': False,
+                         'background_only': True}, 'cached_image': reused[key]}
+            else:
+                panel = _background_panel(event, history_frame, history_snapshot, coverage)
+            # A primary proof already covering the exact same target needs no
+            # duplicate chart. A longer/different independent background does.
+            if frequency != primary or int(history_frame.date.iloc[0].timestamp()) < int(primary_frame.date.iloc[0].timestamp()):
+                panels.append(panel)
+                history_panels[frequency] = 'history:'+frequency
+            else:
+                history_panels[frequency] = 'proof:'+frequency
+            continue
+        if frequency == primary:
+            continue
+        key = 'context:'+frequency
+        if key in reused or frequency in reused:
+            panels.append(frozen(frequency))
+            continue
+        try:
+            frame, snapshot = context_evidence(event, runs_root, frequency, primary_frame.attrs)
+            panels.append(frozen(frequency, frame, snapshot,
+                {'anchor_at': snapshot['source_closed_at'], 'anchor_price': float(frame.close.iloc[-1])}))
+            # Persist the first same-period anchor without starting another
+            # network history slice or replacing an earlier saved anchor.
+            try:
+                background_frame, background_snapshot, coverage = background_evidence(
+                    event, runs_root, frequency, primary_frame.attrs, anchor_frame=frame, fetch=False)
+                histories[frequency] = dict(coverage)
+                panels[-1] = _background_panel(event, background_frame, background_snapshot, coverage)
+                history_panels[frequency] = 'history:'+frequency
+            except (HistoryPending, HistoryUnavailable) as exc:
+                # Persisting an anchor without fetching cannot turn an earlier
+                # source/contract failure in this slice into normal progress.
+                if histories.get(frequency, {}).get('state') not in ('source_error','invalid','unsupported'):
+                    histories[frequency] = dict(exc.coverage)
+        except Exception as exc:
+            panels.append({'settings': {'frequency': frequency, 'panel_id': key, 'signal_panel': False},
+                           'error': '该周期行情暂不可用；已保留信号周期图表', 'error_type': type(exc).__name__})
+    return {'panels': panels, 'history_coverage': histories, 'history_panel_ids': history_panels}
+
+
 def route_request(route, payload):
     """Fulfill every request locally; never touch accounts, providers or saved layouts."""
     request = route.request
@@ -273,11 +412,14 @@ def capture(payload, *, diagnostics=None, panel_sink=None, completion_event=None
             images = []
             composer = None
             for panel in panels:
+                identity = {'frequency': panel['settings']['frequency'],
+                            'panel_id': panel['settings'].get('panel_id', panel['settings']['frequency']),
+                            'purpose': panel['settings'].get('purpose', 'frozen_signal' if panel['settings'].get('signal_panel') else 'frozen_context')}
                 if panel.get('cached_image'):
-                    images.append({'data': panel['cached_image'], 'frequency': panel['settings']['frequency']})
+                    images.append({'data': panel['cached_image'], **identity})
                     continue
                 if panel.get('error'):
-                    images.append({'frequency': panel['settings']['frequency'], 'error': panel['error'],
+                    images.append({**identity, 'error': panel['error'],
                                    'error_type': panel.get('error_type')})
                     continue
                 page = context.new_page()
@@ -298,10 +440,10 @@ def capture(payload, *, diagnostics=None, panel_sink=None, completion_event=None
                         diagnostics.append(page.evaluate('window.__notificationViewport'))
                     if panel_sink is not None:
                         try:
-                            panel_sink(panel['settings']['frequency'], data)
+                            panel_sink(panel['settings'].get('cache_key', panel['settings']['frequency']), data)
                         except OSError:
                             LOG.warning('notification panel cache unavailable frequency=%s', panel['settings']['frequency'])
-                    images.append({'data': data, 'frequency': panel['settings']['frequency']})
+                    images.append({'data': data, **identity})
                     if panel['settings'].get('signal_panel', True):
                         composer = page
                 except Exception as exc:
@@ -313,7 +455,7 @@ def capture(payload, *, diagnostics=None, panel_sink=None, completion_event=None
                     if diagnostics is not None:
                         diagnostics.append({'frequency': panel['settings']['frequency'], 'status': 'failed',
                                             'error_type': type(exc).__name__})
-                    images.append({'frequency': panel['settings']['frequency'],
+                    images.append({**identity,
                                    'error': '该周期图表暂不可用；已保留信号周期图表',
                                    'error_type': type(exc).__name__})
                 finally:
@@ -333,6 +475,25 @@ def capture(payload, *, diagnostics=None, panel_sink=None, completion_event=None
                 # (null here). Install without returning the compositor.
                 composer.evaluate('() => {\n' + compose_source[begin:end] + '\n}')
             data = composer.evaluate("images => window.composeNotificationCharts(images)", images) if len(images) > 1 else images[0]['data']
+            histories = deepcopy(payload.get('history_coverage'))
+            if histories is not None:
+                for frequency, coverage in histories.items():
+                    if coverage.get('state') not in HISTORY_RESOLVED:
+                        continue
+                    required = payload.get('history_panel_ids', {}).get(frequency, 'history:'+frequency)
+                    if not any(image['panel_id'] == required and image.get('data') for image in images):
+                        coverage.update(state='render_error', reason='background_export_failed', can_resume=True)
+                lines = [history_description(frequency, histories.get(frequency, {})) for frequency in PERIODS]
+                data = composer.evaluate("""async ({data, lines}) => {
+                    const image = new Image(); image.src = data; await image.decode();
+                    const canvas = document.createElement('canvas');
+                    canvas.width = image.width; canvas.height = image.height + 126;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#f1f5f9'; ctx.fillRect(0, 0, canvas.width, 126);
+                    ctx.fillStyle = '#334155'; ctx.font = '21px sans-serif';
+                    lines.forEach((line, index) => ctx.fillText(line, 28, 34 + index * 34, canvas.width - 56));
+                    ctx.drawImage(image, 0, 126); return canvas.toDataURL('image/png');
+                }""", {'data': data, 'lines': lines})
             if completion_event and all(image.get('data') for image in images):
                 from chanlun.screening.rules import CN
                 # DingTalk's chart transport sends pixels only. Label the new
@@ -357,13 +518,16 @@ def capture(payload, *, diagnostics=None, panel_sink=None, completion_event=None
             if not isinstance(data, str) or not data.startswith(prefix):
                 raise ValueError("TradingView did not export a PNG")
             from .notification_charts import RenderedChart
+            present = [frequency for frequency in PERIODS if any(image['frequency'] == frequency and image.get('data') for image in images)]
             primary_frequency = next((panel['settings']['frequency'] for panel in panels
                                       if panel['settings'].get('signal_panel', True)), None)
             return RenderedChart(base64.b64decode(data[len(prefix):], validate=True),
-                                 periods=[image['frequency'] for image in images if image.get('data')],
-                                 missing_periods=[image['frequency'] for image in images if image.get('error')],
+                                 periods=present,
+                                 missing_periods=[frequency for frequency in PERIODS if frequency not in present],
                                  errors={image['frequency']: image.get('error_type') or image['error']
                                          for image in images if image.get('error')},
-                                 primary_frequency=primary_frequency)
+                                 primary_frequency=primary_frequency, history_coverage=histories,
+                                 panels=[{k: image[k] for k in ('frequency', 'panel_id', 'purpose')} |
+                                         {'rendered': bool(image.get('data'))} for image in images])
         finally:
             browser.close()

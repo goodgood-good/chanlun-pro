@@ -818,7 +818,9 @@ class ScreeningManager:
                     recent_rejections.extend({**header, **s} for s in row["recent_rejections"])
                     if row.get("data_errors"):
                         errors.append({**header, "reasons": row["data_errors"], "error": row.get("error"),
-                                       "data_quality": row.get("data_quality")})
+                                       "data_quality": row.get("data_quality"),
+                                       **({'source_preparation':row['source_preparation']}
+                                          if 'source_preparation' in row else {})})
                     for reason, count in row["reason_counts"].items():
                         counts[reason] = counts.get(reason, 0) + count
         if state.get("completed") is not None and results_through != state["completed"]:

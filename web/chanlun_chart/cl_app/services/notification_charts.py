@@ -22,15 +22,37 @@ class _ChartExpired(Exception):
     pass
 
 
+class ChartHistoryPending(Exception):
+    """A bounded history slice finished without producing another sendable PNG."""
+    def __init__(self, coverage):
+        self.coverage = coverage or {period: {'state': 'pending'} for period in ('1m','5m','30m')}
+        super().__init__('notification background history is not complete')
+
+
+def missing_history_periods(coverage):
+    return [period for period in ('1m', '5m', '30m') if coverage
+            and coverage.get(period, {}).get('state') not in ('target_reached', 'source_exhausted')]
+
+
+def preparing_history_periods(coverage):
+    return [period for period in missing_history_periods(coverage)
+            if coverage.get(period, {}).get('state') not in ('invalid', 'unsupported')]
+
+
 class RenderedChart(bytes):
     """A real PNG plus the periods which were actually exported into it."""
 
-    def __new__(cls, png, *, periods, missing_periods=(), errors=None, primary_frequency=None):
+    def __new__(cls, png, *, periods, missing_periods=(), errors=None, primary_frequency=None,
+                history_coverage=None, panels=None):
         result = super().__new__(cls, png)
         result.coverage = {"schema": "notification-chart-coverage-v1",
                            "image_sha256": hashlib.sha256(png).hexdigest(),
                            "periods": list(periods), "missing_periods": list(missing_periods),
                            "errors": dict(errors or {}), "primary_frequency": primary_frequency}
+        if history_coverage is not None:
+            history_coverage = history_coverage or {period: {'state': 'pending'} for period in ('1m','5m','30m')}
+            result.coverage.update(schema='notification-chart-coverage-v2', history_coverage=history_coverage,
+                                   missing_history_periods=missing_history_periods(history_coverage), panels=panels or [])
         return result
 
 
@@ -121,17 +143,20 @@ class ChartStore:
             return None
         try:
             value = json.loads((self.root / (name + '.json')).read_text(encoding='utf-8'))
-            return value if value.get('schema') == 'notification-chart-coverage-v1' and value.get('image_sha256') == name else None
+            return value if value.get('schema') in ('notification-chart-coverage-v1', 'notification-chart-coverage-v2') and value.get('image_sha256') == name else None
         except (OSError, ValueError, AttributeError):
             return None
 
 
-def render_signal_chart(event, runs_root, *, completion=False):
+def render_signal_chart(event, runs_root, *, completion=False, history_period=None):
     """Export the real TradingView renderer using verified, frozen evidence."""
-    from .tradingview_snapshot import capture, prepare_periods, PanelImageCache
+    from .tradingview_snapshot import capture, prepare_history_layout, PanelImageCache
     cache = PanelImageCache(event, Path(runs_root).parent / 'chart_panel_cache')
     reused = cache.read()
-    return capture(prepare_periods(event, runs_root, reused_images=reused), panel_sink=cache.save,
+    payload = prepare_history_layout(event, runs_root, reused_images=reused, history_period=history_period)
+    if completion and preparing_history_periods(payload['history_coverage']):
+        raise ChartHistoryPending(payload['history_coverage'])
+    return capture(payload, panel_sink=cache.save,
                    completion_event=event if completion else None)
 
 
@@ -240,7 +265,9 @@ class NotificationCharts:
                     if 'updated' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
                         raise
             columns = {row[1] for row in db.execute('PRAGMA table_info(jobs)')}
-            for name, default in (('missing_periods', '[]'), ('present_periods', '[]'), ('initial_image_hash', '')):
+            for name, default in (('missing_periods', '[]'), ('present_periods', '[]'), ('initial_image_hash', ''),
+                                  ('history_coverage', '{}'), ('missing_history_periods', '[]'),
+                                  ('history_progress', ''), ('history_turn', '0'), ('history_stalls', '0')):
                 if name not in columns:
                     try:
                         db.execute(f"ALTER TABLE jobs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
@@ -407,8 +434,40 @@ class NotificationCharts:
 
         missing = json.loads(row['missing_periods'] or '[]')
         present = json.loads(row['present_periods'] or '[]')
+        history = json.loads(row['history_coverage'] or '{}')
+        turn, stalls = int(row['history_turn'] or 0), int(row['history_stalls'] or 0)
+        progress = row['history_progress'] or ''
+        attempts = row['attempts'] + 1
         initial_hash = row['initial_image_hash'] or self.outbox.initial_chart_hash(event)
         retry_delay = 30
+        selected = None
+
+        def history_outcome(coverage):
+            nonlocal history, progress, stalls, retry_delay, attempts
+            history = coverage
+            outstanding = missing_history_periods(history)
+            states = {history.get(period, {}).get('state') for period in outstanding}
+            if states & {'invalid', 'unsupported'} and not preparing_history_periods(history):
+                return 'failed', '历史范围受限：' + '、'.join(
+                    period + ('来源暂不支持' if history[period].get('state') == 'unsupported' else '历史校验未通过')
+                    for period in outstanding if history[period].get('state') in {'invalid', 'unsupported'})
+            if 'render_error' in states:
+                return ('failed' if row['attempts'] >= 2 else 'pending'), '长期背景导出失败，等待有界重试'
+            if selected and history.get(selected, {}).get('state') == 'source_error':
+                delay = history[selected].get('next_retry', 30)
+                if type(delay) in (int, float) and math.isfinite(delay):
+                    retry_delay = min(max(30, delay), max(0, event['recorded_at'] + 1800 - self.outbox.now()))
+                return ('failed' if row['attempts'] >= 2 else 'pending'), '历史来源请求失败，等待有界重试'
+            signature = hashlib.sha256(json.dumps({p: history.get(p, {}).get('progress_token')
+                for p in ('1m', '5m', '30m')}, sort_keys=True).encode()).hexdigest()
+            advanced = signature != progress
+            stalls = 0 if advanced else min(stalls + 1, 6)
+            progress = signature
+            # A successful page slice/deadline is scheduling, not a rendering
+            # failure. Persist its cursor proof and back off if no progress.
+            attempts = row['attempts']
+            retry_delay = 5 if advanced else min(300, 15 * 2 ** stalls)
+            return 'pending', '历史范围正在补齐：' + '、'.join(outstanding)
 
         if now-event.get('recorded_at',0)>=1800:
             status,error='expired','图表任务已过期'
@@ -432,12 +491,20 @@ class NotificationCharts:
                 check_deadline()
                 phase='冻结证据绘图'
                 self.progress.phase('chart_render')
-                png=(self.renderer(event,self.root/'runs',completion=bool(initial_hash))
+                outstanding = preparing_history_periods(history)
+                ordered = ('1m', '5m', '30m')
+                selected = next((ordered[(turn + offset) % 3] for offset in range(3)
+                    if ordered[(turn + offset) % 3] in outstanding), None) if initial_hash else None
+                if selected:
+                    turn = (ordered.index(selected) + 1) % 3
+                png=(self.renderer(event,self.root/'runs',completion=bool(initial_hash),history_period=selected)
                      if self.renderer is render_signal_chart else self.renderer(event,self.root/'runs'))
                 check_deadline()
                 coverage = getattr(png, 'coverage', None)
                 if coverage is not None:
                     missing, present = coverage['missing_periods'], coverage['periods']
+                    history = coverage.get('history_coverage', {})
+                incomplete_history = missing_history_periods(history)
                 phase='图片发布'
                 self.progress.phase('image_publish')
                 url=self.store.publish(png)
@@ -453,9 +520,14 @@ class NotificationCharts:
                 self.progress.phase('image_enqueue')
                 image_hash = hashlib.sha256(png).hexdigest()
                 previous = self.store.coverage(initial_hash) if initial_hash else None
-                if initial_hash and missing:
+                if initial_hash and (missing or preparing_history_periods(history)):
                     accepted = True  # Do not send a second partial copy.
-                elif initial_hash and (image_hash == initial_hash or previous and not previous.get('missing_periods')):
+                elif initial_hash and (image_hash == initial_hash or previous
+                                      and previous.get('schema') == 'notification-chart-coverage-v2'
+                                      and set(previous.get('periods', [])) == {'1m','5m','30m'}
+                                      and not previous.get('missing_periods')
+                                      and all(previous.get('history_coverage', {}).get(p, {}).get('state')
+                                              in ('target_reached','source_exhausted') for p in ('1m','5m','30m'))):
                     accepted = True  # A committed complete image survived a crash.
                 else:
                     accepted = (self.outbox.enqueue_chart(event, url, complete=True) if initial_hash
@@ -464,12 +536,19 @@ class NotificationCharts:
                         initial_hash = image_hash
                 if not accepted:
                     status,error='expired','通知已过期或开关已更新'
-                elif missing:
+                elif missing and not preparing_history_periods(history):
                     status = 'failed' if row['attempts'] >= 2 else 'pending'
                     error = '辅助周期未补齐：' + '、'.join(missing) + ('；已达到本次重试上限' if status == 'failed' else '；将重试补齐')
                     retry_delay = 30 if row['attempts'] == 0 else 90
+                elif incomplete_history:
+                    status, error = history_outcome(history)
                 else:
                     status,error='ready',''
+            except ChartHistoryPending as exc:
+                if 0 <= self.outbox.now() - event['recorded_at'] < 1800:
+                    status, error = history_outcome(exc.coverage)
+                else:
+                    status, error = 'expired', '图表任务已过期'
             except _ChartExpired:
                 status,error='expired','图表任务已过期'
             except Exception as exc:
@@ -477,14 +556,20 @@ class NotificationCharts:
                 error=phase+'失败（'+type(exc).__name__+'）'
         with self._db() as db:
             finished=self.outbox.now()
-            db.execute("UPDATE jobs SET status=?,error=?,next_try=?,updated=?,missing_periods=?,present_periods=?,initial_image_hash=? WHERE id=? AND status='running'",
-                       (status,error,finished+retry_delay,finished,json.dumps(missing),json.dumps(present),initial_hash or '',row['id']))
+            next_try = min(finished + retry_delay, event['recorded_at'] + 1800) if status == 'pending' else finished + retry_delay
+            db.execute("UPDATE jobs SET status=?,error=?,next_try=?,updated=?,missing_periods=?,present_periods=?,initial_image_hash=?,"
+                       "history_coverage=?,missing_history_periods=?,history_progress=?,history_turn=?,history_stalls=?,attempts=? "
+                       "WHERE id=? AND status='running'",
+                       (status,error,next_try,finished,json.dumps(missing),json.dumps(present),initial_hash or '',
+                        json.dumps(history),json.dumps(missing_history_periods(history)),progress,turn,stalls,attempts,row['id']))
         if not initial_hash or status == 'expired':
             self.outbox.finish_inline_chart(event,status,error)
 
     def cleanup(self):
         """Expire historical diagnostics even when no new charts are generated."""
         self.store.cleanup()
+        from .notification_history import HistoryArchive
+        HistoryArchive.cleanup(self.root/'notification_history', now=self.outbox.now())
         cache_root = self.root / 'chart_panel_cache'
         if cache_root.is_dir():
             for folder in cache_root.iterdir():

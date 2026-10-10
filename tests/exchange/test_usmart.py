@@ -39,11 +39,13 @@ class _Session:
 
 
 class _QuoteClient:
+    quote_host = 'https://fixture.invalid'
+    channel = 'fixture'
     def __init__(self, handler):
         self.handler = handler
         self.calls = []
 
-    def quote(self, endpoint, payload):
+    def quote(self, endpoint, payload, **_kwargs):
         self.calls.append((endpoint, payload))
         return self.handler(endpoint, payload)
 
@@ -347,7 +349,7 @@ def test_us_kline_uses_configured_long_history_backend_without_mixing_sources(
 
 
 def test_us_kline_falls_back_to_usmart_when_longbridge_credentials_are_partial(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     monkeypatch.setattr(config, "US_HISTORY_KLINE_SOURCE", "longbridge")
     monkeypatch.delenv("LONGBRIDGE_APP_KEY", raising=False)
@@ -356,12 +358,14 @@ def test_us_kline_falls_back_to_usmart_when_longbridge_credentials_are_partial(
 
     def handler(endpoint, payload):
         assert endpoint == "kline"
-        if payload['start'] < 20260810160000000:
-            return {'list':[]}
+        identity = {'market':'us','symbol':'TSLA','type':1,'right':1}
+        if payload['start'] < 20260810155900000:
+            return {**identity,'list':[]}
         return {
+            **identity,
             "list": [
                 {
-                    "latestTime": 20260810160000000,
+                    "latestTime": 20260810155900000,
                     "open": 320.0,
                     "high": 321.0,
                     "low": 319.0,
@@ -373,6 +377,8 @@ def test_us_kline_falls_back_to_usmart_when_longbridge_credentials_are_partial(
 
     quote_client = _QuoteClient(handler)
     exchange = ExchangeUSmart("us", client=quote_client)
+    from chanlun.exchange.usmart_canonical_history import CanonicalUSmartHistory
+    exchange._canonical_history = CanonicalUSmartHistory(quote_client, root=tmp_path)
 
     frame = exchange.klines(
         "TSLA.US",
@@ -524,14 +530,15 @@ def test_end_date_cursor_and_filter_include_the_whole_calendar_day(monkeypatch):
     assert client.calls[0][1]["start"] == 20240102235959999
 
 
-def test_us_intraday_bounds_follow_project_shanghai_time_contract(monkeypatch):
+def test_us_intraday_bounds_follow_project_shanghai_time_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "US_HISTORY_KLINE_SOURCE", "usmart")
     def handler(endpoint, payload):
         assert endpoint == "kline"
         return {
+            'market':'us','symbol':'AAPL','type':1,'right':1,
             "list": [
                 {
-                    "latestTime": 20240102160000000,
+                    "latestTime": 20240102155900000,
                     "open": 10,
                     "high": 11,
                     "low": 9,
@@ -543,6 +550,8 @@ def test_us_intraday_bounds_follow_project_shanghai_time_contract(monkeypatch):
 
     client = _QuoteClient(handler)
     exchange = ExchangeUSmart("us", client=client)
+    from chanlun.exchange.usmart_canonical_history import CanonicalUSmartHistory
+    exchange._canonical_history = CanonicalUSmartHistory(client, root=tmp_path)
     frame = exchange.klines(
         "AAPL.US",
         "1m",
@@ -556,4 +565,4 @@ def test_us_intraday_bounds_follow_project_shanghai_time_contract(monkeypatch):
     assert frame.iloc[0]["date"] == pd.Timestamp(
         "2024-01-02 16:00:00", tz="US/Eastern"
     )
-    assert client.calls[0][1]["start"] == 20240102160000000
+    assert client.calls[0][1]["start"] == 20240102155900000

@@ -126,6 +126,47 @@ def _chart_periods(value):
     return [period for period in CHART_PERIODS if period in value]
 
 
+def _public_history(value):
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for frequency in CHART_PERIODS:
+        row = value.get(frequency)
+        if not isinstance(row, dict): continue
+        state = row.get('state')
+        if state not in ('target_reached','source_exhausted','pending','unsupported','invalid','source_error','render_error'):
+            continue
+        public = {'state': state}
+        if isinstance(row.get('source_label'), str) and re.fullmatch(r'[A-Za-z0-9\u4e00-\u9fff ()·_-]{1,80}', row['source_label']):
+            public['source_label'] = row['source_label']
+        for field in ('requested_from','requested_to','available_from','available_to'):
+            stamp = row.get(field)
+            if _stamp(stamp) is not None:
+                public[field] = stamp
+            elif isinstance(stamp, str) and re.fullmatch(r'\d{4}-\d\d-\d\d(?:T[0-9:.+Z-]+)?', stamp):
+                public[field] = stamp
+        for field in ('target_days','rows'):
+            if type(row.get(field)) is int and row[field] >= 0:
+                public[field] = row[field]
+        for field in ('target_reached','source_origin'):
+            if type(row.get(field)) is bool:
+                public[field] = row[field]
+        result[frequency] = public
+    return result
+
+
+def _history_state(value):
+    if not value: return 'unknown'
+    states = {value.get(period, {}).get('state') for period in CHART_PERIODS}
+    if states & {'unsupported','invalid'}: return 'limited'
+    return 'complete' if states <= {'target_reached','source_exhausted'} else 'pending'
+
+
+def _job_history(job):
+    try: return _public_history(json.loads(job.get('history_coverage') or '{}'))
+    except (TypeError, ValueError): return {}
+
+
 def _saved_exit_plan(value):
     """Expose saved risk references, never file locations or proof graphs."""
     if not isinstance(value, dict):
@@ -405,6 +446,10 @@ class RecentNotifications:
                                              else 'complete' if all(v['coverage_status'] == 'complete' for v in coverage)
                                              else 'unknown')
             item['chart_missing_periods'] = [p for p in CHART_PERIODS if any(p in v['missing_periods'] for v in coverage)]
+            item['chart_missing_history_periods'] = [p for p in CHART_PERIODS if any(p in v.get('missing_history_periods', []) for v in coverage)]
+            item['chart_history_status'] = ('limited' if any(v.get('history_status') == 'limited' for v in coverage)
+                else 'pending' if item['chart_missing_history_periods'] else
+                'complete' if all(v.get('history_status') == 'complete' for v in coverage) else 'unknown')
         return item
 
     def _image_coverage(self, name):
@@ -419,13 +464,17 @@ class RecentNotifications:
         try:
             value = json.loads(path.read_text(encoding='utf-8'))
             periods, missing = _chart_periods(value.get('periods')), _chart_periods(value.get('missing_periods'))
-            if (value.get('schema') != 'notification-chart-coverage-v1' or value.get('image_sha256') != name
+            if (value.get('schema') not in ('notification-chart-coverage-v1','notification-chart-coverage-v2') or value.get('image_sha256') != name
                     or not periods or missing is None or set(periods) & set(missing)
                     or set(periods) | set(missing) != set(CHART_PERIODS)
                     or value.get('primary_frequency') not in periods):
                 return unknown
-            return {'coverage_status': 'partial' if missing else 'complete',
-                    'periods': periods, 'missing_periods': missing}
+            history = _public_history(value.get('history_coverage')) if value['schema'].endswith('-v2') else {}
+            state = _history_state(history)
+            incomplete = [p for p in CHART_PERIODS if history.get(p, {}).get('state') not in ('target_reached','source_exhausted')] if value['schema'].endswith('-v2') else []
+            return {'coverage_status': 'partial' if missing or incomplete else 'complete',
+                    'periods': periods, 'missing_periods': missing, 'history_status': state,
+                    'history_coverage': history, 'missing_history_periods': incomplete}
         except (OSError, ValueError, TypeError, AttributeError):
             return unknown
 
@@ -542,15 +591,28 @@ class RecentNotifications:
     def _image_note(coverage, receipt, job):
         delivery = STATUSES.get(_delivery_status(receipt['status']), '状态未知')
         if coverage['coverage_status'] == 'partial':
-            note = f"首张部分图{delivery}；缺少 {' / '.join(coverage['missing_periods'])}"
+            note = f"首张部分图{delivery}"
+            if coverage['missing_periods']:
+                note += f"；缺少 {' / '.join(coverage['missing_periods'])}"
+            if coverage.get('missing_history_periods'):
+                note += '；历史范围尚未完成：' + ' / '.join(coverage['missing_history_periods'])
             state = job.get('status')
             retry = {'pending': '补图等待重试', 'running': '正在重试补图', 'failed': '补图重试失败',
                      'expired': '补图已过期，未补发', 'ready': '补图生成已完成，请查看关联图表回执',
                      'unavailable': '补图生成状态暂不可读取'}.get(state)
+            current = _job_history(job)
+            limited = [p for p, value in current.items() if value['state'] in ('unsupported','invalid')]
+            if limited:
+                retry = '历史范围受限：' + ' / '.join(p + ('来源暂不支持' if current[p]['state'] == 'unsupported' else '校验未通过') for p in limited)
             return note + ('；' + retry if retry else '')
         if receipt['id'].startswith('chart-complete:'):
-            return '补全图' + delivery + ('；三个周期齐全' if coverage['coverage_status'] == 'complete' else '；周期完整性未记录')
-        return '原始图' + delivery + ('；三个周期齐全' if coverage['coverage_status'] == 'complete' else '；周期完整性未记录')
+            note = '补全图' + delivery + ('；三个周期齐全' if coverage['coverage_status'] == 'complete' else '；周期完整性未记录')
+        else:
+            note = '原始图' + delivery + ('；三个周期齐全' if coverage['coverage_status'] == 'complete' else '；周期完整性未记录')
+        for period, value in coverage.get('history_coverage', {}).items():
+            if value['state'] == 'source_exhausted':
+                note += f'；{period}{value.get("source_label") or "当前来源"}已取尽' + ('（不足目标范围）' if value.get('target_reached') is False and value.get('target_days') else '')
+        return note
 
     def _image_records(self, identity, receipt, *, with_receipts=False):
         from .dingtalk_notifications import signal_key
@@ -586,6 +648,7 @@ class RecentNotifications:
                            'receipt_id': 'd.' + _pack(source['id']), 'delivery_status': _delivery_status(source['status']),
                            'created_at': source['created'], 'sent_at': source['sent'],
                            'generation_status': job.get('status'), 'next_attempt_at': job.get('next_try'),
+                           'generation_history': _job_history(job),
                            'status_note': self._image_note(coverage, source, job),
                            'url': f'/monitor/notifications/{identity}/images/{index}.png?version={name}' if valid else None,
                            'error': '' if valid else '保存的图片已过期或不可用',
