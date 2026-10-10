@@ -63,7 +63,7 @@ def test_shorter_period_batch_cannot_postpone_another_symbols_retry(tmp_path, in
         fast["market"], fast["code"], clock[0], "1m") - 60
     state["next_check_at"] = clock[0].timestamp() + 5
     service._schedule_monitor(clock[0], None)
-    assert len(live.started) == 1 and live.started[0]["symbols"] == [fast]
+    assert len(live.started) == 1 and live.started[0]["symbols"] == [{**fast, '_monitor_periods': ['30m']}]
     assert state["next_check_at"] == clock[0].timestamp() + interval
     # The short batch finishes; its next idle check remains in the future.
     live.finish(state["active_cutoffs"][fast_key])

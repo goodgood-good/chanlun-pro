@@ -9,7 +9,7 @@ from chanlun.screening.rules import CN
 from cl_app.services.screening import validate_settings
 from cl_app.services.signal_monitor import configure_periods, _consolidation_signal, _signal
 from tests.web.test_monitor_clock_wake import waiting_monitor
-from tests.web.test_signal_monitor import setup as setup, _seed, signal, consolidation
+from tests.web.test_signal_monitor import setup as setup, _seed, signal, consolidation, legacy_full_period_batch
 
 
 def running_periods(setup):
@@ -19,6 +19,7 @@ def running_periods(setup):
     cutoff = int(clock[0].timestamp()) - 300
     manual.finish(cutoff)
     service.tick()
+    legacy_full_period_batch(service, live)
     live.rows = [{**signal(), 'frequency': f, 'source_closed_at': cutoff} for f in ['1m', '5m']]
     live.state.update(source_revision='current', current_source_revision='current')
     return service, live, clock, cutoff
@@ -164,6 +165,7 @@ def contract_monitor(tmp_path, monkeypatch, periods=('1m', '5m')):
     service.screening.state.update(source_revision='contract-v1', current_source_revision='contract-v1')
     service._schedule_monitor(clock[0], None)
     live.state.update(source_revision='contract-v1', current_source_revision='contract-v1')
+    legacy_full_period_batch(service, live)
     return service, live, clock, key
 
 
@@ -220,6 +222,7 @@ def test_contract_can_be_rechecked_on_user_request_or_source_change(tmp_path, mo
         live.state.update(source_current=False, current_source_revision='contract-v2')
     service._schedule_monitor(clock[0], None)
     assert len(live.started) == 2
+    legacy_full_period_batch(service, live)
     live.errors = []
     live.state.update(source_revision='contract-v2', current_source_revision='contract-v2')
     live.finish(int(clock[0].timestamp()))

@@ -39,6 +39,13 @@ def preparing_history_periods(coverage):
             if coverage.get(period, {}).get('state') not in ('invalid', 'unsupported')]
 
 
+def _frequency_priority(payload):
+    try:
+        return int(json.loads(payload).get('frequency') in ('5m', '30m'))
+    except (ValueError, TypeError, AttributeError, RecursionError):
+        return 0
+
+
 class RenderedChart(bytes):
     """A real PNG plus the periods which were actually exported into it."""
 
@@ -67,13 +74,20 @@ class ChartStore:
         path = self.root / ".signing-key"
         if create:
             self.root.mkdir(parents=True, exist_ok=True)
+            temporary = self.root / ('.signing-key.' + secrets.token_hex(6) + '.tmp')
             try:
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError:
-                pass
-            else:
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(secrets.token_bytes(32))
+                # Both workers may publish their first PNG simultaneously.
+                # Link only a completely written key, never expose an empty
+                # O_EXCL destination to the other publisher.
+                try:
+                    os.link(temporary, path)
+                except FileExistsError:
+                    pass
+            finally:
+                temporary.unlink(missing_ok=True)
         value = path.read_bytes()
         if len(value) != 32:
             raise ValueError("chart signing key unavailable")
@@ -153,7 +167,8 @@ def render_signal_chart(event, runs_root, *, completion=False, history_period=No
     from .tradingview_snapshot import capture, prepare_history_layout, PanelImageCache
     cache = PanelImageCache(event, Path(runs_root).parent / 'chart_panel_cache')
     reused = cache.read()
-    payload = prepare_history_layout(event, runs_root, reused_images=reused, history_period=history_period)
+    payload = prepare_history_layout(event, runs_root, reused_images=reused, history_period=history_period,
+                                     initial_only=not completion, defer_context=completion)
     if completion and preparing_history_periods(payload['history_coverage']):
         raise ChartHistoryPending(payload['history_coverage'])
     return capture(payload, panel_sink=cache.save,
@@ -240,15 +255,19 @@ class NotificationCharts:
         self.check_public = check_public
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self._history_wake = threading.Event()
         self._thread = None
+        self._history_thread = None
         self.created_at = outbox.now()
         self._runtime_error = ''
+        self._history_runtime_error = ''
         from .notification_evidence import NotificationEvidence
         self.archive=NotificationEvidence(self.root/'notification_evidence',now=outbox.now)
         self._archive_error=''
         self._archive_cleanup_error=''
         from .worker_progress import WorkerProgress
         self.progress = WorkerProgress(180)
+        self.history_progress = WorkerProgress(180)
 
     @contextmanager
     def _db(self, *, timeout=5):
@@ -257,6 +276,7 @@ class NotificationCharts:
         try:
             db.row_factory=sqlite3.Row
             db.create_function('holding_priority', 1, queued_priority)
+            db.create_function('frequency_priority', 1, _frequency_priority)
             db.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,event TEXT,status TEXT,created REAL,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0,error TEXT DEFAULT '',updated REAL)")
             if 'updated' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
                 try:
@@ -342,6 +362,7 @@ class NotificationCharts:
                     self.outbox.finish_inline_chart(event,job['status'],job['error'])
         if inserted:
             self._wake.set()
+            self._history_wake.set()
 
     def begin_window(self, since):
         with self._db() as db:
@@ -411,14 +432,46 @@ class NotificationCharts:
                        "(SELECT 1 FROM signal_payloads p WHERE p.outbox_id=outbox.id AND p.events=?)",
                        (error,identity,payload))
 
-    def process_one(self):
+    def process_one(self, lane=None):
+        """One first image or one history slice; at most two across processes.
+
+        Hold the lane lock beyond the SQLite claim lease. Slow provider/browser
+        calls therefore cannot be reclaimed while their owner is still alive.
+        Process exit releases the lock, preserving the existing crash retry.
+        """
+        from chanlun.persistence.file_lock import interprocess_file_lock, InterprocessLockTimeout
+        if lane not in (None, 'initial', 'history'):
+            raise ValueError('unknown chart worker lane')
+        for selected_lane in (('initial', 'history') if lane is None else (lane,)):
+            try:
+                with interprocess_file_lock(self.root / ('.chart-' + selected_lane + '.lock'),
+                                            timeout_seconds=.01, poll_seconds=.01):
+                    if self._process_one(selected_lane):
+                        return True
+            except InterprocessLockTimeout:
+                continue
+        return False
+
+    def _process_one(self, lane):
         now=self.outbox.now()
+        worker_progress = self.progress if lane == 'initial' else self.history_progress
         with self._db() as db:
+            # Schema migration precedes an explicit serialized claim. The lane
+            # file lock bounds execution across separate outbox instances too.
+            db.commit()
+            db.execute('BEGIN IMMEDIATE')
+            if lane == 'history' and db.execute(
+                    "SELECT 1 FROM jobs WHERE status IN ('pending','running') AND initial_image_hash='' "
+                    "AND next_try<=? LIMIT 1", (now,)).fetchone():
+                return False
+            condition = "initial_image_hash=''" if lane == 'initial' else "initial_image_hash!=''"
             row=db.execute("SELECT * FROM jobs WHERE status IN ('pending','running') AND next_try<=? "
+                           "AND " + condition + " "
                            "ORDER BY CASE WHEN error='等待信号有效性复核' THEN 0 ELSE holding_priority(event) END DESC, "
+                           "CASE WHEN error='等待信号有效性复核' THEN 0 ELSE frequency_priority(event) END DESC, "
                            "next_try,created,rowid LIMIT 1",(now,)).fetchone()
             if row is None:
-                return
+                return False
             db.execute("UPDATE jobs SET status='running',attempts=attempts+1,next_try=? WHERE id=?",(now+60,row['id']))
         try:
             event=json.loads(row['event'])
@@ -426,7 +479,7 @@ class NotificationCharts:
         except (ValueError,TypeError,KeyError):
             with self._db() as db:
                 db.execute("UPDATE jobs SET status='failed',error='图表任务数据损坏',updated=? WHERE id=?",(self.outbox.now(),row['id']))
-            return
+            return True
 
         def check_deadline():
             if not 0<=self.outbox.now()-event['recorded_at']<1800:
@@ -439,6 +492,14 @@ class NotificationCharts:
         progress = row['history_progress'] or ''
         attempts = row['attempts'] + 1
         initial_hash = row['initial_image_hash'] or self.outbox.initial_chart_hash(event)
+        if lane == 'initial' and initial_hash:
+            # The first receipt can survive a crash before the chart job write.
+            # Move recovered completion work out of the latency-sensitive lane.
+            with self._db() as db:
+                db.execute("UPDATE jobs SET status='pending',initial_image_hash=?,attempts=?,next_try=0 "
+                           "WHERE id=? AND status='running'", (initial_hash,row['attempts'],row['id']))
+            self._history_wake.set()
+            return False
         retry_delay = 30
         selected = None
 
@@ -474,7 +535,7 @@ class NotificationCharts:
         else:
             phase='信号复核'
             try:
-                self.progress.phase('signal_validation')
+                worker_progress.phase('signal_validation')
                 if self.outbox.signal_validator:
                     valid,pending=self.outbox.signal_validator([event])
                     check_deadline()
@@ -482,17 +543,17 @@ class NotificationCharts:
                         with self._db() as db:
                             db.execute("UPDATE jobs SET status='pending',attempts=?,next_try=?,error='等待信号有效性复核' WHERE id=? AND status='running'",
                                        (row['attempts'],now+5,row['id']))
-                        return
+                        return True
                     if not valid:
                         with self._db() as db:
                             db.execute("UPDATE jobs SET status='expired',error='信号已更新',updated=? WHERE id=?",(self.outbox.now(),row['id']))
                         self.outbox.finish_inline_chart(event,'expired','信号已更新，图文消息已撤销')
-                        return
+                        return True
                 check_deadline()
                 phase='冻结证据绘图'
-                self.progress.phase('chart_render')
+                worker_progress.phase('chart_render')
                 outstanding = preparing_history_periods(history)
-                ordered = ('1m', '5m', '30m')
+                ordered = ('5m', '30m', '1m')
                 selected = next((ordered[(turn + offset) % 3] for offset in range(3)
                     if ordered[(turn + offset) % 3] in outstanding), None) if initial_hash else None
                 if selected:
@@ -506,18 +567,18 @@ class NotificationCharts:
                     history = coverage.get('history_coverage', {})
                 incomplete_history = missing_history_periods(history)
                 phase='图片发布'
-                self.progress.phase('image_publish')
+                worker_progress.phase('image_publish')
                 url=self.store.publish(png)
                 if self.check_public:
                     phase='公网访问校验'
-                    self.progress.phase('public_image_check')
+                    worker_progress.phase('public_image_check')
                     import requests
                     response=requests.get(url,timeout=(2,4),allow_redirects=False)
                     if response.status_code!=200 or hashlib.sha256(response.content).digest()!=hashlib.sha256(png).digest():
                         raise ValueError('public-chart-unavailable')
                 check_deadline()
                 phase='图片入队'
-                self.progress.phase('image_enqueue')
+                worker_progress.phase('image_enqueue')
                 image_hash = hashlib.sha256(png).hexdigest()
                 previous = self.store.coverage(initial_hash) if initial_hash else None
                 if initial_hash and (missing or preparing_history_periods(history)):
@@ -564,6 +625,9 @@ class NotificationCharts:
                         json.dumps(history),json.dumps(missing_history_periods(history)),progress,turn,stalls,attempts,row['id']))
         if not initial_hash or status == 'expired':
             self.outbox.finish_inline_chart(event,status,error)
+        elif status == 'pending':
+            self._history_wake.set()
+        return True
 
     def cleanup(self):
         """Expire historical diagnostics even when no new charts are generated."""
@@ -588,10 +652,12 @@ class NotificationCharts:
                 db.execute("DELETE FROM jobs WHERE status IN ('ready','failed','expired') AND COALESCE(updated,created)<?",
                            (self.outbox.now()-8*86400,))
                 db.execute('DELETE FROM evidence_archive_jobs WHERE id NOT IN (SELECT id FROM jobs)')
-        try:self.archive.cleanup()
+        try:
+            self.archive.cleanup()
         except (OSError,ValueError,TypeError,KeyError):
             self._archive_cleanup_error='通知证据清理暂不可用'
-        else:self._archive_cleanup_error=''
+        else:
+            self._archive_cleanup_error=''
 
     def archive_one(self):
         now=self.outbox.now()
@@ -611,8 +677,9 @@ class NotificationCharts:
             if now>=row['created']+self.archive.lifetime:
                 status,error='expired','证据留存期限已过'
             else:
-                event=json.loads(row['event']);self._validate_job_event(event,row['id'])
-                self.progress.phase('evidence_archive')
+                event=json.loads(row['event'])
+                self._validate_job_event(event,row['id'])
+                self.history_progress.phase('evidence_archive')
                 self.archive.capture(event,self.root/'runs',row['created'])
                 status,error='saved',''
         except (OSError,sqlite3.Error) as exc:
@@ -627,7 +694,8 @@ class NotificationCharts:
 
     def archive_referenced_runs(self):
         from .notification_handoff import evidence_references
-        if not (self.root/'chart_jobs.sqlite3').exists():return set()
+        if not (self.root/'chart_jobs.sqlite3').exists():
+            return set()
         with self._read_db() as db:
             rows=db.execute("SELECT j.event FROM jobs j LEFT JOIN evidence_archive_jobs a ON a.id=j.id "
                 "WHERE j.id NOT LIKE 'recovery:%' AND COALESCE(a.status,'retry')='retry' "
@@ -636,9 +704,11 @@ class NotificationCharts:
         refs=set()
         for row in rows:
             try:
-                event=json.loads(row[0]);self._validate_job_event(event)
+                event=json.loads(row[0])
+                self._validate_job_event(event)
                 refs.update(evidence_references([event]))
-            except (ValueError,TypeError,KeyError,AttributeError):continue
+            except (ValueError,TypeError,KeyError,AttributeError):
+                continue
         return refs
 
     def archive_snapshot(self):
@@ -673,7 +743,8 @@ class NotificationCharts:
         return {'pending':counts.get('pending',0)+counts.get('running',0),'failed':counts.get('failed',0),
                 'last_success_at':last_success,
                 'evidence_archive':self.archive_snapshot(),
-                'last_error':self._runtime_error or (active[0] if active else failed[0] if failed else '')}
+                'history_worker': self.history_progress.snapshot(),
+                'last_error':self._runtime_error or self._history_runtime_error or (active[0] if active else failed[0] if failed else '')}
 
     def start(self, enabled):
         if self._thread and self._thread.is_alive():
@@ -684,37 +755,60 @@ class NotificationCharts:
         except (OSError,sqlite3.Error):
             self._runtime_error='图表任务存储暂不可用，文字通知继续发送'
         self._stop.clear()
-        def loop():
+        def loop(lane):
             cleaned=0
+            wake = self._wake if lane == 'initial' else self._history_wake
+            progress = self.progress if lane == 'initial' else self.history_progress
+            condition = "initial_image_hash=''" if lane == 'initial' else "initial_image_hash!=''"
             while not self._stop.is_set():
-                self._wake.clear()
+                wake.clear()
                 wait_seconds = 2.0
                 next_attempt_at = None
                 try:
-                    with self.progress.cycle('chart_recovery'):
-                        if self.outbox.now()-cleaned>3600:
-                            self.cleanup();cleaned=self.outbox.now()
+                    with progress.cycle('chart_recovery' if lane == 'initial' else 'history_queue'):
+                        if lane == 'history' and self.outbox.now()-cleaned>3600:
+                            self.cleanup()
+                            cleaned=self.outbox.now()
                         if enabled():
-                            self.recover();self.process_one()
-                            self._runtime_error=''
+                            if lane == 'initial':
+                                self.recover()
+                            processed = self.process_one(lane)
+                            if lane == 'initial':
+                                self._runtime_error=''
+                            else:
+                                self._history_runtime_error=''
                             with self._db() as db:
                                 next_attempt_at = db.execute(
-                                    "SELECT MIN(next_try) FROM jobs WHERE status IN ('pending','running')"
+                                    "SELECT MIN(next_try) FROM jobs WHERE status IN ('pending','running') AND " + condition
                                 ).fetchone()[0]
-                        try:self.archive_one()
-                        except (OSError,sqlite3.Error):
-                            self._archive_error='原始证据归档暂不可用，正在等待恢复'
+                            if lane == 'history' and not processed and next_attempt_at is not None and next_attempt_at <= self.outbox.now():
+                                # Initial jobs or another process own the lane.
+                                # Yield without spinning on a due history task.
+                                next_attempt_at = self.outbox.now() + .25
+                        if lane == 'history':
+                            try:
+                                self.archive_one()
+                            except (OSError,sqlite3.Error):
+                                self._archive_error='原始证据归档暂不可用，正在等待恢复'
                     if next_attempt_at is not None:
-                        # Keep one renderer, but do not idle between ready jobs.
+                        # Neither lane idles between ready work of its own.
                         # Recompute after archiving so its work is not waited twice.
                         wait_seconds = max(0.01, min(2.0, next_attempt_at - self.outbox.now()))
                 except (OSError,ValueError,sqlite3.Error):
-                    self._runtime_error='图表任务暂不可用，等待恢复；文字通知继续发送'
-                self._wake.wait(wait_seconds)
-        self._thread=threading.Thread(target=loop,name='NotificationChartRenderer',daemon=True)
+                    if lane == 'initial':
+                        self._runtime_error='图表任务暂不可用，等待恢复；文字通知继续发送'
+                    else:
+                        self._history_runtime_error='历史图表任务暂不可用，等待恢复'
+                wake.wait(wait_seconds)
+        self._thread=threading.Thread(target=loop,args=('initial',),name='NotificationChartRenderer',daemon=True)
+        self._history_thread=threading.Thread(target=loop,args=('history',),name='NotificationChartHistory',daemon=True)
         self._thread.start()
+        self._history_thread.start()
 
     def stop(self):
-        self._stop.set();self._wake.set()
-        if self._thread and self._thread is not threading.current_thread():
-            self._thread.join(timeout=2)
+        self._stop.set()
+        self._wake.set()
+        self._history_wake.set()
+        for thread in (self._thread, self._history_thread):
+            if thread and thread is not threading.current_thread():
+                thread.join(timeout=2)

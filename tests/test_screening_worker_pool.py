@@ -25,8 +25,12 @@ def echo_worker(connection):
                 multiprocessing.Event().wait(120)
             if stock.get('crash'):
                 os._exit(3)
+            if stock.get('delay'):
+                time.sleep(stock['delay'])
             response = store_reply(task, {'code': 'wrong-symbol' if stock.get('wrong_symbol') else stock['code'],
                                         'market': stock.get('market', 'a'), 'rows': [],
+                                        'job_tag': stock.get('job_tag'),
+                                        'periods': stock.get('_monitor_periods', task['settings']['frequencies']),
                                         'pid': os.getpid(), 'settings': task['settings'],
                                         'contexts': task['contexts'], 'request': task['request'],
                                         'run_dir': task['run_dir'], 'holding': stock.get('holding')})
@@ -67,6 +71,86 @@ def test_completed_child_reused_with_wholly_new_job_parameters(pool, tmp_path):
     assert second['contexts'] == {'30m': {'cutoff': 200}} and second['request'] == {}
     assert second['holding'] is False and second['run_dir'] == str(tmp_path/'second')
     assert pool.snapshot()['started_processes'] == 1
+
+
+@pytest.mark.parametrize('separation', ['code', 'market', 'period'])
+def test_reordered_batch_returns_single_period_keys_to_original_spawned_pid(pool, tmp_path, separation):
+    first = {'code': 'SH.600000', 'market': 'a', 'name': 'one', '_monitor_periods': ['5m']}
+    second = {**first, 'name': 'two'}
+    second.update({'code': 'SH.600001'} if separation == 'code' else
+                  {'market': 'us'} if separation == 'market' else {'_monitor_periods': ['30m']})
+    def key(row):
+        return row['market'], row['code'], tuple(row['periods'])
+    before = results(scan(pool, tmp_path/'warm', [first, second], workers=2))
+    after = results(scan(pool, tmp_path/'reversed', [second, first], workers=2))
+    assert len({row['pid'] for row in before}) == 2
+    assert {key(row): row['pid'] for row in before} == {key(row): row['pid'] for row in after}
+    assert pool.snapshot()['affinity_hits'] == 2 and pool.started_processes == 2
+
+
+def test_busy_affinity_owner_does_not_block_an_available_worker(pool, tmp_path):
+    a = {'code': 'SH.600000', 'name': 'one', '_monitor_periods': ['5m']}
+    b = {'code': 'SH.600001', 'name': 'two', '_monitor_periods': ['5m']}
+    warm = {row['code']: row['pid'] for row in results(scan(pool, tmp_path/'warm', [a, b], workers=2))}
+    completed = results(scan(pool, tmp_path/'busy', [
+        {**b, 'delay': 1., 'job_tag': 'busy'}, {**a, 'job_tag': 'ready'},
+        {**b, 'job_tag': 'followup'}], workers=2))
+    tags = [row['job_tag'] for row in completed]
+    assert tags.index('followup') < tags.index('busy')
+    followup = next(row for row in completed if row['job_tag'] == 'followup')
+    assert followup['pid'] == warm[a['code']] != warm[b['code']]
+
+
+@pytest.mark.parametrize('group', ['holding', 'watchlist', 'critical_period', 'intervening_group'])
+def test_affinity_does_not_jump_pending_priority_group_boundaries(pool, tmp_path, group):
+    hot = {'code': 'SH.600000', 'name': 'hot', '_monitor_periods': ['1m' if group == 'critical_period' else '5m']}
+    results(scan(pool, tmp_path/'warm', [hot]))
+    head = {'code': 'SH.600001', 'name': 'first', '_monitor_periods': ['5m']}
+    if group == 'holding':
+        head['holding'] = True
+    elif group == 'watchlist':
+        head['origin'] = 'watchlist'
+    pending = [head, hot]
+    if group == 'intervening_group':
+        pending.insert(1, {'code':'SH.600002','name':'boundary','holding':True,'_monitor_periods':['5m']})
+    completed = results(scan(pool, tmp_path/'priority', pending))
+    assert [row['code'] for row in completed] == [stock['code'] for stock in pending]
+
+
+def test_same_priority_prefers_most_recent_warm_key_and_unknown_keys_keep_fifo(pool, tmp_path):
+    stocks = [{'code': f'SH.60000{n}', 'name': str(n), '_monitor_periods':['5m']} for n in range(4)]
+    results(scan(pool, tmp_path/'warm', stocks[:2]))
+    reordered = results(scan(pool, tmp_path/'hot', stocks[:2]))
+    assert [row['code'] for row in reordered] == [stocks[1]['code'], stocks[0]['code']]
+    ordinary = results(scan(pool, tmp_path/'cold', stocks[2:]))
+    assert [row['code'] for row in ordinary] == [stock['code'] for stock in stocks[2:]]
+
+
+def test_worker_retirement_removes_affinity_and_never_owns_a_new_child(pool, tmp_path):
+    stocks = [{'code': f'SH.60000{n}', 'name': str(n)} for n in range(2)]
+    old = results(scan(pool, tmp_path/'warm', stocks, workers=2))
+    old_ids = {slot['affinity_id'] for slot in pool.slots}
+    assert len(pool._affinity) == 2
+    pool.max_tasks = 1
+    new = results(scan(pool, tmp_path/'recycled', list(reversed(stocks)), workers=2))
+    assert not {row['pid'] for row in old} & {row['pid'] for row in new}
+    assert not old_ids & {entry[0] for entry in pool._affinity.values()}
+    assert pool.snapshot()['affinity_hits'] == 0
+    pool.close()
+    assert not pool._affinity
+
+
+def test_affinity_holding_protection_is_bounded_per_worker_and_per_pool(pool, tmp_path, monkeypatch):
+    from chanlun.screening import worker_pool
+    monkeypatch.setattr(worker_pool, 'MAX_AFFINITY_KEYS', 2)
+    monkeypatch.setattr(worker_pool, 'MAX_SLOT_AFFINITY_KEYS', 2)
+    stocks = [{'code':f'SH.60000{n}','name':str(n),'holding':n == 0} for n in range(3)]
+    results(scan(pool, tmp_path/'ordinary', stocks))
+    assert len(pool._affinity) == 2
+    assert ('a', stocks[0]['code'], '5m') in pool._affinity
+    results(scan(pool, tmp_path/'held', [{**stock,'holding':True} for stock in stocks[1:]]))
+    assert len(pool._affinity) == 2
+    assert ('a', stocks[0]['code'], '5m') not in pool._affinity
 
 
 def test_memory_pressure_releases_idle_workers_and_resumes_without_losing_stocks(pool,tmp_path,monkeypatch):

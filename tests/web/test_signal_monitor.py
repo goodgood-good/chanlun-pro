@@ -75,6 +75,16 @@ def signal(code="SH.600088", stage="confirmed"):
             "point": {"point_id": "point", "point_type": "3buy", "center_ordinal": 1, "status": stage, "available_at": 100}}
 
 
+def legacy_full_period_batch(service, live):
+    """Exercise recovery of a pre-upgrade batch containing several periods."""
+    periods = live.state['settings']['frequencies']
+    for symbol in live.state['settings']['symbols']:
+        symbol['_monitor_periods'] = list(periods)
+    service._load()['active_periods'] = {
+        f"{s['market']}:{s['code']}": list(periods) for s in live.state['settings']['symbols']}
+    service._load()['deferred_monitor_periods'] = {}
+
+
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     monkeypatch.setattr("cl_app.services.signal_monitor.watchlist_symbols", lambda: [])
@@ -131,6 +141,7 @@ def test_missing_period_proof_cannot_produce_a_false_exit_and_recovers_without_r
     cutoff = trading_context(clock[0], "5m", 1, 1)["cutoff"]
     manual.finish(cutoff)
     service.tick()
+    legacy_full_period_batch(service, live)
     live.rows = [signal(), slower]
     live.finish(cutoff)
     service.tick()
@@ -144,6 +155,7 @@ def test_missing_period_proof_cannot_produce_a_false_exit_and_recovers_without_r
 
     service.check_now()
     service.tick()
+    legacy_full_period_batch(service, live)
     live.committed_results = missing_period
     live.rows = []
     live.finish(cutoff)
@@ -154,6 +166,7 @@ def test_missing_period_proof_cannot_produce_a_false_exit_and_recovers_without_r
     assert any(error.get("reasons") == ["PERIOD_CHECK_MISSING"] for error in service.snapshot()["errors"])
     service.check_now()
     service.tick()
+    legacy_full_period_batch(service, live)
     live.committed_results = original
     live.rows = [slower]
     live.finish(cutoff)
@@ -432,11 +445,13 @@ def test_one_period_failure_does_not_hide_a_successful_period_signal_exit(setup)
     cutoff = trading_context(clock[0], "5m", 1, 1)["cutoff"]
     manual.finish(cutoff)
     service.tick()
+    legacy_full_period_batch(service, live)
     live.rows = [minute_signal, signal()]
     live.finish(cutoff)
     service.tick()
     service.check_now()
     service.tick()
+    legacy_full_period_batch(service, live)
     live.rows = []
     live.errors = [{"code": "SH.600088", "market": "a", "frequency": "5m",
                     "reasons": ["STALE_DATA"]}]

@@ -1,6 +1,6 @@
 """Bounded, cancellable worker reuse across independent monitor batches."""
 from multiprocessing.connection import wait as wait_connections
-from collections import deque
+from collections import deque, OrderedDict
 import multiprocessing
 import os
 from pathlib import Path
@@ -12,8 +12,28 @@ from .worker_lifetime import WindowsWorkerJob
 from .worker_transport import JobInputReader, bounded_message, store_job, store_reply, read_reply, discard_reply
 
 
+MAX_AFFINITY_KEYS = 192
+MAX_SLOT_AFFINITY_KEYS = 12
+
+
+def _affinity_key(stock, settings):
+    periods = stock.get('_monitor_periods', settings['frequencies'])
+    if len(periods) != 1:
+        return None
+    return stock.get('market', 'a'), stock['code'], periods[0]
+
+
+def _priority_group(stock, settings):
+    periods = stock.get('_monitor_periods', settings['frequencies'])
+    # The caller owns ordering (including live/retry waves). Never jump over
+    # the first different contiguous group to reach a previously warm key.
+    period_group = 'critical' if periods and all(p in {'5m', '30m'} for p in periods) else tuple(periods)
+    return stock.get('holding') is True, stock.get('origin') == 'watchlist', period_group
+
+
 def _failed_result(stock, settings, reason):
     return {'code': stock['code'], 'market': stock.get('market', 'a'), 'name': stock['name'],
+            'requested_frequencies':list(stock.get('_monitor_periods',settings['frequencies'])),
             'rows': [{'code': stock['code'], 'market': stock.get('market', 'a'),
                       'name': stock['name'], 'frequency': frequency, 'selected': [],
                       'recent_rejections': [], 'reason_counts': {}, 'data_errors': [reason]}
@@ -36,7 +56,7 @@ def reusable_worker(connection):
 
 class ReusableWorkerPool:
     """Sequential batches, independent task parameters, bounded process ages."""
-    def __init__(self, revision, *, max_tasks=64, worker_target=reusable_worker, revision_reader=source_revision):
+    def __init__(self, revision, *, max_tasks=256, worker_target=reusable_worker, revision_reader=source_revision):
         if type(max_tasks) is not int or max_tasks < 1:
             raise ValueError('worker task limit must be positive')
         self.revision = revision
@@ -49,6 +69,9 @@ class ReusableWorkerPool:
         self.job = WindowsWorkerJob() if os.name == 'nt' else None
         self.started_processes = 0
         self.completed_tasks = 0
+        self._affinity = OrderedDict()
+        self._affinity_sequence = 0
+        self.affinity_hits = 0
 
     def _start(self):
         if self.revision_reader() != self.revision:
@@ -57,7 +80,7 @@ class ReusableWorkerPool:
         parent, child = context.Pipe()
         process = context.Process(target=self.worker_target, args=(child,))
         slot = {'process': process, 'connection': parent, 'stock': None,
-                'started': 0.0, 'stopped': False, 'tasks': 0}
+                'started': 0.0, 'stopped': False, 'tasks': 0, 'affinity_id': uuid4().hex}
         try:
             process.start()
             child.close()
@@ -76,9 +99,45 @@ class ReusableWorkerPool:
     def _discard(self, slot):
         _stop_worker(slot)
         self.slots.remove(slot)
+        for key, value in list(self._affinity.items()):
+            if value[0] == slot['affinity_id']:
+                del self._affinity[key]
+
+    def _remember(self, slot, stock, settings):
+        key = _affinity_key(stock, settings)
+        if key is None or slot not in self.slots:
+            return
+        self._affinity_sequence += 1
+        protected = stock.get('holding') is True and key[2] in {'5m', '30m'}
+        self._affinity.pop(key, None)
+        self._affinity[key] = (slot['affinity_id'], protected, self._affinity_sequence)
+        local = [k for k, value in self._affinity.items() if value[0] == slot['affinity_id']]
+        while len(local) > MAX_SLOT_AFFINITY_KEYS:
+            victim = next((k for k in local if not self._affinity[k][1]), local[0])
+            del self._affinity[victim]
+            local.remove(victim)
+        while len(self._affinity) > MAX_AFFINITY_KEYS:
+            victim = next((k for k, value in self._affinity.items() if not value[1]), next(iter(self._affinity)))
+            del self._affinity[victim]
+
+    def _take_pending(self, pending, slot, settings):
+        group = _priority_group(pending[0][1], settings)
+        selected, recent = 0, -1
+        for index, (_, stock) in enumerate(pending):
+            if _priority_group(stock, settings) != group:
+                break
+            owner = self._affinity.get(_affinity_key(stock, settings))
+            if owner is not None and owner[0] == slot['affinity_id'] and owner[2] > recent:
+                selected, recent = index, owner[2]
+        if recent >= 0:
+            self.affinity_hits += 1
+        value = pending[selected]
+        del pending[selected]
+        return value
 
     def snapshot(self):
         return {'started_processes': self.started_processes, 'completed_tasks': self.completed_tasks,
+                'affinity_hits': self.affinity_hits, 'affinity_keys': len(self._affinity),
                 'worker_pids': [s['process'].pid for s in self.slots if s['process'].is_alive()]}
 
     def scan(self, stocks, settings, contexts, run_dir, workers, revision, *, request,
@@ -136,14 +195,13 @@ class ReusableWorkerPool:
                     if slot is not None and slot['stock'] is not None:
                         continue
                     if slot is not None and (not slot['process'].is_alive() or slot['tasks'] >= self.max_tasks):
-                        _stop_worker(slot)
-                        self.slots.pop(index)
+                        self._discard(slot)
                         slot = self._start()
                         self.slots.insert(index, slot)
                     if slot is None:
                         slot = self._start()
                         self.slots.append(slot)
-                    ordinal, stock = pending.popleft()
+                    ordinal, stock = self._take_pending(pending, slot, settings)
                     ticket = f'{uuid4().hex}_{ordinal}'
                     task = bounded_message({'ticket': ticket, 'index': ordinal,
                                             'inputs': inputs, 'revision': revision})
@@ -197,6 +255,8 @@ class ReusableWorkerPool:
                     if result is not None:
                         slot['stock'] = None
                         slot['tasks'] += 1
+                        if accepted_reply is not None:
+                            self._remember(slot, stock, settings)
                         self.completed_tasks += 1
                         yield result, [s['stock']['code'] for s in self.slots if s['stock'] is not None]
                         if accepted_reply is not None and not discard_reply(*accepted_reply, run_dir):

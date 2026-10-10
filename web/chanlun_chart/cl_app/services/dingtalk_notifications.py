@@ -302,7 +302,7 @@ class DingTalkOutbox:
         confirmed, waiting = result.get("selected", []), result.get("observations", [])
         failures = {(e.get("market", "a"), e["code"]) for e in result.get("errors", [])}
         lines = ["缠论 Pro · 盘后选股完成", f"完成时间：{date(result.get('finished_at') or self.now())}",
-                 f"检查标的：{result.get('completed', 0)} / {result.get('total', 0)}",
+                 f"检查标的：{result.get('completed_symbols',result.get('completed', 0))} / {result.get('total_symbols',result.get('total', 0))}",
                  f"命中：{len({(r.get('market','a'),r['code']) for r in confirmed})} 个标的",
                  f"已确认买点：{sum(r['point']['point_type'].endswith('buy') for r in confirmed)} 个；卖点：{sum(r['point']['point_type'].endswith('sell') for r in confirmed)} 个",
                  f"数据异常：{len(failures)} 个标的", "结果摘要："]

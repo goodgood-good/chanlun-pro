@@ -16,6 +16,33 @@ import pandas as pd
 REPLAY_CHECKS = ("cold_rebuild", "confirmation_replay", "confirmation_boundary")
 
 
+def calculation_attrs(frame):
+    """Keep semantic metadata; remove only known acquisition progress fields.
+
+    Coverage and suspension eligibility are revalidated on every scan. Provider
+    progress advances between closed bars and must not revise those bars' CL
+    identity. Unknown fields, source/time contracts and price metadata remain
+    part of the identity, so adding a new provider contract fails closed.
+    """
+    attrs = {k: v for k, v in frame.attrs.items()
+             if not k.startswith("_screening_") and k not in {
+                 "qmt_history_read_mode", "screening_suspensions",
+                 "canonical_source_progress", "canonical_minute_cutoff", "source_minute_count",
+             }}
+    coverage = attrs.get("canonical_history_coverage")
+    if isinstance(coverage, dict):
+        coverage = {k: v for k, v in coverage.items() if k not in {
+            "source_origin", "target_reached", "can_resume", "complete", "reason",
+            "progress_token", "available_rows", "required_rows", "retry_after",
+            "raw_minute_rows", "requested_from", "requested_to", "available_from", "available_to",
+        }}
+        diagnostics = coverage.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            coverage["diagnostics"] = {k: v for k, v in diagnostics.items() if k != "expected_cutoff"}
+        attrs["canonical_history_coverage"] = coverage
+    return attrs
+
+
 def input_fingerprint(frame, code, frequency):
     digest = hashlib.sha256()
     digest.update(pd.util.hash_pandas_object(frame, index=False).values.tobytes())
@@ -24,8 +51,7 @@ def input_fingerprint(frame, code, frequency):
     # the input. Eligibility windows are checked again on every scan.
     payload = {"code": code, "frequency": frequency,
                "columns": list(frame.columns), "dtypes": [str(t) for t in frame.dtypes],
-               "attrs": {k: v for k, v in frame.attrs.items()
-                         if not k.startswith("_screening_") and k not in {"qmt_history_read_mode", "screening_suspensions"}}}
+               "attrs": calculation_attrs(frame)}
     digest.update(json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str, allow_nan=False).encode())
     return digest.hexdigest()
 

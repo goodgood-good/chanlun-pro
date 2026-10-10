@@ -87,12 +87,15 @@ def is_a_share(stock: dict) -> bool:
 
 def snapshot_for(frame, code, frequency, *, include_consolidation=False):
     """Snapshot the completed, end-labelled screening input (including replays)."""
-    from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd
+    from chanlun.screening.runtime_cache import runtime_for_snapshot
+    with runtime_for_snapshot(frame, code, frequency) as runtime:
+        return _snapshot_from_runtime(frame, code, frequency, runtime,
+                                      include_consolidation=include_consolidation)
+
+
+def _snapshot_from_runtime(frame, code, frequency, runtime, *, include_consolidation=False):
     from chanlun.cl_utils.tv_chart import cl_data_to_tv_chart
     market = frame.attrs.get("screening_market", "a")
-    runtime = build_strict_chart_cd(
-        market=market, code=code, frequency=frequency, frame=frame, last_bar_closed=True,
-    )
     if runtime.cd is None:
         raise ValueError(f"{runtime.error_code}: {runtime.error_message}")
     chart = cl_data_to_tv_chart(frame, {"chart_show_bi": "1", "chart_show_xd": "1", "chart_show_fx": "1"},
@@ -517,9 +520,14 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             append_proofs = (read_append_proofs(cache_path,frame,code,frequency,calculation_revision)
                              if cached is None and cache_path is not None and not force_rebuild else {})
             structure_started = time.monotonic()
-            snapshot = cached["snapshot"] if cached is not None else (
-                snapshot_for(frame, code, frequency, include_consolidation=True) if include_consolidation
-                else snapshot_for(frame, code, frequency))
+            from chanlun.screening.runtime_cache import incremental_snapshot_scope
+            with incremental_snapshot_scope(cache_root, calculation_revision, enabled=not force_rebuild,
+                                            priority=include_consolidation and frequency in {"5m", "30m"}) as continuation:
+                snapshot = cached["snapshot"] if cached is not None else (
+                    snapshot_for(frame, code, frequency, include_consolidation=True) if include_consolidation
+                    else snapshot_for(frame, code, frequency))
+            row["structure_calculation"] = ({"mode": "snapshot", "reused_bars": len(frame), "appended_bars": 0}
+                                             if cached is not None else continuation)
             reviewed = cached["reviewed"] if cached is not None else append_proofs
             timings['structure'] = (time.monotonic()-structure_started)*1000
             validation_started = time.monotonic()
@@ -836,6 +844,7 @@ def _scan_worker_symbol_with_capacity(stock, settings, contexts, run_dir, revisi
                   "error": f"{type(exc).__name__}: {exc}"}
         if isinstance(exc, MarketDataContractError):
             result["reasons"] = [exc.reason]
+    result['requested_frequencies'] = list(stock.get('_monitor_periods',settings['frequencies']))
     return result
 
 
@@ -871,7 +880,7 @@ def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,
     request_path = Path(run_dir, "request.json")
     request = json.loads(request_path.read_text(encoding="utf-8")) if request_path.is_file() else {}
     options = {"worker_target": worker_target, "revision_reader": lambda: revision} if worker_target else {}
-    pool = ReusableWorkerPool(revision, max_tasks=min(64,max(1,len(stocks))), **options)
+    pool = ReusableWorkerPool(revision, max_tasks=min(256,max(1,len(stocks))), **options)
     try:
         yield from pool.scan(stocks, settings, contexts, run_dir, workers, revision,
                              request=request, timeout_seconds=timeout_seconds, capacity_callback=capacity_callback)
@@ -1050,6 +1059,15 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
                          "scope_label": {"all_a": "行情源 A 股股票池", "all_a_watchlist": "A 股 + 人工关注组（各市场）",
                                          "watchlist": "人工关注组（各市场）", "symbols": "选股候选（跨市场）"}.get(settings["scope"], "指定股票")})
         write_json(run_dir / "universe.json", stocks)
+        period_progress = None
+        if (request.get('incremental_periods') is True
+                and settings.get('alert_mode') == 'native_center_signals'
+                and settings.get('strategy') != STRATEGY):
+            from .period_tasks import PeriodProgress, period_tasks
+            period_progress = PeriodProgress(stocks, settings['frequencies'])
+            state.update(progress_unit='symbol_period', total_symbols=len(stocks), completed_symbols=0)
+            stocks = period_tasks(stocks, settings['frequencies'])
+            state['total'] = len(stocks)
         publish_status()
         from .compute_capacity import worker_capacity, MAX_WORKERS
         workers = worker_capacity(settings.get('workers', MAX_WORKERS), monitor=worker_pool is not None)
@@ -1066,6 +1084,8 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
                       stocks, settings, contexts, run_dir, workers, state["source_revision"], request=request,capacity_callback=capacity_changed))
         for result, current_codes in stream:
             if result is not None:
+                if period_progress is not None:
+                    state['completed_symbols'] = period_progress.accept(result)
                 with (run_dir / "results.jsonl").open("a", encoding="utf-8") as result_file:
                     result_file.write(json.dumps(result, ensure_ascii=False, allow_nan=False) + "\n")
                 state["completed"] += 1

@@ -260,7 +260,8 @@ def _background_panel(event, frame, snapshot, coverage):
     return panel
 
 
-def prepare_history_layout(event, runs_root, *, reused_images=None, history_period=None):
+def prepare_history_layout(event, runs_root, *, reused_images=None, history_period=None,
+                           initial_only=False, defer_context=False):
     """Three period groups; preserve proof pixels and add independent history.
 
     At most one background period advances a bounded fetch slice per call.
@@ -285,6 +286,23 @@ def prepare_history_layout(event, runs_root, *, reused_images=None, history_peri
         panel['settings'].update(panel_id=key, cache_key=key,
                                  purpose='frozen_signal' if purpose == 'proof' else 'frozen_context')
         return panel
+
+    if initial_only:
+        # The direct attachment must never wait for another period's provider,
+        # snapshot calculation or history archive. The first verified proof is
+        # cached by capture and reused verbatim in the later complete image.
+        for frequency in PERIODS:
+            histories[frequency] = {'state': 'pending', 'reason': 'background_queued',
+                                    'target_days': VISIBLE_DAYS[frequency], 'can_resume': True,
+                                    'progress_token': 'queued:' + frequency}
+            if frequency == primary:
+                panels.append(frozen(frequency, primary_frame, primary_snapshot, primary_signal))
+            else:
+                key = 'context:' + frequency
+                panels.append({'settings': {'frequency': frequency, 'panel_id': key, 'signal_panel': False},
+                               'error': '该周期图表正在后台准备；完成后自动补图',
+                               'error_type': 'BackgroundPending'})
+        return {'panels': panels, 'history_coverage': histories, 'history_panel_ids': {}}
 
     for frequency in PERIODS:
         frame = primary_frame if frequency == primary else None
@@ -325,6 +343,15 @@ def prepare_history_layout(event, runs_root, *, reused_images=None, history_peri
         key = 'context:'+frequency
         if key in reused or frequency in reused:
             panels.append(frozen(frequency))
+            continue
+        if defer_context and histories.get(frequency, {}).get('state') in ('pending', 'source_error'):
+            # A preparing history panel is not sendable yet. Its anchor is
+            # already persisted by the selected bounded slice; fetching and
+            # calculating auxiliary contexts again would repeat cold work on
+            # every slice. Terminal source limits still get their short view.
+            panels.append({'settings': {'frequency': frequency, 'panel_id': key, 'signal_panel': False},
+                           'error': '该周期图表正在后台准备；完成后自动补图',
+                           'error_type': 'BackgroundPending'})
             continue
         try:
             frame, snapshot = context_evidence(event, runs_root, frequency, primary_frame.attrs)
@@ -399,7 +426,7 @@ def capture(payload, *, diagnostics=None, panel_sink=None, completion_event=None
     def bind_routes(panel):
         return lambda route: route_request(route, panel)
 
-    # One sequential worker owns each short-lived browser. A failed export closes
+    # Each of the two bounded workers owns its short-lived browser. A failed export closes
     # its context/process in finally and cannot contaminate the next symbol.
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, timeout=20000)

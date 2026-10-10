@@ -56,7 +56,7 @@ def test_committed_worker_progress_preserves_usable_empty_periods(
             }
         )
     monkeypatch.setattr(
-        runner, "bounded_scan", lambda *_: iter((record, []) for record in records)
+        runner, "bounded_scan", lambda *_, capacity_callback=None: iter((record, []) for record in records)
     )
     runner.run_screening(tmp_path)
     state = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))

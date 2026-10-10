@@ -145,6 +145,10 @@ class RollingDisplay:
             universe = {(r.get('market', 'a'), r['code']) for r in universe} if isinstance(universe, list) else None
             replaced = {tuple(p) for p in result.get('_workbench_verified', [])} | {_period(row) for row in rows}
             processed = {tuple(p) for p in result.get('_workbench_processed', [])}
+            processed_periods = {tuple(p) for p in result.get('_workbench_processed_periods', [])}
+            def attempted(row):
+                return (_period(row) in processed_periods if result.get('progress_unit') == 'symbol_period'
+                        else _period(row)[:2] in processed)
             groups = defaultdict(list)
             if not finished:
                 for row in prior:
@@ -152,7 +156,7 @@ class RollingDisplay:
                         continue
                     old_source = row.get('result_source', saved.get('run_id'))
                     groups[old_source].append({**row, 'result_source': old_source,
-                        'refresh_state': 'limited' if _period(row)[:2] in processed else 'pending',
+                        'refresh_state': 'limited' if attempted(row) else 'pending',
                         'detail_loaded': True, 'evidence_chart_available': False})
             previous = []
             for old_source, old_rows in groups.items():

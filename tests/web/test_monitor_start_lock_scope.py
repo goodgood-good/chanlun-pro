@@ -138,7 +138,9 @@ def test_new_check_survives_a_concurrent_start_failure(monitor, monkeypatch):
         starting = pool.submit(schedule(service, manual, "live"))
         try:
             assert entered.wait(2)
-            pool.submit(service.check_now).result(timeout=0.3)
+            # The check must finish while startup is still held. Allow the
+            # durable state write to complete under a loaded Windows runner.
+            pool.submit(service.check_now).result(timeout=2)
         finally:
             release.set()
         with pytest.raises(signal_monitor.TaskStartError) as failure:

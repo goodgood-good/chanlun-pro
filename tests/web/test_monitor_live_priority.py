@@ -176,13 +176,13 @@ def test_a_naturally_completed_batch_wins_a_racing_yield_request(mixed):
     assert not service._load()["retry_symbols"]
 
 
-def test_recent_live_work_is_not_cancelled_when_another_bar_closes(mixed):
+def test_slow_live_work_yields_once_when_a_new_key_bar_closes(mixed):
     service, _, live, clock, closed = mixed
     service._schedule_monitor(clock[0], None)
     clock[0] += timedelta(minutes=5)
     closed["us"] += 300
     service._schedule_monitor(clock[0], None)
-    assert not live.state.get("cancel_requested") and len(live.started) == 1
+    assert live.state.get("cancel_requested") and len(live.started) == 1
 
 
 def test_unowned_cancellation_still_reports_unchecked_work_for_retry(mixed):

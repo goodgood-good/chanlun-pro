@@ -138,11 +138,12 @@ def _compact_rows(rows, compact):
 
 def _dashboard_projection(payload, compact):
     return {**{key: value for key, value in payload.items() if key not in {
-        "selected", "observations", "entry_waiting", "consolidation_alerts", "processed_symbols",
+        "selected", "observations", "entry_waiting", "consolidation_alerts", "processed_symbols", "processed_periods",
         "u295_lower_structural_witnesses", "recent_rejections", "verified_periods",
     }}, "_workbench_rows": _current_rows(payload, payload.get('run_id', 'idle')),
         '_workbench_verified': [(r.get('market','a'),r['code'],r['frequency']) for r in payload.get('verified_periods',[])],
-        '_workbench_processed': [(r.get('market','a'),r['code']) for r in payload.get('processed_symbols',[])]}
+        '_workbench_processed': [(r.get('market','a'),r['code']) for r in payload.get('processed_symbols',[])],
+        '_workbench_processed_periods': [(r.get('market','a'),r['code'],r['frequency']) for r in payload.get('processed_periods',[])]}
 
 
 def candidate_detail(source, candidate_id):
@@ -219,7 +220,8 @@ def dashboard(*, background=False, compact=False):
     rows = _compact_rows(rows, compact)
     status = {k: v for k, v in result.items() if k not in (
         "selected", "observations", "entry_waiting", "consolidation_alerts", "recent_rejections", "rejection_counts", "reason_labels", "errors",
-        "_workbench_rows", "_workbench_verified", "_workbench_processed", "processed_symbols", "u295_lower_structural_witnesses", "verified_periods",
+        "_workbench_rows", "_workbench_verified", "_workbench_processed", "_workbench_processed_periods",
+        "processed_symbols", "processed_periods", "u295_lower_structural_witnesses", "verified_periods",
     )}
     status["error_count"] = (result.get("error_count") if result.get("results_loading")
                              else len(result.get("errors", [])))

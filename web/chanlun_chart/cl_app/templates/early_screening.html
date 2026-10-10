@@ -27,7 +27,7 @@
         <label>股票范围<select id="scope"><option value="all_a_watchlist">A 股 + 自选分组（各市场）</option><option value="watchlist">仅自选分组（各市场）</option><option value="all_a">行情源 A 股股票池</option><option value="codes">指定股票</option></select></label>
         <label id="codes-label" hidden>股票代码<input id="codes" placeholder="SH.600088, SZ.301004"></label>
         <label hidden>筛选方式<select id="screen-strategy"><option value="direct_structural">本周期中枢提醒</option></select></label>
-        <label id="direct-frequency-label">行情周期<select id="screen-frequency" multiple size="3"><option value="1m">1m</option><option value="5m" selected>5m</option><option value="30m">30m</option></select></label>
+        <label id="direct-frequency-label">行情周期<select id="screen-frequency" multiple size="3"><option value="1m">1m</option><option value="5m" selected>5m</option><option value="30m" selected>30m</option></select></label>
         <label id="direct-grade-label" hidden>结构级别<select id="screen-grade"><option value="0">本周期线段</option></select></label>
         <label hidden>最低操作周期<select id="screen-risk-period"><option value="">不启用</option><option value="1m">1m</option><option value="5m">5m</option><option value="30m">30m</option></select></label>
         <p class="muted">可同时选择 1m、5m、30m。每个周期以本周期已确认线段作为分析的次级成员，独立计算中枢与正式买卖点提醒。</p>

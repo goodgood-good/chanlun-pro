@@ -492,7 +492,7 @@ class ScreeningManager:
         consolidation_alerts, verified_periods = [], []
         historical_recheck_periods = []
         u295_lower_structural_witnesses = []
-        processed_symbols, empty_result_symbols, results_through = [], [], after_completed
+        processed_symbols, processed_periods, empty_result_symbols, results_through = [], [], [], after_completed
         semantic_exclusions = 0
         lifetime_exclusions = 0
         policy_exclusions = 0
@@ -512,11 +512,15 @@ class ScreeningManager:
                     continue
                 item = json.loads(line)
                 processed_symbols.append({"market": item.get("market", "a"), "code": item["code"]})
+                requested = item.get('requested_frequencies', [])
+                processed_periods.extend({**processed_symbols[-1], 'frequency':frequency}
+                                         for frequency in (requested or [r['frequency'] for r in item['rows']]))
                 if item.get('rows') == [] and not item.get('error'):
                     empty_result_symbols.append(processed_symbols[-1])
                 results_through = index + 1
                 if item.get("error"):
                     errors.append({"code": item["code"], "market": item.get("market", "a"), "error": item["error"],
+                                   **({'frequency':requested[0]} if len(requested)==1 else {}),
                                    **({"reasons": item["reasons"]} if item.get("reasons") else {})})
                 for row in item["rows"]:
                     header = {k: row[k] for k in ("code", "market", "name", "frequency", "source_closed_at", "input_fingerprint",
@@ -847,7 +851,8 @@ class ScreeningManager:
                 "u295_lower_structural_witnesses": u295_lower_structural_witnesses,
                 "u295_lower_structural_witness_count": len(u295_lower_structural_witnesses),
                 "recent_rejections": recent_rejections,
-                "processed_symbols": processed_symbols, "empty_result_symbols": empty_result_symbols,
+                "processed_symbols": processed_symbols, "processed_periods": processed_periods,
+                "empty_result_symbols": empty_result_symbols,
                 "results_through": results_through,
                 "errors": errors, "rejection_counts": counts,
                 "semantic_exclusion_count": semantic_exclusions,
@@ -978,6 +983,8 @@ class ScreeningManager:
             directory = self.root / run_id
             request = {"run_id": run_id, "observed_at": self._now().isoformat(),
                        "settings": settings}
+            if not self._reuse_workers and settings.get('alert_mode') == 'native_center_signals':
+                request['incremental_periods'] = True
             from chanlun.screening.compute_capacity import budget_request
             request['compute_budget'] = budget_request()
             if self._reuse_workers:

@@ -12,7 +12,8 @@ from chanlun.screening.evidence import evidence_paths
 
 
 LISTS = ("selected", "observations", "entry_waiting", "consolidation_alerts", "verified_periods",
-         "u295_lower_structural_witnesses", "recent_rejections", "processed_symbols", "errors")
+         "u295_lower_structural_witnesses", "recent_rejections", "processed_symbols", "processed_periods",
+         "empty_result_symbols", "errors")
 COUNTS = ("semantic_exclusion_count", "lifetime_exclusion_count", "selection_policy_exclusion_count")
 
 

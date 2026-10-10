@@ -11,7 +11,7 @@ from cl_app.services.dingtalk_notifications import DingTalkOutbox
 from tests.web.test_notification_charts import ImageTransport, image_event, PNG
 
 
-@pytest.mark.parametrize("worker,limit", [("charts", 180), ("delivery", 60)])
+@pytest.mark.parametrize("worker,limit", [("charts", 180), ("chart_history", 180), ("delivery", 60)])
 def test_alive_but_stuck_worker_is_unhealthy_and_recovers_after_completion(
     tmp_path, monkeypatch, worker, limit
 ):
@@ -23,15 +23,16 @@ def test_alive_but_stuck_worker_is_unhealthy_and_recovers_after_completion(
         tmp_path / "outbox.sqlite", transport=ImageTransport(), charts=True
     )
     service = SignalMonitor(tmp_path, notifications=box)
-    service._thread = box._thread = box.charts._thread = Mock()
+    service._thread = box._thread = box.charts._thread = box.charts._history_thread = Mock()
     service._thread.is_alive.return_value = True
     service._last_cycle_at = time.monotonic()
     service._last_tick_at = time.time()
-    target = box.charts if worker == "charts" else box
-    with target.progress.cycle("read_queue"):
+    progress = (box.charts.history_progress if worker == "chart_history" else
+                box.charts.progress if worker == "charts" else box.progress)
+    with progress.cycle("read_queue"):
         clock[0] += limit - 1
-        target.progress.phase(
-            "chart_render" if worker == "charts" else "provider_request"
+        progress.phase(
+            "chart_render" if worker in ("charts", "chart_history") else "provider_request"
         )
         assert service.runtime_health()["ready"]
         clock[0] += 2
@@ -48,6 +49,19 @@ def test_alive_but_stuck_worker_is_unhealthy_and_recovers_after_completion(
     assert service.runtime_health()["ready"], (
         "idle time must never be treated as a stuck task"
     )
+
+
+def test_dead_history_thread_requests_recovery_independently(tmp_path):
+    box = DingTalkOutbox(tmp_path / "outbox.sqlite", transport=ImageTransport(), charts=True)
+    service = SignalMonitor(tmp_path, notifications=box)
+    service._thread = box._thread = box.charts._thread = Mock()
+    service._thread.is_alive.return_value = True
+    service._last_cycle_at = time.monotonic()
+    service._last_tick_at = time.time()
+    health = service.runtime_health()
+    assert health["threads"]["charts"] is True
+    assert health["threads"]["chart_history"] is False
+    assert health["recovery_recommended"] and health["status"] == "stopped"
 
 
 def test_renderer_loop_reports_the_actual_blocked_phase_without_blocking_probe(

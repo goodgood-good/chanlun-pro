@@ -5,7 +5,7 @@ from copy import deepcopy
 import pytest
 
 from cl_app.services.signal_monitor import SignalMonitor
-from tests.web.test_signal_monitor import setup as setup, signal
+from tests.web.test_signal_monitor import setup as setup, signal, legacy_full_period_batch
 from tests.web.test_monitor_pool_handoff_reuse import checked_pool, finish_replacement
 
 
@@ -101,6 +101,7 @@ def test_missing_one_period_keeps_pending_membership_across_restart(setup, monke
         setup, frequencies=["5m", "30m"]
     )
     service.tick()
+    legacy_full_period_batch(service, live)
     live.rows = [signal("SZ.000001")]
     committed = live.committed_results
 
@@ -122,6 +123,7 @@ def test_missing_one_period_keeps_pending_membership_across_restart(setup, monke
     assert "a:SH.600088" in restored._load()["seed"]["screening_rechecks"]
     restored.check_now()
     restored.tick()
+    legacy_full_period_batch(restored, live)
     live.committed_results = committed
     finish_live(live, cutoff)
     restored._consume_monitor()
@@ -179,6 +181,7 @@ def test_another_partial_replacement_preserves_the_pending_member_and_its_histor
 def test_a_valid_candidate_on_one_period_can_rejoin_while_another_period_retries(setup):
     service, _, live, _, cutoff = partial_replacement(setup, frequencies=["5m", "30m"])
     service.tick()
+    legacy_full_period_batch(service, live)
     live.rows = [signal(), signal("SZ.000001")]
     live.errors = [
         {
@@ -194,3 +197,51 @@ def test_a_valid_candidate_on_one_period_can_rejoin_while_another_period_retries
     assert not state["seed"]["screening_rechecks"]
     assert any(row["code"] == "SH.600088" for row in state["signals"].values())
     assert "a:SH.600088" in state["retry_symbols"]
+
+
+def test_single_period_negative_requires_its_sibling_before_removing_pending_member(setup, monkeypatch):
+    service, manual, live, clock, cutoff = partial_replacement(setup, frequencies=['5m', '30m'])
+    service.tick()
+    assert service._load()['active_periods']['a:SH.600088'] == ['30m']
+    live.rows = []
+    finish_live(live, cutoff)
+    service._consume_monitor()
+    assert 'a:SH.600088' in service._load()['seed']['screening_rechecks']
+    assert 'a:SH.600088' in service._load()['seed']['codes']
+    assert not service._load()['selection_checks']['a:SH.600088:30m']['error']
+    assert service._load()['selection_checks']['a:SH.600088:5m']['error']
+
+    restored = SignalMonitor(service.root, screening=manual, monitor=live, now=lambda: clock[0])
+    monkeypatch.setattr(restored, 'start_runtime', lambda: None)
+    assert 'a:SH.600088' in restored._load()['seed']['screening_rechecks']
+    restored.tick()
+    assert restored._load()['active_periods']['a:SH.600088'] == ['5m']
+    live.rows = [signal('SZ.000001')]
+    finish_live(live, cutoff)
+    restored._consume_monitor()
+    assert 'a:SH.600088' not in restored._load()['seed']['codes']
+
+
+def test_single_period_positive_rejoins_while_the_failed_sibling_keeps_its_retry(setup):
+    service, _, live, _, cutoff = partial_replacement(setup, frequencies=['5m', '30m'])
+    service.tick()
+    assert service._load()['active_periods']['a:SH.600088'] == ['30m']
+    live.rows = []
+    live.errors = [{'market': 'a', 'code': 'SH.600088', 'frequency': '30m', 'reasons': ['DATA_GAPS']}]
+    finish_live(live, cutoff)
+    service._consume_monitor()
+    assert 'a:SH.600088' in service._load()['seed']['screening_rechecks']
+    assert 'a:SH.600088' in service._load()['retry_symbols']
+
+    service.tick()
+    assert service._load()['active_periods']['a:SH.600088'] == ['5m']
+    live.rows = [signal(), signal('SZ.000001')]
+    live.errors = []
+    finish_live(live, cutoff)
+    service._consume_monitor()
+    state = service._load()
+    assert not state['seed']['screening_rechecks']
+    assert any(row['code'] == 'SH.600088' and row['frequency'] == '5m' for row in state['signals'].values())
+    assert 'a:SH.600088' in state['retry_symbols']
+    assert state['selection_checks']['a:SH.600088:30m']['error']
+    assert not state['selection_checks']['a:SH.600088:5m']['error']

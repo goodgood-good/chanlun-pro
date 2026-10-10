@@ -309,10 +309,12 @@
       const settings=status.settings||{};
       const nativeSignals=!status.run_id || settings.alert_mode==='native_center_signals'
         || candidates.some(row=>row.point?.evidence_scope==='native_center_signal');
-      $('run-detail').textContent=[status.total ? `已处理 ${status.completed||0} / ${status.total} 只` : '',
+      $('run-detail').textContent=[status.total ? status.progress_unit==='symbol_period'
+        ? `已检查 ${status.completed||0} / ${status.total} 个标的周期 · 完成标的 ${status.completed_symbols||0} / ${status.total_symbols||0} 只`
+        : `已处理 ${status.completed||0} / ${status.total} 只` : '',
         activeRun(status.status)&&status.resource_mode==='waiting'?'内存保护：暂缓新计算，已完成结果保留':activeRun(status.status)&&status.resource_mode==='limited'?'内存保护：计算并发已下调':'',
         status.previous_result_count?`本轮结果 ${status.current_result_count||0} 条 · 保留上次结果 ${status.previous_result_count} 条，逐步更新`:'',
-        status.results_through!==undefined?`已核验 ${status.results_through} 只${status.results_partial?'，候选持续更新':''}`:'',
+        status.results_through!==undefined?`已核验 ${status.results_through} ${status.progress_unit==='symbol_period'?'个标的周期':'只'}${status.results_partial?'，候选持续更新':''}`:'',
         status.effective_workers?`并行 ${status.effective_workers} 进程`:settings.workers?`设定 ${settings.workers} 进程`:'',
         settings.strategy===STRATEGY?'5m 主信号 · 区间内 1m 结构确认':settings.frequencies?.map(f=>`${f} K线周期`).join(' / '),
         nativeSignals?'按本周期中枢买卖点筛选':'',settings.point_types?.map(p=>POINTS[p]||p).join(' / '),
@@ -820,7 +822,7 @@
         // The new result proof is now installed. A subsequent review-notes
         // failure must not invalidate these verified candidates or their chart.
         newerProofStatus=null;
-        message(data.status.results_loading?(data.status.previous_result_count?'正在读取本轮结果，上次结果将逐步替换。':data.status.results_available?`已展示 ${data.status.results_through} 只标的中通过核验的候选，正在读取新增结果。`:RESULTS_LOADING):'');
+        message(data.status.results_loading?(data.status.previous_result_count?'正在读取本轮结果，上次结果将逐步替换。':data.status.results_available?`已展示 ${data.status.results_through} ${data.status.progress_unit==='symbol_period'?'个标的周期':'只标的'}中通过核验的候选，正在读取新增结果。`:RESULTS_LOADING):'');
         if(data.status.results_loading&&!data.status.results_available)return;
         state.reviewsLoadedSource=null;
         await loadReviews(data.source,serial);
