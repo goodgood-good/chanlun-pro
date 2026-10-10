@@ -31,6 +31,7 @@ EVENT_FIELDS = frozenset({
 PNG_PATTERN = re.compile(r"/public/alert-chart/([a-f0-9]{64})\.png(?:\?|[)\s\"']|$)")
 DELIVERY_TIME = "CASE WHEN o.status='sent' THEN COALESCE(o.sent,o.created) ELSE o.created END"
 ORDER_BASIS = "sent_at_for_sent_else_created_at"
+CHART_PERIODS = ('1m', '5m', '30m')
 
 
 def _stamp(value):
@@ -112,6 +113,17 @@ def _body(content):
         pass
     text = str(content or "")
     return text, text.splitlines()[0] if text else ""
+
+
+def _delivery_status(status):
+    return ('sent' if status == 'sent' else 'pending' if status in ('pending', 'retry', 'sending')
+            else status if status in ('failed', 'expired') else 'unknown')
+
+
+def _chart_periods(value):
+    if not isinstance(value, list) or any(v not in CHART_PERIODS for v in value) or len(set(value)) != len(value):
+        return None
+    return [period for period in CHART_PERIODS if period in value]
 
 
 def _saved_exit_plan(value):
@@ -385,7 +397,37 @@ class RecentNotifications:
             item['title'] = title or item['title']
         item.update(_source_id=row['id'], attempts=row['attempts'], next_attempt_at=row['next_try'],
                     expires_at=row['expires'], body=body, message=body)
+        names = list(dict.fromkeys(PNG_PATTERN.findall(str(row['content']))))
+        coverage = [self._image_coverage(name) for name in names]
+        if coverage:
+            item['chart_role'] = 'completion' if row['id'].startswith('chart-complete:') else 'initial'
+            item['chart_coverage_status'] = ('partial' if any(v['coverage_status'] == 'partial' for v in coverage)
+                                             else 'complete' if all(v['coverage_status'] == 'complete' for v in coverage)
+                                             else 'unknown')
+            item['chart_missing_periods'] = [p for p in CHART_PERIODS if any(p in v['missing_periods'] for v in coverage)]
         return item
+
+    def _image_coverage(self, name):
+        """Coverage belongs to an immutable PNG, never to a mutable job status."""
+        unknown = {'coverage_status': 'unknown', 'periods': [], 'missing_periods': []}
+        if not re.fullmatch(r'[a-f0-9]{64}', name or ''):
+            return unknown
+        directory = (self.root / 'chart_images').resolve()
+        path = (directory / (name + '.json')).resolve()
+        if path.parent != directory:
+            return unknown
+        try:
+            value = json.loads(path.read_text(encoding='utf-8'))
+            periods, missing = _chart_periods(value.get('periods')), _chart_periods(value.get('missing_periods'))
+            if (value.get('schema') != 'notification-chart-coverage-v1' or value.get('image_sha256') != name
+                    or not periods or missing is None or set(periods) & set(missing)
+                    or set(periods) | set(missing) != set(CHART_PERIODS)
+                    or value.get('primary_frequency') not in periods):
+                return unknown
+            return {'coverage_status': 'partial' if missing else 'complete',
+                    'periods': periods, 'missing_periods': missing}
+        except (OSError, ValueError, TypeError, AttributeError):
+            return unknown
 
     def _has_newer(self, options, held):
         now = self.now()
@@ -462,43 +504,112 @@ class RecentNotifications:
             row = db.execute('SELECT o.*,p.events FROM outbox o LEFT JOIN signal_payloads p ON p.outbox_id=o.id WHERE o.id=?', (raw_id,)).fetchone()
             return None if row is None else dict(row)
 
-    def _image_records(self, identity, receipt):
+    def _chart_sources(self, receipt):
         from .dingtalk_notifications import signal_key
         sources = [receipt]
         events = _events(receipt['events'])
-        inline = []
+        keys = []
+        for event in events:
+            try: key = signal_key(event)
+            except (KeyError, TypeError, ValueError): continue
+            if key not in keys: keys.append(key)
+        inline, linked = [], {}
         with self._read('dingtalk_outbox.sqlite3') as db:
             if db is not None:
-                inline = [r[0] for r in db.execute('SELECT url FROM inline_charts WHERE outbox_id=?', (receipt['id'],))]
-        for event in events:
-            try:
-                linked = self._receipt('chart:' + signal_key(event))
-            except (KeyError, TypeError, ValueError):
-                linked = None
-            if linked is not None and linked['id'] != receipt['id']:
-                sources.append(linked)
-        names = []
-        for text in [*(str(r['content']) for r in sources), *inline]:
-            for name in PNG_PATTERN.findall(text):
-                if name not in names: names.append(name)
-        result = []
-        for index, name in enumerate(names):
+                inline = [dict(r) for r in db.execute(
+                    'SELECT signal_key,url,outbox_id FROM inline_charts WHERE outbox_id=?' +
+                    (f" OR signal_key IN ({','.join('?' for _ in keys)})" if keys else ''), [receipt['id'], *keys])]
+                targets = list(dict.fromkeys([*(prefix + key for key in keys for prefix in ('chart:', 'chart-complete:')),
+                                              *(row['outbox_id'] for row in inline)]))
+                if targets:
+                    linked = {r['id']: dict(r) for r in db.execute(
+                        'SELECT o.*,p.events FROM outbox o LEFT JOIN signal_payloads p ON p.outbox_id=o.id '
+                        f"WHERE o.id IN ({','.join('?' for _ in targets)})", targets)}
+                    sources.extend(linked[key] for key in targets if key in linked and key != receipt['id'])
+        jobs = {}
+        try:
+            with self._read('chart_jobs.sqlite3') as db:
+                if db is not None and keys:
+                    jobs = {r['id']: dict(r) for r in db.execute(
+                        f"SELECT * FROM jobs WHERE id IN ({','.join('?' for _ in keys)})", keys)}
+        except (sqlite3.Error, OSError):
+            # Progress is a separate source. Its read failure cannot hide an
+            # actual delivery receipt or an already saved PNG.
+            jobs = {key: {'id': key, 'status': 'unavailable', 'error': '图表生成状态暂不可读取'} for key in keys}
+        return sources, inline, jobs
+
+    @staticmethod
+    def _image_note(coverage, receipt, job):
+        delivery = STATUSES.get(_delivery_status(receipt['status']), '状态未知')
+        if coverage['coverage_status'] == 'partial':
+            note = f"首张部分图{delivery}；缺少 {' / '.join(coverage['missing_periods'])}"
+            state = job.get('status')
+            retry = {'pending': '补图等待重试', 'running': '正在重试补图', 'failed': '补图重试失败',
+                     'expired': '补图已过期，未补发', 'ready': '补图生成已完成，请查看关联图表回执',
+                     'unavailable': '补图生成状态暂不可读取'}.get(state)
+            return note + ('；' + retry if retry else '')
+        if receipt['id'].startswith('chart-complete:'):
+            return '补全图' + delivery + ('；三个周期齐全' if coverage['coverage_status'] == 'complete' else '；周期完整性未记录')
+        return '原始图' + delivery + ('；三个周期齐全' if coverage['coverage_status'] == 'complete' else '；周期完整性未记录')
+
+    def _image_records(self, identity, receipt, *, with_receipts=False):
+        from .dingtalk_notifications import signal_key
+        sources, inline, jobs = self._chart_sources(receipt)
+        images, owners = {}, {}
+        for source in sources:
+            owners[source['id']] = source
+            for name in PNG_PATTERN.findall(str(source['content'])):
+                images.setdefault(name, []).append(source['id'])
+        for row in inline:
+            if row['outbox_id'] in owners:
+                for name in PNG_PATTERN.findall(row['url']):
+                    if row['outbox_id'] not in images.setdefault(name, []):
+                        images[name].append(row['outbox_id'])
+        result, seen_jobs = [], set()
+        for index, (name, receipts) in enumerate(images.items()):
+            source = owners[receipts[0]]
+            source_events = _events(source['events'])
+            try: key = signal_key(source_events[0]) if len(source_events) == 1 else None
+            except (KeyError, TypeError, ValueError): key = None
+            if key: seen_jobs.add(key)
+            job = jobs.get(key, {})
+            coverage = self._image_coverage(name)
             path = (self.root / 'chart_images' / (name + '.png')).resolve()
             valid = path.parent == (self.root / 'chart_images').resolve() and path.is_file()
-            result.append({'frequency': '原始通知图', 'periods': [], 'status': 'ready' if valid else 'expired',
+            role = 'completion' if source['id'].startswith('chart-complete:') else 'initial'
+            label = ('补全图' if role == 'completion' else '首张部分图' if coverage['coverage_status'] == 'partial' else '原始通知图')
+            if len(source_events) == 1 and source_events[0].get('code'):
+                label = str(source_events[0]['code']) + ' · ' + label
+            if coverage['periods']: label += ' · ' + ' / '.join(coverage['periods'])
+            result.append({'frequency': '原始通知图', **coverage, 'label': label, 'role': role,
+                           'status': 'ready' if valid else 'expired',
+                           'receipt_id': 'd.' + _pack(source['id']), 'delivery_status': _delivery_status(source['status']),
+                           'created_at': source['created'], 'sent_at': source['sent'],
+                           'generation_status': job.get('status'), 'next_attempt_at': job.get('next_try'),
+                           'status_note': self._image_note(coverage, source, job),
                            'url': f'/monitor/notifications/{identity}/images/{index}.png?version={name}' if valid else None,
                            'error': '' if valid else '保存的图片已过期或不可用',
                            '_hash': name, '_path': path if valid else None})
-        if not result and events:
-            with self._read('chart_jobs.sqlite3') as db:
-                for event in events:
-                    try: key = signal_key(event)
-                    except (KeyError,TypeError,ValueError): continue
-                    job = db.execute('SELECT status,error FROM jobs WHERE id=?',(key,)).fetchone() if db else None
-                    if job is not None:
-                        result.append({'frequency':'原始通知图','periods':[], 'status':job['status'], 'url':None,
-                                       'error':job['error'] or ('图表记录存在，但保存图片不可用' if job['status']=='ready' else ''), '_path':None})
-        return result
+        for key, job in jobs.items():
+            if key in seen_jobs: continue
+            missing = []
+            try: missing = _chart_periods(json.loads(job.get('missing_periods') or '[]')) or []
+            except (TypeError, ValueError): pass
+            try: event = json.loads(job.get('event') or '{}')
+            except (TypeError, ValueError): event = {}
+            code = event.get('code') if isinstance(event, dict) else None
+            label = f'{code} · 图表生成状态' if code else '图表生成状态'
+            result.append({'frequency': '图表生成状态', 'label': label, 'periods': [],
+                           'missing_periods': missing, 'coverage_status': 'unknown', 'is_placeholder': True,
+                           'status': job['status'], 'generation_status': job['status'],
+                           'next_attempt_at': job.get('next_try'), 'url': None,
+                           'error': job.get('error') or ('图表记录存在，但保存图片不可用' if job['status'] == 'ready' else ''),
+                           '_path': None})
+        related = [{'id': 'd.' + _pack(source['id']), 'status': _delivery_status(source['status']),
+                    'role': 'completion' if source['id'].startswith('chart-complete:') else 'initial',
+                    'kind': source['kind'], 'created_at': source['created'], 'sent_at': source['sent']}
+                   for source in sources if source['kind'] == 'chart' or any(source['id'] in values for values in images.values())]
+        return (result, related) if with_receipts else result
 
     def detail(self, identity):
         if identity.startswith('d.'):
@@ -506,9 +617,10 @@ class RecentNotifications:
             receipt = self._receipt(raw_id)
             if receipt is None: return None
             result = self._receipt_item(receipt)
-            images = self._image_records(identity, receipt)
+            images, related = self._image_records(identity, receipt, with_receipts=True)
             result['images'] = [{k:v for k,v in image.items() if not k.startswith('_')} for image in images]
-            result['image_count'] = len(images)
+            result['related_chart_receipts'] = related
+            result['image_count'] = sum(not image.get('is_placeholder') for image in images)
             result['evidence_lines'] = _evidence_lines(result['signals'])
             result['evidence_lines_title'] = '保存的信号要点'
             result['structural_evidence_complete'] = False

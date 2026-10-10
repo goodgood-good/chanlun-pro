@@ -65,6 +65,49 @@ test('notifications open on a rolling 24-hour range and render the actual compos
   assert.equal(ui.get('notification-sent-count').textContent,1);
 });
 
+test('a delivered partial image shows missing periods and retry progress without losing the actual picture',async()=>{
+  const receipt=row('partial',{chart_coverage_status:'partial',chart_missing_periods:['5m','30m']});
+  const image={label:'AAA.US · 首张部分图 · 1m',periods:['1m'],missing_periods:['5m','30m'],coverage_status:'partial',
+    status:'ready',delivery_status:'sent',generation_status:'pending',sent_at:110,
+    url:'/monitor/notifications/partial/images/0.png?version='+'a'.repeat(64),
+    status_note:'首张部分图已发送；缺少 5m / 30m；补图等待重试'};
+  const ui=fixture(async url=>url.endsWith('/partial')?response(detail('partial',{images:[image]})):dispatch(url,listing([receipt])));
+  await settle();await settle();
+  assert.match(text(ui.get('notifications-list')),/部分图 · 缺 5m \/ 30m/);
+  assert.match(text(ui.get('notification-detail-content')),/首张部分图已发送；缺少 5m \/ 30m；补图等待重试/);
+  assert.equal(byTag(ui.get('notification-detail-content'),'img').length,1);
+  assert.match(byTag(ui.get('notification-detail-content'),'img')[0].alt,/首张部分图/);
+});
+
+test('complete chart is a separate actual receipt and its pending delivery cannot upgrade the first partial image',async()=>{
+  const images=[{label:'AAA.US · 首张部分图 · 1m',periods:['1m'],status:'ready',sent_at:110,
+    url:'/monitor/notifications/paired/images/0.png?version='+'a'.repeat(64),
+    status_note:'首张部分图已发送；缺少 5m / 30m；补图生成已完成，请查看关联图表回执'},
+  {label:'AAA.US · 补全图 · 1m / 5m / 30m',periods:['1m','5m','30m'],status:'ready',sent_at:null,
+    url:'/monitor/notifications/paired/images/1.png?version='+'b'.repeat(64),
+    status_note:'补全图待发送；三个周期齐全'}];
+  const ui=fixture(async url=>url.endsWith('/paired')?response(detail('paired',{images})):dispatch(url,listing([row('paired')])));
+  await settle();await settle();
+  let picture=byTag(ui.get('notification-detail-content'),'img')[0];assert.match(picture.src,/version=a{64}$/);
+  const complete=byTag(ui.get('notification-detail-content'),'button').find(button=>button.textContent.includes(' · 补全图 · '));
+  assert.ok(complete);complete.handlers.click();
+  const frame=byTag(ui.get('notification-detail-content'),'div').find(el=>el.className==='notification-image-frame');
+  assert.match(text(frame),/补全图待发送；三个周期齐全/);
+  assert.doesNotMatch(text(frame),/此图实际发送/);
+  picture=byTag(frame,'img')[0];assert.match(picture.src,/version=b{64}$/);
+  const original=byTag(ui.get('notification-detail-content'),'button').find(button=>button.textContent.includes(' · 首张部分图 · '));
+  original.handlers.click();assert.match(text(frame),/首张部分图已发送；缺少 5m \/ 30m/);
+});
+
+test('an unfinished chart with no PNG shows generation status without inventing an image',async()=>{
+  const ui=fixture(async url=>url.endsWith('/working')?response(detail('working',{images:[{
+    label:'SECOND.US · 图表生成状态',periods:[],status:'running',generation_status:'running',url:null,error:'',is_placeholder:true,
+  }]})):dispatch(url,listing([row('working')])));
+  await settle();await settle();
+  assert.match(text(ui.get('notification-detail-content')),/图表正在生成/);
+  assert.equal(byTag(ui.get('notification-detail-content'),'img').length,0);
+});
+
 test('background refresh preserves the selected detail, page and chart element',async()=>{
   let data=listing([row('a'),row('b')],{pagination:{page:2,size:25,pages:3,total:60,has_more:true}});
   const ui=fixture(async url=>dispatch(url,data));await settle();await settle();

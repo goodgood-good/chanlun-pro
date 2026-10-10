@@ -7,6 +7,9 @@ param(
     [string]$ExpectedRevision = '',
     [string]$ExpectedSourceRevision = '',
     [int]$ExpectedProcessId = 0,
+    # A start-time requirement must come from the requested deployment, not
+    # the wall-clock hour. Healthy services may run across trading days.
+    [datetime]$NotStartedBefore = [datetime]::MinValue,
     [switch]$SkipProcessCheck,
     [switch]$SkipFreshnessCheck,
     [switch]$SkipSourceCheck,
@@ -100,9 +103,8 @@ try {
                     if (-not $SkipFreshnessCheck) {
                         try {
                             $startedAt = ConvertTo-ProcessStartDate $process.CreationDate
-                            $restartGate = (Get-Date).Date.AddHours(8.5)
-                            if ((Get-Date) -gt $restartGate -and $startedAt -lt $restartGate) {
-                                Write-Output "FAIL: web process started before today's 08:30 gate ($startedAt)"
+                            if ($startedAt -lt $NotStartedBefore) {
+                                Write-Output "FAIL: web process started at $startedAt before required start time $NotStartedBefore"
                                 $ok = $false
                             }
                         } catch {

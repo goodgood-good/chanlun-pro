@@ -22,6 +22,18 @@ class _ChartExpired(Exception):
     pass
 
 
+class RenderedChart(bytes):
+    """A real PNG plus the periods which were actually exported into it."""
+
+    def __new__(cls, png, *, periods, missing_periods=(), errors=None, primary_frequency=None):
+        result = super().__new__(cls, png)
+        result.coverage = {"schema": "notification-chart-coverage-v1",
+                           "image_sha256": hashlib.sha256(png).hexdigest(),
+                           "periods": list(periods), "missing_periods": list(missing_periods),
+                           "errors": dict(errors or {}), "primary_frequency": primary_frequency}
+        return result
+
+
 class ChartStore:
     lifetime = 7 * 86400
 
@@ -59,6 +71,25 @@ class ChartStore:
             finally:
                 temporary.unlink(missing_ok=True)
         os.utime(target, (self.now(), self.now()))
+        coverage = getattr(png, 'coverage', None)
+        if coverage is not None:
+            metadata = self.root / (name + '.json')
+            if metadata.exists():
+                saved = self.coverage(name)
+                if saved is None or any(saved.get(key) != coverage.get(key) for key in ('periods', 'missing_periods', 'primary_frequency')):
+                    raise ValueError('existing image coverage cannot be changed')
+            # A sent image's completeness cannot change when a later render
+            # succeeds. Each content hash owns its original coverage record.
+            if not metadata.exists():
+                temporary = metadata.with_suffix('.' + secrets.token_hex(6) + '.tmp')
+                try:
+                    temporary.write_text(json.dumps(coverage, ensure_ascii=False, allow_nan=False), encoding='utf-8')
+                    try:
+                        os.link(temporary, metadata)
+                    except FileExistsError:
+                        pass
+                finally:
+                    temporary.unlink(missing_ok=True)
         expires = int(self.now()) + self.lifetime
         signature = hmac.new(key, f"{name}:{expires}".encode(), hashlib.sha256).hexdigest()
         return f"{public_base()}/public/alert-chart/{name}.png?expires={expires}&signature={signature}"
@@ -83,12 +114,25 @@ class ChartStore:
             for path in self.root.glob("*.png"):
                 if path.resolve().parent == self.root.resolve() and self.now() - path.stat().st_mtime > self.lifetime + 86400:
                     path.unlink(missing_ok=True)
+                    path.with_suffix('.json').unlink(missing_ok=True)
+
+    def coverage(self, name):
+        if not isinstance(name, str) or not re.fullmatch(r'[a-f0-9]{64}', name):
+            return None
+        try:
+            value = json.loads((self.root / (name + '.json')).read_text(encoding='utf-8'))
+            return value if value.get('schema') == 'notification-chart-coverage-v1' and value.get('image_sha256') == name else None
+        except (OSError, ValueError, AttributeError):
+            return None
 
 
-def render_signal_chart(event, runs_root):
+def render_signal_chart(event, runs_root, *, completion=False):
     """Export the real TradingView renderer using verified, frozen evidence."""
-    from .tradingview_snapshot import capture, prepare_periods
-    return capture(prepare_periods(event, runs_root))
+    from .tradingview_snapshot import capture, prepare_periods, PanelImageCache
+    cache = PanelImageCache(event, Path(runs_root).parent / 'chart_panel_cache')
+    reused = cache.read()
+    return capture(prepare_periods(event, runs_root, reused_images=reused), panel_sink=cache.save,
+                   completion_event=event if completion else None)
 
 
 def load_chart_evidence(event, runs_root):
@@ -195,6 +239,14 @@ class NotificationCharts:
                 except sqlite3.OperationalError:
                     if 'updated' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
                         raise
+            columns = {row[1] for row in db.execute('PRAGMA table_info(jobs)')}
+            for name, default in (('missing_periods', '[]'), ('present_periods', '[]'), ('initial_image_hash', '')):
+                if name not in columns:
+                    try:
+                        db.execute(f"ALTER TABLE jobs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
+                    except sqlite3.OperationalError:
+                        if name not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
+                            raise
             db.execute("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v REAL)")
             db.execute("INSERT OR IGNORE INTO settings VALUES ('enabled_at',?)",(self.created_at,))
             db.execute("CREATE TABLE IF NOT EXISTS evidence_archive_jobs(id TEXT PRIMARY KEY,status TEXT,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0,error TEXT DEFAULT '')")
@@ -353,6 +405,11 @@ class NotificationCharts:
             if not 0<=self.outbox.now()-event['recorded_at']<1800:
                 raise _ChartExpired()
 
+        missing = json.loads(row['missing_periods'] or '[]')
+        present = json.loads(row['present_periods'] or '[]')
+        initial_hash = row['initial_image_hash'] or self.outbox.initial_chart_hash(event)
+        retry_delay = 30
+
         if now-event.get('recorded_at',0)>=1800:
             status,error='expired','图表任务已过期'
         else:
@@ -375,8 +432,12 @@ class NotificationCharts:
                 check_deadline()
                 phase='冻结证据绘图'
                 self.progress.phase('chart_render')
-                png=self.renderer(event,self.root/'runs')
+                png=(self.renderer(event,self.root/'runs',completion=bool(initial_hash))
+                     if self.renderer is render_signal_chart else self.renderer(event,self.root/'runs'))
                 check_deadline()
+                coverage = getattr(png, 'coverage', None)
+                if coverage is not None:
+                    missing, present = coverage['missing_periods'], coverage['periods']
                 phase='图片发布'
                 self.progress.phase('image_publish')
                 url=self.store.publish(png)
@@ -390,8 +451,25 @@ class NotificationCharts:
                 check_deadline()
                 phase='图片入队'
                 self.progress.phase('image_enqueue')
-                accepted = self.outbox.enqueue_chart(event,url)
-                status,error=('ready','') if accepted else ('expired','通知已过期或开关已更新')
+                image_hash = hashlib.sha256(png).hexdigest()
+                previous = self.store.coverage(initial_hash) if initial_hash else None
+                if initial_hash and missing:
+                    accepted = True  # Do not send a second partial copy.
+                elif initial_hash and (image_hash == initial_hash or previous and not previous.get('missing_periods')):
+                    accepted = True  # A committed complete image survived a crash.
+                else:
+                    accepted = (self.outbox.enqueue_chart(event, url, complete=True) if initial_hash
+                                else self.outbox.enqueue_chart(event, url))
+                    if accepted and not initial_hash:
+                        initial_hash = image_hash
+                if not accepted:
+                    status,error='expired','通知已过期或开关已更新'
+                elif missing:
+                    status = 'failed' if row['attempts'] >= 2 else 'pending'
+                    error = '辅助周期未补齐：' + '、'.join(missing) + ('；已达到本次重试上限' if status == 'failed' else '；将重试补齐')
+                    retry_delay = 30 if row['attempts'] == 0 else 90
+                else:
+                    status,error='ready',''
             except _ChartExpired:
                 status,error='expired','图表任务已过期'
             except Exception as exc:
@@ -399,12 +477,27 @@ class NotificationCharts:
                 error=phase+'失败（'+type(exc).__name__+'）'
         with self._db() as db:
             finished=self.outbox.now()
-            db.execute("UPDATE jobs SET status=?,error=?,next_try=?,updated=? WHERE id=? AND status='running'",(status,error,finished+30,finished,row['id']))
-        self.outbox.finish_inline_chart(event,status,error)
+            db.execute("UPDATE jobs SET status=?,error=?,next_try=?,updated=?,missing_periods=?,present_periods=?,initial_image_hash=? WHERE id=? AND status='running'",
+                       (status,error,finished+retry_delay,finished,json.dumps(missing),json.dumps(present),initial_hash or '',row['id']))
+        if not initial_hash or status == 'expired':
+            self.outbox.finish_inline_chart(event,status,error)
 
     def cleanup(self):
         """Expire historical diagnostics even when no new charts are generated."""
         self.store.cleanup()
+        cache_root = self.root / 'chart_panel_cache'
+        if cache_root.is_dir():
+            for folder in cache_root.iterdir():
+                if (folder.is_dir() and not folder.is_symlink() and re.fullmatch(r'[a-f0-9]{64}', folder.name)
+                        and folder.resolve().parent == cache_root.resolve()
+                        and self.outbox.now() - folder.stat().st_mtime > 2 * 86400):
+                    for saved in folder.iterdir():
+                        if saved.is_file() and not saved.is_symlink() and saved.resolve().parent == folder.resolve():
+                            saved.unlink(missing_ok=True)
+                    try:
+                        folder.rmdir()
+                    except OSError:
+                        pass
         if (self.root/'chart_jobs.sqlite3').exists():
             with self._db() as db:
                 db.execute("DELETE FROM jobs WHERE status IN ('ready','failed','expired') AND COALESCE(updated,created)<?",

@@ -60,8 +60,9 @@ def _calendar(name, year):
 
 def _calendar_name(market, code):
     name = {"us": "XNYS", "hk": "XHKG", "currency": "24/7", "currency_spot": "24/7"}.get(market)
-    if market == "ny_futures" and code.startswith(("CO.", "NY.")):
-        name = "CMES"
+    # A market prefix does not verify a product session. The generic CMES
+    # calendar includes hours when GC/CL pause; no NY/FX contract is attested
+    # here yet. Keep these symbols diagnostic instead of inventing a cutoff.
     if name is None:
         raise MarketDataContractError("SESSION_CALENDAR_UNAVAILABLE", f"{market}:{code} 尚无已配置的标的交易时段，保留在诊断中")
     return name

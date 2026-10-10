@@ -375,6 +375,51 @@ def test_process_start_date_converter_accepts_datetime_and_dmtf():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(os.name != "nt", reason="deployment script targets Windows")
+@pytest.mark.parametrize("observed,minimum,expected", [
+    ("2026-10-10T11:06:00", None, 0),  # Saturday recovery before 08:30.
+    ("2026-10-12T11:06:00", None, 0),  # A healthy long-lived weekday process.
+    ("2026-10-10T11:06:00", "2026-10-10T08:30:00", 1),
+    ("2026-10-10T11:06:00", "2026-10-10T06:54:03", 0),
+])
+def test_process_freshness_uses_an_explicit_deployment_boundary(tmp_path, observed, minimum, expected):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    # Exercise the real verifier with an isolated HTTP endpoint and a fixed
+    # process/clock fixture. No production process or readiness is bypassed.
+    quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+    args = "" if minimum is None else " -NotStartedBefore " + quote(minimum)
+    script = tmp_path / "verify_fixture.ps1"
+    script.write_text(
+        f"$fixtureApp = {quote(ROOT / 'web/chanlun_chart/app.py')}\n"
+        f"function Get-Date {{ [datetime]{quote(observed)} }}\n"
+        "function Get-NetTCPConnection { [pscustomobject]@{"
+        f"LocalPort={server.server_port}; OwningProcess=999999"
+        "} }\n"
+        "function Get-CimInstance { [pscustomobject]@{"
+        "ProcessId=999999; CommandLine=('python.exe \"' + $fixtureApp + '\" nobrowser'); "
+        "CreationDate=[datetime]'2026-10-10T06:54:03' } }\n"
+        f"& {quote(SCRIPT)} -ProjectRoot {quote(ROOT)} "
+        f"-HealthUri 'http://127.0.0.1:{server.server_port}/readyz?market=a' "
+        "-ExpectedRevision 'expected-revision' -SkipSourceCheck" + args + "\n"
+        "exit $LASTEXITCODE\n",
+        encoding="utf-8-sig",
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result.returncode == expected, result.stdout + result.stderr
+    assert "exact web process PID=999999" in result.stdout
+    assert "readiness endpoint revision=expected-revision pid=999999" in result.stdout
+    assert ("before required start time" in result.stdout) == bool(expected)
+
+
 def test_restart_attests_dirty_source_and_verifier_rechecks_it():
     restart = (ROOT / "ops" / "restart_web.ps1").read_text(encoding="utf-8")
     verifier = SCRIPT.read_text(encoding="utf-8")

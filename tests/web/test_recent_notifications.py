@@ -278,6 +278,175 @@ def test_late_grouped_image_cannot_change_the_content_of_an_existing_cached_url(
     assert reader.image_path(receipt,0,unrelated) is None
 
 
+def chart_asset(root, payload, periods=None, missing=None):
+    digest = hashlib.sha256(payload).hexdigest()
+    directory = root / 'chart_images'; directory.mkdir(exist_ok=True)
+    path = directory / (digest + '.png'); path.write_bytes(payload)
+    if periods is not None:
+        (directory / (digest + '.json')).write_text(json.dumps({
+            'schema': 'notification-chart-coverage-v1', 'image_sha256': digest,
+            'periods': periods, 'missing_periods': missing, 'primary_frequency': '1m',
+        }), encoding='utf-8')
+    return digest, f'https://example.test/public/alert-chart/{digest}.png?expires=old', path
+
+
+def chart_job(root, value, status='pending', missing=('5m','30m')):
+    from cl_app.services.dingtalk_notifications import signal_key
+    with sqlite3.connect(root / 'chart_jobs.sqlite3') as db:
+        db.execute('''CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,event TEXT,status TEXT,
+            error TEXT,attempts INTEGER,next_try REAL,missing_periods TEXT,present_periods TEXT)''')
+        db.execute('INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?)',
+                   (signal_key(value), json.dumps(value), status, '', 1, NOW+30, json.dumps(missing), '["1m"]'))
+
+
+def test_partial_png_keeps_its_original_coverage_after_a_separate_complete_receipt(records):
+    from cl_app.services.dingtalk_notifications import signal_key
+    root, reader = records; value = event(); key = signal_key(value)
+    add(root, 'signals:partial-origin', [value])
+    partial_hash, partial_url, partial_path = chart_asset(root, b'partial fixture', ['1m'], ['5m','30m'])
+    add(root, 'chart:'+key, [value], kind='chart', content=json.dumps({'text': f'![partial]({partial_url})'}))
+    chart_job(root, value)
+    identity = next(row['id'] for row in reader.list({'kind':'signal'})['items'])
+    first = reader.detail(identity)['images'][0]
+    assert first['coverage_status'] == 'partial' and first['periods'] == ['1m']
+    assert first['status'] == 'ready' and first['delivery_status'] == 'sent'
+    assert first['generation_status'] == 'pending' and '补图等待重试' in first['status_note']
+    with sqlite3.connect(root/'dingtalk_outbox.sqlite3') as db:
+        original_receipt = db.execute('SELECT * FROM outbox WHERE id=?', ('chart:'+key,)).fetchone()
+    full_hash, full_url, full_path = chart_asset(root, b'complete fixture', ['1m','5m','30m'], [])
+    add(root, 'chart-complete:'+key, [value], kind='chart', status='pending',
+        content=json.dumps({'title':'补全图表', 'text':f'![complete]({full_url})'}))
+    with sqlite3.connect(root/'chart_jobs.sqlite3') as db:
+        db.execute("UPDATE jobs SET status='ready',missing_periods='[]',present_periods=?", (json.dumps(['1m','5m','30m']),))
+    result = reader.detail(identity); original, complete = result['images']
+    assert original['coverage_status'] == 'partial' and original['missing_periods'] == ['5m','30m']
+    assert complete['coverage_status'] == 'complete' and complete['role'] == 'completion'
+    assert complete['delivery_status'] == 'pending' and complete['sent_at'] is None
+    assert '补全图待发送' in complete['status_note']
+    assert reader.image_path(identity, 0, partial_hash) == partial_path.resolve()
+    assert reader.image_path(identity, 0, full_hash) == full_path.resolve()
+    assert len(result['related_chart_receipts']) == 2
+    listed = reader.list({'kind':'chart'})['items']
+    assert {row['chart_coverage_status'] for row in listed} == {'partial','complete'}
+    assert next(row for row in listed if row['chart_role']=='completion')['delivery_status'] == 'pending'
+    with sqlite3.connect(root/'dingtalk_outbox.sqlite3') as db:
+        assert db.execute('SELECT * FROM outbox WHERE id=?', ('chart:'+key,)).fetchone() == original_receipt
+
+
+def test_complete_chart_links_to_the_actual_inline_first_receipt_without_relabelling_it(records):
+    from cl_app.services.dingtalk_notifications import signal_key
+    root, reader = records; value = event(inline_chart=True); key = signal_key(value)
+    _, first_url, _ = chart_asset(root, b'inline partial', ['1m'], ['5m','30m'])
+    add(root, 'signals:inline-origin', [value], content=json.dumps({'text':f'![first]({first_url})'}))
+    with sqlite3.connect(root/'dingtalk_outbox.sqlite3') as db:
+        db.execute('INSERT INTO inline_charts VALUES (?,?,?,?)', (key, first_url, NOW-45, 'signals:inline-origin'))
+    _, complete_url, _ = chart_asset(root, b'inline complete', ['1m','5m','30m'], [])
+    add(root, 'chart-complete:'+key, [value], kind='chart', content=json.dumps({'text':f'![full]({complete_url})'}))
+    chart_job(root, value, status='ready', missing=())
+    item = reader.list({'kind':'chart'})['items'][0]
+    details = reader.detail(item['id'])
+    assert len(details['images']) == 2
+    assert {image['coverage_status'] for image in details['images']} == {'partial','complete'}
+    assert {receipt['kind'] for receipt in details['related_chart_receipts']} == {'chart','signals'}
+    assert all(image['delivery_status']=='sent' for image in details['images'])
+
+
+@pytest.mark.parametrize('status,word', [('pending','等待重试'),('running','正在重试'),('failed','重试失败'),('expired','已过期')])
+def test_sent_partial_image_remains_viewable_while_its_job_retries_or_stops(records, status, word):
+    from cl_app.services.dingtalk_notifications import signal_key
+    root, reader = records; value = event()
+    _, url, _ = chart_asset(root, b'retry partial', ['1m'], ['5m','30m'])
+    add(root, 'chart:'+signal_key(value), [value], kind='chart', content=json.dumps({'text':f'![partial]({url})'}))
+    chart_job(root, value, status=status)
+    detail = reader.detail(reader.list({})['items'][0]['id'])
+    assert detail['delivery_status'] == 'sent'
+    assert detail['images'][0]['url'] and detail['images'][0]['status'] == 'ready'
+    assert word in detail['images'][0]['status_note']
+
+
+def test_legacy_ready_job_does_not_prove_a_full_chart_and_unrelated_completion_is_not_linked(records):
+    from cl_app.services.dingtalk_notifications import signal_key
+    root, reader = records; value = event()
+    digest, url, _ = chart_asset(root, b'legacy unknown')
+    add(root, 'chart:'+signal_key(value), [value], kind='chart', content=json.dumps({'text':f'![chart]({url})'}))
+    chart_job(root, value, status='ready', missing=())
+    other = event('OTHER.US'); _, other_url, _ = chart_asset(root, b'other complete', ['1m','5m','30m'], [])
+    add(root, 'chart-complete:'+signal_key(other), [other], kind='chart', content=json.dumps({'text':f'![other]({other_url})'}))
+    identity = reader.list({'q':'AAA'})['items'][0]['id']; result = reader.detail(identity)
+    assert len(result['images']) == 1 and result['images'][0]['coverage_status'] == 'unknown'
+    assert '周期完整性未记录' in result['images'][0]['status_note']
+    metadata = root/'chart_images'/(digest+'.json')
+    metadata.write_text(json.dumps({'schema':'notification-chart-coverage-v1','image_sha256':'f'*64,
+        'periods':['1m','5m','30m'],'missing_periods':[],'primary_frequency':'1m'}),encoding='utf-8')
+    assert reader.detail(identity)['images'][0]['coverage_status'] == 'unknown'
+
+
+def test_grouped_receipt_keeps_another_members_unfinished_chart_visible(records):
+    from cl_app.services.dingtalk_notifications import signal_key
+    root, reader = records; first, second = event('FIRST.US'), event('SECOND.US')
+    add(root, 'signals:grouped-charts', [first, second])
+    _, url, _ = chart_asset(root, b'first only', ['1m','5m','30m'], [])
+    add(root, 'chart:'+signal_key(first), [first], kind='chart', content=json.dumps({'text':f'![first]({url})'}))
+    chart_job(root, second, status='running')
+    identity = reader.list({'kind':'signal'})['items'][0]['id']
+    details = reader.detail(identity)
+    images = details['images']
+    assert len(images) == 2 and images[0]['url']
+    assert details['image_count'] == 1
+    assert images[1]['is_placeholder'] and images[1]['generation_status'] == 'running'
+    assert 'SECOND.US' in images[1]['label'] and images[1]['url'] is None
+
+
+def test_chart_progress_read_failure_cannot_hide_an_actual_sent_image(records):
+    from cl_app.services.dingtalk_notifications import signal_key
+    root, reader = records; value = event()
+    _, url, _ = chart_asset(root, b'saved before failure', ['1m'], ['5m','30m'])
+    add(root, 'chart:'+signal_key(value), [value], kind='chart', content=json.dumps({'text':f'![chart]({url})'}))
+    (root/'chart_jobs.sqlite3').write_bytes(b'unreadable chart progress')
+    detail = reader.detail(reader.list({})['items'][0]['id'])
+    assert detail['delivery_status'] == 'sent' and detail['images'][0]['url']
+    assert detail['images'][0]['coverage_status'] == 'partial'
+    assert detail['images'][0]['generation_status'] == 'unavailable'
+
+
+def test_real_chart_writer_and_reader_preserve_first_receipt_across_completion(tmp_path):
+    from cl_app.services.dingtalk_notifications import DingTalkOutbox
+    from cl_app.services.notification_charts import RenderedChart
+    from tests.web.test_notification_charts import ImageTransport, image_event, PNG
+    clock = [float(NOW)]
+    transport = ImageTransport()
+    box = DingTalkOutbox(tmp_path/'dingtalk_outbox.sqlite3', transport=transport, charts=True,
+                        now=lambda: clock[0], signal_validator=lambda rows: (rows, []))
+    reader = RecentNotifications(tmp_path, now=lambda: clock[0])
+    value = {**image_event(stamp=NOW), 'frequency': '1m'}
+    box.charts.check_public = False  # Fixture transport and local PNGs only.
+    box.charts.renderer = lambda *_: RenderedChart(PNG, periods=['1m'], missing_periods=['5m','30m'], primary_frequency='1m')
+    box.signal_events([value], since=0)
+    box.deliver_one()
+    box.charts.process_one()
+    clock[0] += 5
+    box.deliver_one()
+    first = reader.list({'kind':'chart'})['items'][0]
+    original = reader.detail(first['id'])
+    assert first['delivery_status'] == 'sent' and first['chart_coverage_status'] == 'partial'
+    assert original['images'][0]['generation_status'] == 'pending'
+    first_url = original['images'][0]['url']
+    box.charts.renderer = lambda *_: RenderedChart(PNG+b'complete', periods=['1m','5m','30m'], primary_frequency='1m')
+    clock[0] += 31
+    box.charts.process_one()
+    refreshed = reader.detail(first['id'])
+    assert refreshed['images'][0]['url'] == first_url
+    assert refreshed['images'][0]['coverage_status'] == 'partial'
+    assert refreshed['images'][1]['coverage_status'] == 'complete'
+    assert refreshed['images'][1]['delivery_status'] == 'pending'
+    box.deliver_one()
+    final = reader.detail(first['id'])
+    assert final['images'][1]['delivery_status'] == 'sent'
+    assert len(transport.images) == 2
+    box.charts.process_one(); box.deliver_one()
+    assert len(transport.images) == 2 and reader.list({'kind':'chart'})['pagination']['total'] == 2
+
+
 def test_history_routes_require_login_and_do_not_dispatch(records,monkeypatch):
     from cl_app import create_app
     root,_=records

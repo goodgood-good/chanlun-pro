@@ -131,7 +131,7 @@
     $('notifications-next').disabled=inbox.pending||inbox.searchPending||(pagination.has_more!==undefined?!pagination.has_more:page>=(pagination.pages||1));
   }
   function inboxMessage(value){$('notifications-message').textContent=value||'';}
-  function notificationVersion(row){return JSON.stringify([row.id,row.updated_at,row.status,row.delivery_status,row.sent_at,row.error,row.image_count,row.images]);}
+  function notificationVersion(row){return JSON.stringify([row.id,row.updated_at,row.status,row.delivery_status,row.sent_at,row.error,row.image_count,row.images,row.chart_role,row.chart_coverage_status,row.chart_missing_periods]);}
   function renderNotificationList(result){
     inbox.data=result;
     const summary=result.summary||{},pagination=result.pagination||{},rows=result.items||[];
@@ -163,7 +163,10 @@
         button.append(head,node('span',[notificationSymbols(row),row.kind==='chart'?'图表通知':row.kind==='screening'?'选股汇总':'消息通知'].filter(Boolean).join(' · '),'notification-row-code'));
         const meta=node('div',undefined,'notification-row-meta'),signal=node('span',[row.frequency,notificationLabel(row),notificationStage(row)].filter(Boolean).join(' · '),signalColor(row));
         if(row.holding)signal.append(node('span','我的持仓','monitor-holding-badge'));
-        meta.append(signal,notificationBadge(row));button.append(meta);
+        meta.append(signal,notificationBadge(row));
+        if(row.chart_coverage_status==='partial')meta.append(node('span','部分图 · 缺 '+(row.chart_missing_periods||[]).join(' / '),'muted'));
+        else if(row.chart_role==='completion')meta.append(node('span','补全图表','muted'));
+        button.append(meta);
         const summary=notificationSummary(row);if(summary)button.append(node('p',summary,'notification-row-summary'));
         button.addEventListener('click',()=>void selectNotification(row,true));
         return button;
@@ -181,6 +184,7 @@
     return value.startsWith('/monitor/notifications/')||value.startsWith('/public/alert-chart/')?value:null;
   }
   function imageLabel(image,index){
+    if(typeof image.label==='string'&&image.label)return image.label;
     return Array.isArray(image.periods)&&image.periods.length>1?image.periods.join(' / ')+' 合成图':image.frequency||`附图 ${index+1}`;
   }
   function openNotificationImage(url,label){
@@ -215,7 +219,9 @@
         picture.addEventListener('error',()=>{frame.replaceChildren(node('p','图片暂不可读取，请刷新后重试。','notification-image-unavailable'));});
         button.append(picture);button.addEventListener('click',()=>openNotificationImage(url,label));frame.append(button);
         const caption=node('div',undefined,'notification-image-caption');caption.append(node('span',label),node('span','点击放大'));frame.append(caption);
-      }else frame.append(node('p',image.error||({pending:'图表正在生成或等待发送',failed:'图表生成或发送失败',expired:'图表已超过保存期限'}[image.status])||'这张附图暂不可读取。','notification-image-unavailable'));
+        if(image.status_note)frame.append(node('p',image.status_note,'muted'));
+        if(image.sent_at)frame.append(node('small','此图实际发送：'+date(image.sent_at),'muted'));
+      }else frame.append(node('p',image.error||({pending:'图表正在生成或等待发送',running:'图表正在生成',failed:'图表生成或发送失败',expired:'图表已超过保存期限'}[image.status])||'这张附图暂不可读取。','notification-image-unavailable'));
     };
     images.forEach((image,index)=>{const button=node('button',imageLabel(image,index));button.type='button';button.addEventListener('click',()=>choose(index));buttons.push(button);tabs.append(button);});
     if(images.length>1)section.append(tabs);

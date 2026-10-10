@@ -365,8 +365,8 @@ class ExchangeTDXNYFutures(Exchange):
         return ticks
 
     def now_trading(self, market: str):
-        """纽约期货近似 24 小时交易，始终返回 True。"""
-        return True
+        """Product sessions and provider minute labels are not yet attested."""
+        return None
 
     @staticmethod
     def __convert_date(dt: datetime.datetime):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from bisect import bisect_left
 from datetime import datetime
 from decimal import Decimal
@@ -9,7 +10,9 @@ import json
 import logging
 import math
 import mimetypes
+import os
 from pathlib import Path
+import secrets
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .notification_text import POINTS, heading, price
@@ -21,6 +24,57 @@ VIEW = "/?screening_source=notification&default_study=MACD"
 PERIODS = ("1m", "5m", "30m")
 # Calendar windows are consistent across regular and continuously traded markets.
 VISIBLE_DAYS = {"1m": 30, "5m": 90, "30m": None}
+
+
+class PanelImageCache:
+    """Reuse only exported pixels belonging to this exact frozen event."""
+
+    def __init__(self, event, root):
+        self.identity = hashlib.sha256(json.dumps(event, sort_keys=True, ensure_ascii=True,
+                                                  separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        self.root = Path(root) / self.identity
+        self.entries = {}
+
+    def read(self):
+        output = {}
+        try:
+            saved = json.loads((self.root / 'panels.json').read_text(encoding='utf-8'))
+            if saved.get('schema') != 'notification-frozen-panels-v1' or saved.get('event_sha256') != self.identity:
+                return output
+            for frequency, digest in saved.get('panels', {}).items():
+                if frequency not in PERIODS or not isinstance(digest, str):
+                    continue
+                image = (self.root / (frequency + '.png')).read_bytes()
+                if image.startswith(b'\x89PNG\r\n\x1a\n') and hashlib.sha256(image).hexdigest() == digest:
+                    output[frequency] = 'data:image/png;base64,' + base64.b64encode(image).decode('ascii')
+                    self.entries[frequency] = digest
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        return output
+
+    def save(self, frequency, data):
+        if frequency not in PERIODS or not isinstance(data, str) or not data.startswith('data:image/png;base64,'):
+            raise ValueError('invalid frozen panel result')
+        image = base64.b64decode(data.split(',', 1)[1], validate=True)
+        if not image.startswith(b'\x89PNG\r\n\x1a\n') or len(image) > 8 * 1024 * 1024:
+            raise ValueError('invalid frozen panel PNG')
+        self.root.mkdir(parents=True, exist_ok=True)
+        target = self.root / (frequency + '.png')
+        temporary = self.root / (frequency + '.' + secrets.token_hex(6) + '.tmp')
+        try:
+            temporary.write_bytes(image)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.entries[frequency] = hashlib.sha256(image).hexdigest()
+        record = self.root / 'panels.json'
+        temporary = self.root / ('panels.' + secrets.token_hex(6) + '.tmp')
+        try:
+            temporary.write_text(json.dumps({'schema': 'notification-frozen-panels-v1',
+                                             'event_sha256': self.identity, 'panels': self.entries}), encoding='utf-8')
+            os.replace(temporary, record)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def prepare(event, runs_root):
@@ -122,15 +176,20 @@ def _prepare_panel(event, frame, snapshot, signal, *, context=False):
     }
 
 
-def prepare_periods(event, runs_root):
+def prepare_periods(event, runs_root, *, reused_images=None):
     """Keep the trigger's frozen proof; add independently labelled context charts."""
     from .notification_charts import load_chart_evidence
     from .notification_periods import context_evidence
 
     frame, snapshot, signal = load_chart_evidence(event, runs_root)
-    primary = _prepare_panel(event, frame, snapshot, signal)
+    reused_images = reused_images or {}
+    primary = None if event['frequency'] in reused_images else _prepare_panel(event, frame, snapshot, signal)
     panels = []
     for frequency in PERIODS:
+        if frequency in reused_images:
+            panels.append({'settings': {'frequency': frequency, 'signal_panel': frequency == event['frequency']},
+                           'cached_image': reused_images[frequency]})
+            continue
         if frequency == event['frequency']:
             panels.append(primary)
             continue
@@ -195,7 +254,7 @@ def route_request(route, payload):
         route.fulfill(body=json.dumps(result, ensure_ascii=False, allow_nan=False), content_type="application/json")
 
 
-def capture(payload, *, diagnostics=None):
+def capture(payload, *, diagnostics=None, panel_sink=None, completion_event=None):
     from playwright.sync_api import sync_playwright
 
     def bind_routes(panel):
@@ -214,8 +273,12 @@ def capture(payload, *, diagnostics=None):
             images = []
             composer = None
             for panel in panels:
+                if panel.get('cached_image'):
+                    images.append({'data': panel['cached_image'], 'frequency': panel['settings']['frequency']})
+                    continue
                 if panel.get('error'):
-                    images.append({'frequency': panel['settings']['frequency'], 'error': panel['error']})
+                    images.append({'frequency': panel['settings']['frequency'], 'error': panel['error'],
+                                   'error_type': panel.get('error_type')})
                     continue
                 page = context.new_page()
                 try:
@@ -233,6 +296,11 @@ def capture(payload, *, diagnostics=None):
                         raise ValueError('TradingView did not export a PNG')
                     if diagnostics is not None:
                         diagnostics.append(page.evaluate('window.__notificationViewport'))
+                    if panel_sink is not None:
+                        try:
+                            panel_sink(panel['settings']['frequency'], data)
+                        except OSError:
+                            LOG.warning('notification panel cache unavailable frequency=%s', panel['settings']['frequency'])
                     images.append({'data': data, 'frequency': panel['settings']['frequency']})
                     if panel['settings'].get('signal_panel', True):
                         composer = page
@@ -246,16 +314,56 @@ def capture(payload, *, diagnostics=None):
                         diagnostics.append({'frequency': panel['settings']['frequency'], 'status': 'failed',
                                             'error_type': type(exc).__name__})
                     images.append({'frequency': panel['settings']['frequency'],
-                                   'error': '该周期图表暂不可用；已保留信号周期图表'})
+                                   'error': '该周期图表暂不可用；已保留信号周期图表',
+                                   'error_type': type(exc).__name__})
                 finally:
                     if page is not composer:
                         page.close()
             if composer is None:
-                raise ValueError('no verified signal chart to export')
+                if not any(panel.get('cached_image') and panel['settings'].get('signal_panel', True) for panel in panels):
+                    raise ValueError('no verified signal chart to export')
+                # The primary pixels are already frozen. A blank canvas can
+                # compose them without re-opening a TradingView chart.
+                composer = context.new_page()
+                composer.set_content('<!doctype html><meta charset="utf-8">')
+                compose_source = (APP_ROOT / 'static/js/notification_chart.js').read_text(encoding='utf-8')
+                begin = compose_source.index('window.composeNotificationCharts = async function (panels) {')
+                end = compose_source.index('\n    };', begin) + len('\n    };')
+                # Playwright invokes a returned function with its argument
+                # (null here). Install without returning the compositor.
+                composer.evaluate('() => {\n' + compose_source[begin:end] + '\n}')
             data = composer.evaluate("images => window.composeNotificationCharts(images)", images) if len(images) > 1 else images[0]['data']
+            if completion_event and all(image.get('data') for image in images):
+                from chanlun.screening.rules import CN
+                # DingTalk's chart transport sends pixels only. Label the new
+                # supplement without altering any frozen individual panel.
+                caption = '原行情截止 ' + datetime.fromtimestamp(completion_event['source_closed_at'], CN).strftime('%Y-%m-%d %H:%M:%S')
+                if completion_event.get('recorded_at'):
+                    caption += ' · 原记录 ' + datetime.fromtimestamp(completion_event['recorded_at'], CN).strftime('%Y-%m-%d %H:%M:%S')
+                data = composer.evaluate("""async ({data, title, caption}) => {
+                    const image = new Image(); image.src = data; await image.decode();
+                    const canvas = document.createElement('canvas');
+                    canvas.width = image.width; canvas.height = image.height + 88;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#eef2ff'; ctx.fillRect(0, 0, canvas.width, 88);
+                    ctx.fillStyle = '#1e293b'; ctx.font = 'bold 26px sans-serif';
+                    ctx.fillText(title, 28, 35, canvas.width - 56);
+                    ctx.font = '19px sans-serif'; ctx.fillText(caption, 28, 67, canvas.width - 56);
+                    ctx.drawImage(image, 0, 88);
+                    return canvas.toDataURL('image/png');
+                }""", {'data': data, 'title': '原通知附图补全 · ' + heading(completion_event),
+                        'caption': caption + '（北京时间）'})
             prefix = "data:image/png;base64,"
             if not isinstance(data, str) or not data.startswith(prefix):
                 raise ValueError("TradingView did not export a PNG")
-            return base64.b64decode(data[len(prefix):], validate=True)
+            from .notification_charts import RenderedChart
+            primary_frequency = next((panel['settings']['frequency'] for panel in panels
+                                      if panel['settings'].get('signal_panel', True)), None)
+            return RenderedChart(base64.b64decode(data[len(prefix):], validate=True),
+                                 periods=[image['frequency'] for image in images if image.get('data')],
+                                 missing_periods=[image['frequency'] for image in images if image.get('error')],
+                                 errors={image['frequency']: image.get('error_type') or image['error']
+                                         for image in images if image.get('error')},
+                                 primary_frequency=primary_frequency)
         finally:
             browser.close()

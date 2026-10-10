@@ -378,15 +378,28 @@ class DingTalkOutbox:
     def _signal_content(events, stamp):
         return signal_content(events, stamp)
 
-    def enqueue_chart(self, event, url):
+    def initial_chart_hash(self, event):
+        """Recover the already committed first attachment after a worker crash."""
+        if not self.path.is_file():
+            return None
+        key = signal_key(event)
+        with self._read_connect() as db:
+            if event.get('inline_chart'):
+                row = db.execute('SELECT url FROM inline_charts WHERE signal_key=?', (key,)).fetchone()
+            else:
+                row = db.execute("SELECT content FROM outbox WHERE id=? AND kind='chart'", ('chart:' + key,)).fetchone()
+        matched = re.search(r'/public/alert-chart/([a-f0-9]{64})\.png', str(row[0])) if row else None
+        return matched.group(1) if matched else None
+
+    def enqueue_chart(self, event, url, *, complete=False):
         if not live_signal_events([event],self.now()):
             return False
-        if event.get('inline_chart'):
+        if event.get('inline_chart') and not complete:
             return self._attach_inline_chart(event,url)
-        identity = "chart:" + signal_key(event)
+        identity = ("chart-complete:" if complete else "chart:") + signal_key(event)
         stamp = self.now()
-        content = {"title": "信号图表 · " + heading(event),
-                   "text": "### " + re.sub(r"([\\`*_{}\[\]()#+.!|>])", r"\\\1", heading(event)) + "\n\n行情截止：" + date(event.get("source_closed_at"))
+        content = {"title": ("原信号附图补全 · " if complete else "信号图表 · ") + heading(event),
+                   "text": ("原通知附图补全\n\n" if complete else "") + "### " + re.sub(r"([\\`*_{}\[\]()#+.!|>])", r"\\\1", heading(event)) + "\n\n行情截止：" + date(event.get("source_closed_at"))
                             + "（北京时间）\n\n![信号快照](" + url + ")"}
         with self._lock, self._connect() as db:
             if event['recorded_at'] < self._window_start(db):

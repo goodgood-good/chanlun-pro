@@ -82,6 +82,20 @@ def test_primary_evidence_failure_is_not_converted_to_a_context_warning(signal, 
         tv.prepare_periods(event, tmp_path)
 
 
+def test_retry_prepares_only_missing_period_and_reuses_frozen_pixels(signal, monkeypatch, tmp_path):
+    event, _ = signal
+    cached = {'1m': 'frozen one', '5m': 'frozen primary'}
+    context = Mock(side_effect=lambda e, r, f, a: source(f)[:2])
+    monkeypatch.setattr(notification_periods, 'context_evidence', context)
+    prepare = Mock(wraps=tv._prepare_panel)
+    monkeypatch.setattr(tv, '_prepare_panel', prepare)
+    panels = tv.prepare_periods(event, tmp_path, reused_images=cached)['panels']
+    assert [call.args[2] for call in context.call_args_list] == ['30m']
+    assert prepare.call_count == 1 and prepare.call_args.kwargs == {'context': True}
+    assert [panel['cached_image'] for panel in panels[:2]] == list(cached.values())
+    assert panels[1]['settings']['signal_panel'] is True
+
+
 @pytest.mark.parametrize('field', ['higher_macd_dif', 'higher_macd_dea', 'higher_macd_hist'])
 def test_missing_htf_is_rejected_instead_of_drawing_local_macd_twice(signal, tmp_path, field):
     event, (_, snapshot, _) = signal
@@ -190,9 +204,50 @@ def test_auxiliary_browser_failure_preserves_the_primary_image(monkeypatch, fail
 
     monkeypatch.setattr('playwright.sync_api.sync_playwright', playwright)
     panels = [{'settings': {'frequency': frequency, 'signal_panel': frequency == '5m'}} for frequency in tv.PERIODS]
-    assert tv.capture({'panels': panels}).startswith(b'\x89PNG')
+    result = tv.capture({'panels': panels})
+    assert result.startswith(b'\x89PNG')
+    assert result.coverage['missing_periods'] == [failed_period]
+    assert result.coverage['periods'] == [period for period in tv.PERIODS if period != failed_period]
+    assert result.coverage['errors'][failed_period] == 'RuntimeError'
     assert [p['frequency'] for p in composed] == list(tv.PERIODS)
     assert [p['frequency'] for p in composed if p.get('error')] == [failed_period]
     assert composed[1]['data'] == png
     assert pages[0].closed and pages[2].closed
+    browser.close.assert_called_once()
+
+
+def test_cached_retry_composes_without_reopening_primary_and_labels_supplement(monkeypatch):
+    png = 'data:image/png;base64,iVBORw0KGgo='
+    page = Mock()
+    calls = []
+
+    def evaluate(expression, *args):
+        calls.append((expression, args))
+        return png
+
+    page.evaluate.side_effect = evaluate
+    browser = Mock()
+    browser.new_context.return_value.new_page.return_value = page
+
+    @contextmanager
+    def playwright():
+        yield SimpleNamespace(chromium=SimpleNamespace(launch=lambda **_: browser))
+
+    monkeypatch.setattr('playwright.sync_api.sync_playwright', playwright)
+    panels = [{'settings': {'frequency': frequency, 'signal_panel': frequency == '1m'},
+               'cached_image': png} for frequency in tv.PERIODS]
+    event = {'market': 'us', 'code': 'NVDA.US', 'frequency': '1m', 'point_type': '2buy',
+             'stage': 'confirmed', 'source_closed_at': 1791575340, 'recorded_at': 1791575347}
+    result = tv.capture({'panels': panels}, completion_event=event)
+    assert result.coverage['periods'] == list(tv.PERIODS) and not result.coverage['missing_periods']
+    page.goto.assert_not_called()
+    page.add_init_script.assert_not_called()
+    page.set_content.assert_called_once()
+    assert len(calls) == 3  # Install compositor, compose pixels, add visible supplement header.
+    assert calls[0][0].startswith('() => {\nwindow.composeNotificationCharts =')
+    assert calls[0][0].endswith('\n}')  # No function value returned for Playwright to invoke with null.
+    assert [image['data'] for image in calls[1][1][0]] == [png] * 3
+    banner = calls[2][1][0]
+    assert banner['title'].startswith('原通知附图补全')
+    assert '2026-10-10 03:49:00' in banner['caption'] and '03:49:07' in banner['caption']
     browser.close.assert_called_once()
