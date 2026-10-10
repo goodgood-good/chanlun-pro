@@ -2,7 +2,7 @@
 import pytest
 
 from cl_app.services import signal_monitor
-from tests.web.test_signal_monitor import setup, _seed, signal
+from tests.web.test_signal_monitor import setup as setup, _seed, signal
 
 
 @pytest.fixture
@@ -27,6 +27,9 @@ def test_dispatch_uses_the_state_committed_during_dependency_lookup(ready_event,
             state = service._load()
             if change == 'exit':
                 state['signals'].clear()
+                # A completed negative period check is the exit proof. Clearing
+                # the view while leaving its positive identity is uncertainty.
+                state['selection_checks']['a:SH.600088:5m']['identities'] = []
             elif change == 'failed':
                 state['selection_checks']['a:SH.600088:5m']['error'] = True
             elif change == 'uncertain':

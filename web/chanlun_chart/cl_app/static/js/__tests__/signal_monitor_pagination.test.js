@@ -68,6 +68,32 @@ test('remote pages are not sliced twice and full totals and layout links survive
   assert.equal(url.searchParams.get('signals_q'),'目标');assert.equal(url.searchParams.get('signals_page'),'1');
 });
 
+test('minute scope shows full membership and separates scheduled background checks',async()=>{
+  const data=payload();
+  data.monitor_frequencies=['1m','5m','30m'];
+  data.minute_scope={frequency:'1m',foreground:84,background:41,interval_seconds:300,total:125};
+  data.coverage={...data.coverage,ready:80,scheduled:41};
+  data.seed.symbols[0].minute_monitoring='background';
+  data.seed.symbols[0].coverage_state='scheduled';
+  data.seed.symbols[1].minute_monitoring='realtime';
+  const app=fixture(async()=>({ok:true,json:async()=>data}));await wait();
+  assert.equal(app.get('pool-count').textContent,125);
+  assert.equal(app.get('minute-scope-summary').hidden,false);
+  assert.match(app.get('minute-scope-summary').textContent,/每分钟监听 84 只 · 每5分钟巡检 41 只/);
+  assert.match(app.get('pool-source').textContent,/巡检未到期 41 只/);
+  assert.match(app.get('live-detail').textContent,/1m 后台队列每5分钟巡检/);
+  assert.ok(app.get('pool').children[0].children.some(child=>child.textContent.includes('1m 每5分钟巡检')));
+  assert.ok(app.get('pool').children[1].children.some(child=>child.textContent.includes('1m 每分钟监听')));
+});
+
+test('minute scope is hidden when the minute period is disabled',async()=>{
+  const data=payload();data.monitor_frequencies=['5m','30m'];
+  data.minute_scope={foreground:125,background:0};
+  const app=fixture(async()=>({ok:true,json:async()=>data}));await wait();
+  assert.equal(app.get('minute-scope-summary').hidden,true);
+  assert.equal(app.get('minute-scope-summary').textContent,'');
+});
+
 test('notification activity explains quiet scans without treating existing signals as new',async()=>{
   const data={...payload(),notification_activity:{state:'quiet',message:'监听运行中，最近复核没有新增可发送事件',
     last_check_at:300,last_event_at:100,last_sent_at:105,new_events:0}};

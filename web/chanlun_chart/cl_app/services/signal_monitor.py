@@ -29,6 +29,7 @@ from .notification_handoff import retain as retain_notifications, pending_events
 from .notification_text import REASONS, price as notification_price
 from .monitor_view import validate_page_options
 from .screening_pool_recovery import independent_members, pending_members, suspend_pending, resolve_pending
+from .monitor_scope import build_minute_scope_index, minute_cadence, record_minute_checkpoint
 
 
 ACTIVE = {"starting", "running"}
@@ -43,6 +44,8 @@ LOG = logging.getLogger(__name__)
 _PRIVATE_SNAPSHOT_FIELDS = frozenset({
     'pending_notifications', 'known', 'last_attempt_key', 'force',
     'unverified_signals', 'holding_evidence', 'holding_risk_plans', 'startup_errors', 'last_check_event_refs',
+    'minute_cadence_checkpoints', 'minute_force_pending', 'active_minute_override_tokens',
+    'minute_cadence_policy_version',
 })
 
 
@@ -489,6 +492,34 @@ class SignalMonitor:
             item = current.get(event.get("id"))
             if item is None and consolidation:
                 item = next((row for row in current.values() if row.get("legacy_id") == event.get("id")), None)
+            if item is None and not consolidation:
+                # A queued ordinary point can outlive its in-memory view while
+                # a cold period awaits revalidation. Missing state is not a
+                # current negative proof, and must never become a new signal.
+                from .dingtalk_notifications import eligible_signal_events, live_signal_events
+                stamp = self.now().timestamp()
+                if (event.get('stage') != 'confirmed'
+                        or event.get('point_status', event.get('stage')) != 'confirmed'
+                        or not live_signal_events([event], stamp)
+                        or not eligible_signal_events([event], since=state.get('notification_since', 0), stamp=stamp)):
+                    continue
+                check = checks.get(f'{key}:{frequency}', {})
+                expected = expected_cutoffs.get((key, frequency))
+                negative = (expected is not None and check.get('error') is False
+                            and check.get('revision') == revision
+                            and type(check.get('cutoff')) is int and check['cutoff'] >= expected
+                            and isinstance(check.get('identities'), list) and event['id'] not in check['identities'])
+                known = state['known'].get(event['id'], {})
+                newer = (known.get('updated_at') or 0) >= event['recorded_at']
+                superseded = newer and (known.get('stage') not in (None, 'confirmed')
+                    or known.get('notification_authorized') is False
+                    or known.get('notification_state') not in (None, signal_status_key(event)))
+                if negative or superseded:
+                    continue
+                if expected is not None:
+                    self._request_notification_recheck(event, expected, revision)
+                pending.append(event)
+                continue
             allowed = {"warning", "confirmed", "invalidated"} if consolidation else {"confirmed"}
             legacy_confirmation = (consolidation and "hypothesis_id" not in event and "lifecycle_cycle" not in event
                                    and event.get("stage") == "confirmed" and item is not None
@@ -541,6 +572,13 @@ class SignalMonitor:
             check=state['selection_checks'].get(f'{symbol}:{frequency}',{})
             complete=(not check.get('error') and check.get('revision')==request['revision']
                       and (check.get('cutoff') or 0)>=request['cutoff'])
+            identities = check.get('identities')
+            if complete and isinstance(identities, list) and identities:
+                # A positive period proof with a missing/stale materialized
+                # signal still needs repair; it cannot acknowledge that repair.
+                complete = all(identity in state['signals']
+                               and state['signals'][identity].get('source_closed_at') == check.get('cutoff')
+                               for identity in identities)
             if symbol not in pool or frequency not in periods or request['expires']<=now or complete:
                 self._notification_rechecks.pop(key,None)
         urgent={symbol for symbol,_ in self._notification_rechecks}
@@ -675,12 +713,20 @@ class SignalMonitor:
             screening_read_error=deepcopy(self._load().get('screening_result_error'))
             startup_errors=deepcopy(self._load().get('startup_errors',{}))
             startup_has_pool=bool((self._load().get('seed') or {}).get('codes'))
+            from .monitor_scope import minute_scope_summary
+            minute_scope = minute_scope_summary(raw, revision, {
+                key.rsplit(':', 1)[0]: value for key, value in expected_cutoffs.items() if key.endswith(':1m')})
             if page_options is None:
                 state = deepcopy({k:v for k,v in self._load().items() if k not in _PRIVATE_SNAPSHOT_FIELDS})
+                if state.get('seed'):
+                    for symbol in state['seed'].get('symbols', []):
+                        symbol['minute_monitoring'] = minute_scope.get('per_symbol', {}).get(
+                            _symbol_key(symbol), {}).get('classification')
             else:
                 from .monitor_view import paged_state
                 state = paged_state(self._load(), page_options, revision, monitor_status.get('source_current'),
-                                    expected_cutoffs=expected_cutoffs)
+                                    expected_cutoffs=expected_cutoffs, minute_scope=minute_scope)
+            state['minute_scope'] = {key: value for key, value in minute_scope.items() if key != 'per_symbol'}
         if revision and page_options is None:
             # A deployment invalidates every old-version signal, including
             # symbols outside the batch currently being recomputed. Project
@@ -1475,12 +1521,18 @@ class SignalMonitor:
                 self._incremental_reader.invalidate()
                 terminal_failure = manual.get('status') in {'cancelled', 'failed', 'interrupted'}
                 obsolete = cursor.get('version', [None])[0] != identity or manual.get('source_current') is False
-                if (terminal_failure or obsolete) and seed.pop('incremental_screening_symbols', None):
-                    self._save()
+                if terminal_failure or obsolete:
+                    changed = bool(seed.pop('incremental_screening_symbols', None))
+                    changed |= self._discard_screening_minute_overrides(state, (cursor.get('version') or [None])[0])
+                    if changed:
+                        self._save()
                 return
             after = cursor.get('completed', 0) if tuple(cursor.get('version', [])) == version else 0
-            if tuple(cursor.get('version', [])) != version and seed.pop('incremental_screening_symbols', None):
-                self._save()
+            if tuple(cursor.get('version', [])) != version:
+                changed = bool(seed.pop('incremental_screening_symbols', None))
+                changed |= self._discard_screening_minute_overrides(state, (cursor.get('version') or [None])[0])
+                if changed:
+                    self._save()
             if manual.get('completed', 0) <= after:
                 return
         try:
@@ -1523,6 +1575,10 @@ class SignalMonitor:
             periods = deepcopy(previous.get('periods', {})) if tuple(previous.get('version', [])) == version else {}
             for key, frequencies in admitted_periods.items():
                 periods[key] = sorted(set(periods.get(key, [])) | set(frequencies))
+                if '1m' in frequencies:
+                    state.setdefault('minute_force_pending', {})[key] = {
+                        'source': 'screening', 'run_id': identity,
+                        'revision': result.get('source_revision'), 'through': result.get('results_through')}
             incremental = seed.setdefault('incremental_screening_symbols', {})
             for key, member in members.items():
                 if key not in seed['codes'] and key not in incremental:
@@ -1538,6 +1594,16 @@ class SignalMonitor:
             self._save()
             if result.get('results_through', after) < result.get('completed', 0):
                 self._wake.set()
+
+    @staticmethod
+    def _discard_screening_minute_overrides(state, run_id):
+        pending = state.get('minute_force_pending', {})
+        removed = [key for key, value in pending.items()
+                   if isinstance(value, dict) and value.get('source') == 'screening'
+                   and value.get('run_id') == run_id]
+        for key in removed:
+            pending.pop(key, None)
+        return bool(removed)
 
     def _sync_watchlist(self):
         """Keep user-selected symbols under observation before a signal exists."""
@@ -1638,6 +1704,8 @@ class SignalMonitor:
                 state.get('deferred_monitor_periods', {}).items() if key in pool}
             state['attempted_monitor_periods'] = {key: value for key, value in
                 state.get('attempted_monitor_periods', {}).items() if key.rsplit(':', 1)[0] in pool}
+            for name in ('minute_cadence_checkpoints', 'minute_force_pending'):
+                state[name] = {key: value for key, value in state.get(name, {}).items() if key in pool}
             state["next_check_at"] = 0
             state["selection_checks"] = {key: value for key, value in state["selection_checks"].items()
                                          if value.get("symbol") in pool}
@@ -1820,9 +1888,10 @@ class SignalMonitor:
                     if state.get('background_empty_yields',0)>=1 and not status.get('completed',0):
                         # Allow one committed result after an empty preemption.
                         return
+                    scope_index = build_minute_scope_index(state)
                     for symbol in seed.get('symbols',[]):
                         revision = status.get('current_source_revision') or status.get('source_revision')
-                        available = _available_monitor_periods(state, _symbol_key(symbol), revision)
+                        available = self._schedulable_periods(state, symbol, revision, now, scope_index)
                         if not available:
                             continue
                         frequency = next(f for f in ('1m', '5m', '30m') if f in available)
@@ -1905,6 +1974,45 @@ class SignalMonitor:
             monitor.cancel()
             self._wake.set()
 
+    def _schedulable_periods(self, state, symbol, revision, now, scope_index, decisions=None):
+        """Apply only minute cadence; proof and notification scope stays intact."""
+        key = _symbol_key(symbol)
+        available = _available_monitor_periods(state, key, revision)
+        if '1m' not in available:
+            return available
+        try:
+            closed = closed_bar_cutoff(symbol['market'], symbol['code'], now, '1m')
+        except (ValueError, OSError):
+            # The ordinary calendar-error path owns diagnostics and retries.
+            return available
+        request = self._notification_rechecks.get((key, '1m'), {})
+        decision = minute_cadence(state, key, revision, closed,
+            manual_override=state['force'] or key in state.get('minute_force_pending', {}),
+            notification_recheck=bool(request and request.get('expires', 0) > now.timestamp()),
+            scope_index=scope_index)
+        if decisions is not None:
+            decisions[key] = decision
+        return available if decision['eligible'] else available - {'1m'}
+
+    def _initialize_minute_cadence(self, state, revision):
+        """Adopt existing verified checks once; later seeds still get a first check."""
+        if state.get('minute_cadence_policy_version') == 1 or not revision:
+            return
+        for key in (state.get('seed') or {}).get('codes', []):
+            check = state['selection_checks'].get(f'{key}:1m', {})
+            record_minute_checkpoint(state, key, revision, check.get('cutoff'))
+        state['minute_cadence_policy_version'] = 1
+        self._save()
+
+    @staticmethod
+    def _acknowledge_minute_override(state, symbols, periods_for):
+        pending = state.get('minute_force_pending', {})
+        active = state.get('active_minute_override_tokens', {})
+        for key in symbols:
+            if ('1m' in periods_for(key) and key in active
+                    and pending.get(key) == active[key]):
+                pending.pop(key, None)
+
     def _schedule_monitor(self, now, cutoff, control_version=None):
         # The daily scan may have started earlier in this same scheduler tick.
         # Read its current state before choosing the live worker budget.
@@ -1957,6 +2065,8 @@ class SignalMonitor:
                 return
             reference = monitor_status if monitor_status.get("run_id") else manual
             revision = reference.get('current_source_revision') or reference.get('source_revision')
+            if reference.get('source_current') is True:
+                self._initialize_minute_cadence(state, revision)
             if reference.get("source_current") is False:
                 # Latch the target version, not a failed run ID. A run that
                 # dies before recording its source hash must not force an
@@ -1970,12 +2080,16 @@ class SignalMonitor:
             urgent=self._pending_notification_symbols(state,now.timestamp())
             cutoffs, errors, pending, retries, recent = {}, [], [], set(), set()
             due_retry_periods, due_notification_periods = {}, {}
+            scope_index = build_minute_scope_index(state)
+            schedulable_periods = {}
+            minute_decisions = {}
             previous_calendar_errors = {_symbol_key(error) for error in state.get("schedule_errors", [])}
             for symbol in seed["symbols"]:
                 key = _symbol_key(symbol)
-                available = _available_monitor_periods(state, key, revision)
+                available = self._schedulable_periods(state, symbol, revision, now, scope_index, minute_decisions)
                 if not available:
                     continue
+                schedulable_periods[key] = available
                 symbol_trigger = next(f for f in ('1m', '5m', '30m') if f in available)
                 try:
                     closed = (cutoff if symbol["market"] == "a" and cutoff is not None and symbol_trigger==trigger_period
@@ -2017,10 +2131,12 @@ class SignalMonitor:
                 # New candles and already-due retries take priority over idle
                 # polling. Another batch cannot extend a symbol's backoff.
                 deferred = set(state.get('deferred_monitor_periods', {}).get(key, [])) & available
-                if waiting_interval and not (deferred or due or urgent_due or is_recent and (attempted is None or closed > attempted)):
+                minute_override = '1m' in available and key in state.get('minute_force_pending', {})
+                minute_first_check = minute_decisions.get(key, {}).get('reason') == 'new_candidate'
+                if waiting_interval and not (deferred or minute_override or minute_first_check or due or urgent_due or is_recent and (attempted is None or closed > attempted)):
                     continue
                 fresh = (state["force"] or key in previous_calendar_errors or key in state.get("force_pending_symbols", [])
-                         or bool(deferred) or attempted != closed)
+                         or bool(deferred) or minute_override or minute_first_check or attempted != closed)
                 if fresh or due or urgent_due:
                     pending.append(symbol)
                     cutoffs[key] = closed
@@ -2054,7 +2170,7 @@ class SignalMonitor:
             planned_periods, planned_targets = {}, {}
             for symbol in pending:
                 key = _symbol_key(symbol)
-                available = _available_monitor_periods(state, key, revision)
+                available = schedulable_periods[key]
                 needed = []
                 for frequency in ('30m', '5m', '1m'):
                     if frequency not in available:
@@ -2071,6 +2187,8 @@ class SignalMonitor:
                     explicitly_due = (state['force'] or key in state.get('force_pending_symbols', [])
                             or key in previous_calendar_errors or frequency in due_retry_periods.get(key, ()) or urgent_period
                             or frequency in deferred)
+                    explicitly_due |= frequency == '1m' and key in state.get('minute_force_pending', {})
+                    explicitly_due |= frequency == '1m' and minute_decisions.get(key, {}).get('reason') == 'new_candidate'
                     unchecked = (not revision or expected is None or check.get('error')
                                  or check.get('revision') != revision or check.get('cutoff') != expected)
                     already_attempted = (attempted_period.get('cutoff') == expected
@@ -2079,7 +2197,21 @@ class SignalMonitor:
                         needed.append(frequency)
                 yielded_periods = state.get('live_yielded_periods', {}).get(key, [])
                 needed.sort(key=lambda frequency: (frequency == '1m', frequency in yielded_periods))
-                planned_periods[key] = needed or [next(f for f in ('1m', '5m', '30m') if f in available)]
+                if not needed and key not in state['attempted_cutoffs']:
+                    # A new pool can retain proof while rejecting an in-flight
+                    # scheduling baseline. Recheck one eligible period; cold
+                    # minute work has already been excluded from this set.
+                    needed = [next(f for f in ('1m', '5m', '30m') if f in available)]
+                planned_periods[key] = needed
+            # A quicker symbol clock or an old blanket deferral can make the
+            # symbol look fresh while every eligible period is already checked.
+            # Do not turn an empty plan back into an unsolicited minute task.
+            pending = [symbol for symbol in pending if planned_periods[_symbol_key(symbol)]]
+            if not pending:
+                if state['force'] or state.get('pending_symbols_count'):
+                    state.update(force=False, pending_symbols_count=0)
+                    self._save()
+                return
             # Live clocks precede historical rebuilds. Within each class keep
             # holdings/watchlist priority, bounded retries and queue rotation.
             pending.sort(key=lambda symbol: (_symbol_key(symbol) not in recent,
@@ -2157,6 +2289,9 @@ class SignalMonitor:
                 'notification_rechecks':set(cutoffs)&urgent,
                 'contract_generation':state.get('contract_check_generation', 0),
                 'source_revision': revision,
+                'minute_overrides': {key: self._check_requests.get(None, 0)
+                                     for key, periods in planned_periods.items()
+                                     if state['force'] and '1m' in periods},
                 'interval':state['settings']['interval_seconds'],'check_requests':dict(self._check_requests),
             }
         self._dispatch_monitor(launch)
@@ -2192,6 +2327,7 @@ class SignalMonitor:
                     self._clear_start_failure('live',state)
                     state.pop('monitor_read_error',None)
                     state.pop('abandoned_monitor_run',None)
+                    state.setdefault('minute_force_pending', {}).update(launch.get('minute_overrides', {}))
                     for key in cutoffs:
                         requested = set(launch['options'].get('due_periods', {}).get(key,
                                         launch['settings']['frequencies']))
@@ -2234,6 +2370,9 @@ class SignalMonitor:
                                  _symbol_key(symbol): launch['settings']['frequencies']
                                  for symbol in launch['settings']['symbols']}),
                              active_period_targets=launch.get('period_targets', {}),
+                             active_minute_override_tokens={key: state['minute_force_pending'][key]
+                                 for key in cutoffs if key in state.get('minute_force_pending', {})
+                                 and f'{key}:1m' in launch.get('period_targets', {})},
                              active_scheduled_at=launch['scheduled_at'],active_symbols=list(cutoffs),
                              active_cutoffs=cutoffs,active_consumed_symbols=[],
                              active_partial_periods={},
@@ -2412,6 +2551,7 @@ class SignalMonitor:
                             result.get('current_source_revision') or result.get('source_revision'),frequency)
                 if result["status"] not in ACTIVE | {"completed"}:
                     self._record_failures(unchecked, stamp, result.get("run_id"))
+                    self._acknowledge_minute_override(state, unchecked, periods_for)
                 state["unverified_signals"].update({k: v for k, v in state["signals"].items()
                                                     if touched(v,unchecked)})
                 state["signals"] = {k: v for k, v in state["signals"].items() if not touched(v,unchecked)}
@@ -2452,6 +2592,7 @@ class SignalMonitor:
                         requested[key] = planned & completed_periods
             consumed &= set(state.get("active_symbols", pool))
             checked = {key for key in consumed & pool if periods_for(key)}
+            self._acknowledge_minute_override(state, checked, periods_for)
             risk_results = {key: value for key, value in risk_results.items()
                             if value['original']['frequency'] in periods_for(_symbol_key(value['original']))}
             risk_retries = {_symbol_key(value['original']) for value in risk_results.values() if value['retry']}
@@ -2755,6 +2896,8 @@ class SignalMonitor:
                     "revision": result.get("source_revision"), "identities": identities, "error": False,
                     "input_fingerprint": period.get('input_fingerprint') or (period.get('evidence') or {}).get('input_fingerprint'),
                 }
+                if period['frequency'] == '1m':
+                    record_minute_checkpoint(state, symbol, result.get('source_revision'), period['source_closed_at'])
                 if symbol in state['holding_symbols'] and period.get('evidence'):
                     state['holding_evidence'][period_key]={**{k:period[k] for k in (
                         'market','code','name','frequency','source_closed_at','evidence','price_basis_revision') if k in period},

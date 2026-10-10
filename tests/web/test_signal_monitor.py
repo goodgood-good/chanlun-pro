@@ -194,7 +194,8 @@ def test_dispatch_requires_a_current_successful_period_proof_and_a_live_signal_i
     clock[0] = clock[0].replace(hour=15, minute=1)
     assert service._validate_notification_events([event]) == ([], [event])
     service._load()["signals"].clear()
-    assert service._validate_notification_events([event]) == ([], [])
+    # A missing materialized view is not successful evidence of an exit.
+    assert service._validate_notification_events([event]) == ([], [event])
 
 
 def test_dispatch_rechecks_holding_membership_after_enqueue_and_defers_unknown_membership(setup, monkeypatch):

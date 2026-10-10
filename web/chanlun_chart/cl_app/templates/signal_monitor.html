@@ -76,13 +76,14 @@
     </div>
   </section>
   <section id="monitor-signals-panel" role="tabpanel" aria-labelledby="monitor-signals-tab" data-monitor-panel="signals" hidden aria-label="实时信号与持仓">
-  <section class="summary"><article><small>监听标的</small><strong id="pool-count">0</strong></article><article><small>当前信号</small><strong id="signal-count">0</strong></article><article><small>变化记录</small><strong id="event-count">0</strong></article><article><small>本轮数据问题</small><strong id="error-count">0</strong></article></section>
+  <section class="summary"><article><small>跟踪标的总数</small><strong id="pool-count">0</strong></article><article><small>当前信号</small><strong id="signal-count">0</strong></article><article><small>变化记录</small><strong id="event-count">0</strong></article><article><small>本轮数据问题</small><strong id="error-count">0</strong></article></section>
+  <p id="minute-scope-summary" class="muted" role="status" aria-live="polite" hidden></p>
   <section class="panel monitor-signals"><header><h2>当前买卖点与持仓盘整背驰</h2><span id="signal-cutoff" class="muted"></span></header>
     <p id="holding-focus-summary" class="monitor-holding-summary" role="status" aria-live="polite">正在核对我的持仓…</p>
     <div class="monitor-risk-shortcut"><span id="holding-risk-summary" class="muted" hidden></span><button id="holding-risk-open" type="button" aria-controls="holding-risk-panel" aria-expanded="false">设置持仓风险参考</button></div>
     <p class="muted">持仓信号优先展示。点击标的查看当前行情图表，信号以显示的检查截止时刻为准。</p>
     {{ list_controls('signals', '代码、名称或信号类型') }}<div class="monitor-table"><table><thead><tr><th scope="col">标的</th><th scope="col">信号</th><th scope="col">状态</th><th scope="col">拐点价格</th><th scope="col">信号可用时间</th><th scope="col">行情截止</th></tr></thead><tbody id="signals"></tbody></table></div><p id="signals-empty" class="muted"></p>{{ list_pager('signals', '当前信号') }}</section>
-  <details class="panel"><summary>完整监听名单 · 选股候选与自选标的</summary>{{ list_controls('pool', '代码或名称') }}<p id="pool-empty" class="muted"></p><div id="pool" class="monitor-pool"></div>{{ list_pager('pool', '监听名单') }}</details>
+  <details class="panel"><summary>完整跟踪名单 · 实时监听与后台巡检</summary>{{ list_controls('pool', '代码或名称') }}<p id="pool-empty" class="muted"></p><div id="pool" class="monitor-pool"></div>{{ list_pager('pool', '跟踪名单') }}</details>
   <details class="panel" id="holding-risk-panel"><summary>持仓风险参考 · 绑定买点后持续跟踪</summary>
     <p class="muted">先选择并核对参考买点与周期，再点击绑定。绑定后，已收盘K线跌破对应结构止损、或之后出现同周期已确认卖点时提醒；买点退出选股窗口后继续跟踪。替换或解除参考会结束旧参考的跟踪。这里不会自动下单。</p>
     <button type="button" id="holding-risk-refresh">刷新参考点</button><p id="holding-risk-message" class="muted" role="status" aria-live="polite"></p><div id="holding-risk-list"></div>
@@ -107,6 +108,7 @@
     <details class="monitor-policy"><summary>调度与行情更新说明</summary>
     <p class="muted">选股与监听共享最多 16 个计算进程；同时运行时会给实时监听保留资源。我的持仓始终检查一、二、三类买卖点，普通标的沿用选股的类型筛选。</p>
     <p class="muted">监听最近一轮选股候选及自选组中的标的；自选标的无需先入选或出现信号。各所选 K 线周期独立计算已确认中枢与买卖点，随对应市场的新收盘 K 线更新。提醒在本页保留，可开启钉钉推送，关闭网页后后台任务仍继续。</p>
+    <p class="muted">1m 分层跟踪：持仓、自选和有当前有效买卖点的标的每分钟检查；其余自动候选在成功核验无有效 1m 信号后，每 5 分钟巡检一次，发现有效信号后恢复每分钟检查。后台巡检仍计算 1m 走势，可能较晚发现或错过短暂信号。5m、30m 的检查频率保持不变；数据异常和待核验结果不会当作无信号降频。</p>
     <p class="muted">“我的持仓”分组同时接收盘整背驰提前预警及确认通知。提前预警结合未完成线段的力度减弱、已收盘行情的动能收缩与局部转折，后续可能确认或失效。数据异常时等待复核，失效预警保留在变化记录中。启用前的历史信号不补发；移出持仓分组后停止该标的的盘整背驰提醒。</p>
     <p class="muted">A 股在午间 11:30 和下午 15:00 收盘后各选股一次，分别使用当时最新已收盘 K 线；其他市场按自身完整交易时段取数。实时监听随各市场新 K 线更新。缺少行情、价格基准或交易时段的标的会列入诊断，不当作无信号。</p>
     </details>

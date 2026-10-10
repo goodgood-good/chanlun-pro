@@ -68,7 +68,7 @@ def test_current_revision_with_an_old_cutoff_is_updating_not_ready():
     for check in state['selection_checks'].values():check.update(error=False,cutoff=1000)
     clocks={'a:SH.000000:5m':1300,'a:SH.000001:5m':1000}
     result=paged_state(state,{},'current',True,expected_cutoffs=clocks)
-    assert result['coverage']=={'total':2,'ready':1,'updating':1,'limited':0,'pending':0}
+    assert result['coverage']=={'total':2,'ready':1,'updating':1,'limited':0,'pending':0,'scheduled':0}
     assert result['signals']['0']['data_freshness']=='updating'
     assert result['signals']['1']['data_freshness']=='ready'
     assert period_check_state({'revision':'current','cutoff':1000},'current',None)=='pending'

@@ -63,6 +63,7 @@ def test_remote_pagination_searches_all_rows_and_keeps_full_counts_without_evide
         "updating": 0,
         "limited": 1,
         "pending": 0,
+        "scheduled": 0,
     }
     assert "evidence" not in json.dumps(result) and "selection_checks" not in result
     assert len(json.dumps(result)) < 45000 and state == original

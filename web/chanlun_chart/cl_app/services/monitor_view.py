@@ -48,6 +48,7 @@ ROW_FIELDS = {
     "lower_confirmation_state",
     "lower_frequency",
     "coverage_state",
+    "minute_monitoring",
     "warning_recovery_pending",
     "warning_reactivated",
     'exit_reasons','reference_point_type','stop_price','trigger_price','reverse_point_type','reverse_price',
@@ -140,7 +141,7 @@ def period_check_state(check, revision, expected):
     return 'ready' if check['cutoff'] == expected else 'updating'
 
 
-def paged_state(raw, options, revision, source_current, *, expected_cutoffs=None):
+def paged_state(raw, options, revision, source_current, *, expected_cutoffs=None, minute_scope=None):
     state = deepcopy({k: v for k, v in raw.items() if k in STATE_FIELDS})
     checks = raw.get("selection_checks", {})
     held = set(raw.get("holding_symbols", []))
@@ -185,16 +186,26 @@ def paged_state(raw, options, revision, source_current, *, expected_cutoffs=None
     pool = []
     for symbol in symbols:
         key = f"{symbol.get('market', 'a')}:{symbol['code']}"
-        periods = [freshness(symbol.get('market','a'),symbol['code'],frequency) for frequency in frequencies]
+        minute = (minute_scope or {}).get('per_symbol', {}).get(key, {})
+        periods = []
+        for frequency in frequencies:
+            value = freshness(symbol.get('market','a'),symbol['code'],frequency)
+            if (frequency == '1m' and value == 'updating'
+                    and minute.get('classification') == 'background'
+                    and minute.get('due') is False and minute.get('clock_known') is True):
+                value = 'scheduled'
+            periods.append(value)
         health = (
             "limited"
             if key in failed_symbols or 'limited' in periods
             else 'pending' if not periods or 'pending' in periods
             else 'updating' if 'updating' in periods
+            else 'scheduled' if 'scheduled' in periods
             else 'ready'
         )
         coverage[health] += 1
-        pool.append({**symbol, "coverage_state": health, "holding": key in held})
+        pool.append({**symbol, "coverage_state": health, "holding": key in held,
+                     'minute_monitoring': minute.get('classification')})
     pool.sort(key=lambda row: not row["holding"])
     holding_coverage = Counter(row['coverage_state'] for row in pool if row['holding'])
     risk_bound, risk_attention = set(), set()
@@ -216,7 +227,7 @@ def paged_state(raw, options, revision, source_current, *, expected_cutoffs=None
     }
     state["coverage"] = {
         "total": len(pool),
-        **{key: coverage[key] for key in ("ready", "updating", "limited", "pending")},
+        **{key: coverage[key] for key in ("ready", "updating", "limited", "pending", "scheduled")},
     }
     state["pool_markets"] = dict(Counter(row["market"] for row in symbols))
     state["pagination"] = {}
