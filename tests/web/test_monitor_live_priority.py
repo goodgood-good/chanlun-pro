@@ -264,10 +264,12 @@ def test_frequent_new_bars_cannot_restart_background_work_forever_without_progre
     assert service._load()["background_empty_yields"] == 0
 
 
-def test_real_result_reader_consumes_cancelled_committed_evidence_before_requeue(
-    fixture_run, tmp_path
+@pytest.mark.parametrize('terminal',['cancelled','running_then_cancelled','completed'])
+def test_real_result_reader_keeps_finished_rows_and_requeues_only_owned_cancelled_empty_results(
+    fixture_run, tmp_path, terminal
 ):
     import json
+    import time
     from chanlun.screening.runner import write_json
     from cl_app.services.dingtalk_notifications import DingTalkOutbox
     from tests.web.test_dingtalk_notifications import Transport
@@ -275,11 +277,15 @@ def test_real_result_reader_consumes_cancelled_committed_evidence_before_requeue
     manager, run_id, _ = fixture_run
     path = manager.root / run_id / "status.json"
     status = json.loads(path.read_text(encoding="utf-8"))
-    write_json(path, {**status, "status": "cancelled"})
+    write_json(path, {**status, "status": "running" if terminal=='running_then_cancelled' else terminal,
+                      "completed":2, "total":2, "updated_at":time.time()})
+    if terminal != 'completed':
+        (manager.root/run_id/'cancel').touch()
     records = manager.root / run_id / "results.jsonl"
     record = json.loads(records.read_text(encoding="utf-8"))
     record["rows"][0]["source_closed_at"] = 130
-    records.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    empty={'market':'a','code':'SH.600001','name':'fixture','rows':[],'seconds':0.0}
+    records.write_text(json.dumps(record) + "\n" + json.dumps(empty) + "\n", encoding="utf-8")
     service = SignalMonitor(
         tmp_path / "monitor-state",
         screening=Jobs(tmp_path / "manual"),
@@ -291,7 +297,7 @@ def test_real_result_reader_consumes_cancelled_committed_evidence_before_requeue
         enabled=True,
         active_seed="seed",
         active_monitor_run=run_id,
-        yielding_monitor_run=run_id,
+        yielding_monitor_run=run_id if terminal!='completed' else None,
         active_monitor_mode="background",
         active_symbols=["a:SH.600088", "a:SH.600001"],
         active_cutoffs={"a:SH.600088": 130, "a:SH.600001": 130},
@@ -305,12 +311,21 @@ def test_real_result_reader_consumes_cancelled_committed_evidence_before_requeue
     state["signals"] = {untouched["id"]: untouched}
     service._save()
     service._consume_monitor()
+    if terminal=='running_then_cancelled':
+        assert state['active_consumed_symbols']==['a:SH.600088']
+        assert not state['retry_symbols'] and not state['unverified_signals']
+        write_json(path,{**status,'status':'cancelled','completed':2})
+        service._consume_monitor()
     assert (
-        state["processed_run"] == run_id and state["monitor_cursor"]["completed"] == 1
+        state["processed_run"] == run_id and state["monitor_cursor"]["completed"] == 2
     )
-    assert state["force_pending_symbols"] == ["a:SH.600001"]
-    assert {row["code"] for row in state["signals"].values()} == {
-        "SH.600088",
-        "SH.600001",
-    }
-    assert not state["retry_symbols"] and not state["unverified_signals"]
+    assert 'SH.600088' in {row['code'] for row in state['signals'].values()}
+    if terminal=='completed':
+        assert 'a:SH.600001' in state['retry_symbols']
+        assert untouched['id'] in state['unverified_signals']
+        assert any(e['code']=='SH.600001' and 'PERIOD_CHECK_MISSING' in e['reasons'] for e in state['errors'])
+    else:
+        assert state["force_pending_symbols"] == ["a:SH.600001"]
+        assert {row["code"] for row in state["signals"].values()} == {"SH.600088","SH.600001"}
+        assert not state["retry_symbols"] and not state["unverified_signals"]
+        assert not any('PERIOD_CHECK_MISSING' in e.get('reasons',[]) for e in state['errors'])

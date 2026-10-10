@@ -2139,6 +2139,13 @@ class SignalMonitor:
             risk_retries = {_symbol_key(value['original']) for value in risk_results.values() if value['retry']}
             pool = set((state.get("seed") or {}).get("codes", []))
             consumed = {_symbol_key(symbol) for symbol in result.get("processed_symbols", [])}
+            if (result.get('run_id') == state.get('yielding_monitor_run')
+                    and (yielded or result['status'] in ACTIVE and result.get('cancel_requested'))):
+                # A worker can observe the cancel flag before its first period
+                # and commit rows=[]. Advance the JSONL cursor, but keep this
+                # symbol unfinished for requeue instead of inventing a failure.
+                # Ordinary completed empty records still fail the period check.
+                consumed -= {_symbol_key(symbol) for symbol in result.get('empty_result_symbols', [])}
             consumed &= set(state.get("active_symbols", pool))
             checked = {key for key in consumed & pool if periods_for(key)}
             # A completed old period is acknowledged without publishing its

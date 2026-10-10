@@ -492,7 +492,7 @@ class ScreeningManager:
         consolidation_alerts, verified_periods = [], []
         historical_recheck_periods = []
         u295_lower_structural_witnesses = []
-        processed_symbols, results_through = [], after_completed
+        processed_symbols, empty_result_symbols, results_through = [], [], after_completed
         semantic_exclusions = 0
         lifetime_exclusions = 0
         policy_exclusions = 0
@@ -512,6 +512,8 @@ class ScreeningManager:
                     continue
                 item = json.loads(line)
                 processed_symbols.append({"market": item.get("market", "a"), "code": item["code"]})
+                if item.get('rows') == [] and not item.get('error'):
+                    empty_result_symbols.append(processed_symbols[-1])
                 results_through = index + 1
                 if item.get("error"):
                     errors.append({"code": item["code"], "market": item.get("market", "a"), "error": item["error"],
@@ -845,7 +847,8 @@ class ScreeningManager:
                 "u295_lower_structural_witnesses": u295_lower_structural_witnesses,
                 "u295_lower_structural_witness_count": len(u295_lower_structural_witnesses),
                 "recent_rejections": recent_rejections,
-                "processed_symbols": processed_symbols, "results_through": results_through,
+                "processed_symbols": processed_symbols, "empty_result_symbols": empty_result_symbols,
+                "results_through": results_through,
                 "errors": errors, "rejection_counts": counts,
                 "semantic_exclusion_count": semantic_exclusions,
                 "lifetime_exclusion_count": lifetime_exclusions,
