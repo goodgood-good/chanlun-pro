@@ -94,6 +94,47 @@ test('minute scope is hidden when the minute period is disabled',async()=>{
   assert.equal(app.get('minute-scope-summary').textContent,'');
 });
 
+test('queue diagnostics distinguish waiting tasks, current batch and shared allocation ceilings',async()=>{
+  const data=payload();
+  data.scheduling={waiting:{hot:20,critical:8,cold:3},in_flight:{hot:4,critical:2,cold:1},
+    planned_at:1790000000,allocation:{monitor_capacity:12,screening_capacity:4,limit:16}};
+  const app=fixture(async()=>({ok:true,json:async()=>data}));await wait();
+  const detail=app.get('live-queue-detail');
+  assert.equal(detail.hidden,false);
+  assert.match(detail.textContent,/实时1m：等待 20 项，本批剩余 4 项/);
+  assert.match(detail.textContent,/5m／30m：等待 8 项，本批剩余 2 项/);
+  assert.match(detail.textContent,/1m巡检：等待 3 项，本批剩余 1 项/);
+  assert.match(detail.textContent,/分配上限：监听 12、选股 4 个进程，共享总额度 16/);
+  assert.match(detail.textContent,/不代表同时实占/);
+});
+
+test('an active scan permits one queued manual check and suppresses duplicate in-flight clicks',async()=>{
+  const data=payload();data.screening_job={status:'running'};data.monitor_job={status:'running'};
+  let release;
+  const app=fixture(async(url,options)=>options?.method==='POST'?await new Promise(resolve=>{
+    release=()=>resolve({ok:true,json:async()=>data});
+  }):{ok:true,json:async()=>data});
+  await wait();
+  assert.equal(app.get('check-now').disabled,false);
+  assert.equal(app.get('check-now').textContent,'安排追加复核');
+  app.get('check-now').handlers.click();app.get('check-now').handlers.click();await wait();
+  assert.equal(app.requests.filter(request=>request.options?.method==='POST').length,1);
+  release();await wait();
+  assert.equal(app.get('check-now').disabled,false);
+});
+
+test('delivery metrics label measured stages and do not claim phone arrival',async()=>{
+  const metric={average_seconds:.2,p95_seconds:.3,samples:2};
+  const app=fixture(async url=>({ok:true,json:async()=>url==='/monitor/analytics'?{
+    events:2,timings:[],groups:[],delivery:{days:7,groups:[{market:'a',frequency:'1m',kind:'signals',samples:2,
+      measures:{queue_before_first_claim:metric,validation:metric,validation_total:metric,send_preparation:metric,request:metric}}]}}:payload()}));
+  await wait();app.get('analytics-refresh').handlers.click();await wait();
+  const text=app.get('analytics-timings').children.map(child=>child.textContent).join('\n');
+  assert.match(text,/手机实际到达时间.*不作估算/);
+  for(const label of ['入队至首次处理','末次发送前复核','累计发送前复核','复核后发送准备','平台请求'])assert.ok(text.includes(label));
+  assert.doesNotMatch(text,/queue_before_first_claim|validation_total|send_preparation/);
+});
+
 test('notification activity explains quiet scans without treating existing signals as new',async()=>{
   const data={...payload(),notification_activity:{state:'quiet',message:'监听运行中，最近复核没有新增可发送事件',
     last_check_at:300,last_event_at:100,last_sent_at:105,new_events:0}};

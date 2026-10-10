@@ -108,7 +108,7 @@ class ReusableWorkerPool:
         if key is None or slot not in self.slots:
             return
         self._affinity_sequence += 1
-        protected = stock.get('holding') is True and key[2] in {'5m', '30m'}
+        protected = stock.get('holding') is True and key[2] in {'1m', '5m', '30m'}
         self._affinity.pop(key, None)
         self._affinity[key] = (slot['affinity_id'], protected, self._affinity_sequence)
         local = [k for k, value in self._affinity.items() if value[0] == slot['affinity_id']]
@@ -171,10 +171,7 @@ class ReusableWorkerPool:
                     from .compute_capacity import update_resource_budget,role_capacity
                     monitor=request.get('worker_runtime') is not None
                     pressure=update_resource_budget(request['compute_budget'],monitor=monitor)
-                    target=min(workers,role_capacity(pressure['limit'],monitor=monitor))
-                    if (monitor and pressure['limit']<request['compute_budget']['limit']
-                            and pressure.get('background_until',0)>time.time()):
-                        target=min(target,2)
+                    target=min(workers,role_capacity(pressure['limit'],monitor=monitor,pressure=pressure))
                 if target==0:
                     # Waiting children still consume RAM. Requeue unpublished
                     # work before retiring them, so a zero budget can recover.

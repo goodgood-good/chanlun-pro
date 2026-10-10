@@ -7,6 +7,7 @@ in its detached, bounded worker processes, with a separate results directory.
 from __future__ import annotations
 
 from copy import deepcopy
+from collections import Counter
 from datetime import datetime
 import hashlib
 import json
@@ -17,10 +18,12 @@ import shutil
 import sqlite3
 import threading
 import time
+from uuid import uuid4
 
 from chanlun import config
 from chanlun.screening.rules import CN, POINT_TYPES
-from chanlun.screening.compute_capacity import cpu_capacity, worker_capacity, MAX_WORKERS
+from chanlun.screening.compute_capacity import (cpu_capacity, MAX_WORKERS,
+                                               budget_request, publish_monitor_demand, role_limits)
 from chanlun.screening.runner import write_json
 from chanlun.screening.markets import closed_bar_cutoff, holding_symbols, watchlist_symbols
 from .screening import ScreeningManager, MonitorResultsReadError, manager as screening_manager, read_state_json, validate_settings, all_periods_failed
@@ -30,11 +33,13 @@ from .notification_text import REASONS, price as notification_price
 from .monitor_view import validate_page_options
 from .screening_pool_recovery import independent_members, pending_members, suspend_pending, resolve_pending
 from .monitor_scope import build_minute_scope_index, minute_cadence, record_minute_checkpoint
+from . import monitor_requests
+from .monitor_fairness import plan_batch, task_lane, SERVICE_PATTERN
 
 
 ACTIVE = {"starting", "running"}
 MONITOR_BATCH_SIZE = 64
-MONITOR_DURING_SCREENING_BATCH_SIZE = 16
+MONITOR_WORKER_WAVES = 4
 MONITOR_BACKGROUND_WAVES = 2
 MONITOR_MAX_FAILURES = 3
 MONITOR_READ_ATTEMPTS = 3
@@ -319,7 +324,7 @@ def _invalidation_evidence(previous, period):
 
 
 class SignalMonitor:
-    def __init__(self, root=None, *, screening=None, monitor=None, now=None, notifications=None):
+    def __init__(self, root=None, *, screening=None, monitor=None, now=None, notifications=None, compute_budget=None):
         self._root = root
         self.screening = screening if screening is not None else screening_manager
         self._monitor = monitor
@@ -339,6 +344,11 @@ class SignalMonitor:
         self._thread = None
         self._state = None
         self._control_version = 0
+        self._compute_budget = compute_budget
+        self._publish_compute_budget = root is None or compute_budget is not None
+        self._compute_budget_owner = uuid4().hex
+        self._busy_poll = False
+        self._last_compute_limits = {}
         # Versions distinguish new requests from work already being launched.
         self._check_requests = {}
         self._notification_rechecks = {}
@@ -727,6 +737,7 @@ class SignalMonitor:
                 state = paged_state(self._load(), page_options, revision, monitor_status.get('source_current'),
                                     expected_cutoffs=expected_cutoffs, minute_scope=minute_scope)
             state['minute_scope'] = {key: value for key, value in minute_scope.items() if key != 'per_symbol'}
+            state['scheduling'] = self.scheduling_activity()
         if revision and page_options is None:
             # A deployment invalidates every old-version signal, including
             # symbols outside the batch currently being recomputed. Project
@@ -1232,6 +1243,7 @@ class SignalMonitor:
             release = getattr(monitor, 'release_workers', None)
             if callable(release):
                 release()
+            self._monitor_capacity(0, False)
         self._wake.set()
         return self._control_snapshot(page_options)
 
@@ -1244,6 +1256,10 @@ class SignalMonitor:
             if not (state.get("seed") or {}).get("codes"):
                 raise ValueError("尚无可监听的已完成选股候选")
             self._check_requests[None]=self._check_requests.get(None,0)+1
+            manual_generation = monitor_requests.next_manual_generation(state)
+            for key in state['seed']['codes']:
+                if '1m' in _monitor_periods(state, key):
+                    monitor_requests.add(state, key, 'manual', manual_generation)
             state['contract_blocks'] = {}
             state['contract_check_generation'] = state.get('contract_check_generation', 0) + 1
             state["force"] = True
@@ -1274,6 +1290,7 @@ class SignalMonitor:
             thread.join(timeout=2)
         if self._notifications is not None:
             self._notifications.stop()
+        self._monitor_capacity(0, False)
         # Persisted enablement and detached workers survive a web restart.
 
     def _loop(self):
@@ -1313,7 +1330,53 @@ class SignalMonitor:
                     if report:
                         try:LOG.warning('monitor error state could not be saved: %s',type(storage_error).__name__)
                         except Exception:pass
-            self._wake.wait(3)
+            self._wake.wait(self.poll_interval())
+
+    def poll_interval(self):
+        return .5 if self._busy_poll else 3
+
+    def _monitor_capacity(self, demand, screening_active):
+        """Publish bounded live demand; isolated explicit roots use pure limits."""
+        demand = 0 if self._stop.is_set() else max(0, int(demand))
+        if demand:
+            with self._lock:
+                configured = self._load()['settings'].get('monitor_workers', MAX_WORKERS)
+            demand = min(demand, configured, cpu_capacity())
+        limits = role_limits(cpu_capacity(), demand, screening_active)
+        self._busy_poll = demand > 0
+        if self._publish_compute_budget:
+            if self._compute_budget is None:
+                self._compute_budget = budget_request()
+            try:
+                pressure = publish_monitor_demand(self._compute_budget, demand=demand,
+                    expires_in=12, owner=self._compute_budget_owner)
+                limits['monitor_capacity'] = min(limits['monitor_capacity'], pressure['monitor_capacity'])
+                for key in ('screening_capacity', 'monitor_reserved', 'limit'):
+                    if key in pressure:
+                        limits[key] = pressure[key]
+            except (OSError, ValueError, RuntimeError):
+                # The worker's shared slot locks remain authoritative even if
+                # this advisory demand update could not be published.
+                LOG.warning('monitor compute demand update unavailable')
+        self._last_compute_limits = {**limits, 'monitor_demand': demand, 'observed_at': self.now().timestamp()}
+        return limits['monitor_capacity']
+
+    def scheduling_activity(self):
+        """Queue/allocation counts only; no candle-age latency approximation."""
+        with self._lock:
+            state = self._load()
+            enabled_pool = state['enabled'] and bool((state.get('seed') or {}).get('codes'))
+            active = (set(state.get('active_symbols', [])) - set(state.get('active_consumed_symbols', []))
+                      if enabled_pool and state.get('active_monitor_run') != state.get('processed_run') else set())
+            lanes = state.get('active_service_lanes', {})
+            running = Counter(lanes.get(key, 'critical') for key in active)
+            return {'waiting': {lane: state.get('monitor_queue_counts', {}).get(lane, 0) if enabled_pool else 0
+                                for lane in ('hot', 'critical', 'cold')},
+                    'in_flight': {lane: running[lane] for lane in ('hot', 'critical', 'cold')},
+                    'planned_at': state.get('monitor_queue_at') if enabled_pool else None,
+                    'allocation': deepcopy(self._last_compute_limits),
+                    'weights': {'hot': 8, 'critical': 3, 'cold': 1},
+                    'poll_seconds': self.poll_interval()}
 
     def _notification_worker_health(self):
         from .worker_progress import WorkerProgress
@@ -1576,9 +1639,9 @@ class SignalMonitor:
             for key, frequencies in admitted_periods.items():
                 periods[key] = sorted(set(periods.get(key, [])) | set(frequencies))
                 if '1m' in frequencies:
-                    state.setdefault('minute_force_pending', {})[key] = {
+                    monitor_requests.add(state, key, f'screening:{identity}', {
                         'source': 'screening', 'run_id': identity,
-                        'revision': result.get('source_revision'), 'through': result.get('results_through')}
+                        'revision': result.get('source_revision'), 'through': result.get('results_through')})
             incremental = seed.setdefault('incremental_screening_symbols', {})
             for key, member in members.items():
                 if key not in seed['codes'] and key not in incremental:
@@ -1597,13 +1660,7 @@ class SignalMonitor:
 
     @staticmethod
     def _discard_screening_minute_overrides(state, run_id):
-        pending = state.get('minute_force_pending', {})
-        removed = [key for key, value in pending.items()
-                   if isinstance(value, dict) and value.get('source') == 'screening'
-                   and value.get('run_id') == run_id]
-        for key in removed:
-            pending.pop(key, None)
-        return bool(removed)
+        return monitor_requests.discard_screening(state, run_id)
 
     def _sync_watchlist(self):
         """Keep user-selected symbols under observation before a signal exists."""
@@ -1927,15 +1984,19 @@ class SignalMonitor:
                 active_periods = state.get('active_periods', {})
                 if not active_periods:
                     return
-                minute_only = all(periods == ['1m'] for periods in active_periods.values())
+                active_lanes = state.get('active_service_lanes', {})
+                cold_batch = bool(active_lanes) and all(lane == 'cold' for lane in active_lanes.values())
                 elapsed = now.timestamp() - state.get('active_scheduled_at', now.timestamp())
-                if not minute_only and elapsed < MONITOR_LIVE_SLICE_SECONDS:
+                if elapsed < (5 if cold_batch else MONITOR_LIVE_SLICE_SECONDS):
                     return
                 revision = status.get('current_source_revision') or status.get('source_revision')
                 waiting = False
+                scope_index = build_minute_scope_index(state)
+                decisions = {}
+                urgent = self._pending_notification_symbols(state, now.timestamp())
                 for symbol in seed.get('symbols', []):
                     key = _symbol_key(symbol)
-                    for frequency in _available_monitor_periods(state, key, revision) & {'5m', '30m'}:
+                    for frequency in self._schedulable_periods(state, symbol, revision, now, scope_index, decisions):
                         try:
                             target = closed_bar_cutoff(symbol['market'], symbol['code'], now, frequency)
                         except (ValueError, OSError):
@@ -1946,7 +2007,17 @@ class SignalMonitor:
                         check = state['selection_checks'].get(period_key, {})
                         in_flight = (frequency in active_periods.get(key, [])
                                      and state.get('active_period_targets', {}).get(period_key) == target)
-                        if not in_flight and (check.get('revision') != revision or check.get('cutoff') != target):
+                        retry = _period_retries(state.get('retry_symbols', {}).get(key, {}))
+                        retry = retry.get(frequency, retry.get(None, {}))
+                        if (not state['force'] and retry.get('period_cutoff', retry.get('cutoff')) == target
+                                and (retry.get('failures', 0) >= MONITOR_MAX_FAILURES
+                                     or (retry.get('retry_at') or 0) > now.timestamp())):
+                            continue
+                        needed = (check.get('revision') != revision or check.get('cutoff') != target
+                                  or key in urgent or frequency == '1m' and key in state.get('minute_force_pending', {}))
+                        lane = task_lane(frequency, decisions.get(key, {}))
+                        slice_due = elapsed >= MONITOR_LIVE_SLICE_SECONDS or cold_batch and lane == 'hot'
+                        if not in_flight and needed and slice_due:
                             waiting = True
                             break
                     if waiting:
@@ -1961,7 +2032,7 @@ class SignalMonitor:
                 # A cold period gets one rotation, then an uninterrupted
                 # attempt. Its own cutoff, not the faster symbol clock, guards
                 # against frequent minute ticks killing the same work forever.
-                if not minute_only and any(
+                if any(
                         counts.get(key) == token for key, token in fingerprints.items()):
                     return
                 counts.update(fingerprints)
@@ -2006,14 +2077,31 @@ class SignalMonitor:
 
     @staticmethod
     def _acknowledge_minute_override(state, symbols, periods_for):
-        pending = state.get('minute_force_pending', {})
         active = state.get('active_minute_override_tokens', {})
         for key in symbols:
-            if ('1m' in periods_for(key) and key in active
-                    and pending.get(key) == active[key]):
-                pending.pop(key, None)
+            if '1m' in periods_for(key) and key in active:
+                monitor_requests.acknowledge(state, key, active[key])
 
     def _schedule_monitor(self, now, cutoff, control_version=None):
+        self._busy_poll = False
+        try:
+            return self._plan_monitor(now, cutoff, control_version)
+        finally:
+            with self._lock:
+                state = self._load()
+                active = state['enabled'] and bool((state.get('seed') or {}).get('codes')) and bool(state.get('active_monitor_run')) and (
+                    state.get('active_monitor_run') != state.get('processed_run'))
+            if active:
+                self._busy_poll = True
+            elif not self._busy_poll:
+                self._monitor_capacity(0, False)
+                with self._lock:
+                    state = self._load()
+                    if any(state.get('monitor_queue_counts', {}).values()):
+                        state['monitor_queue_counts'] = {'hot': 0, 'critical': 0, 'cold': 0}
+                        self._save()
+
+    def _plan_monitor(self, now, cutoff, control_version=None):
         # The daily scan may have started earlier in this same scheduler tick.
         # Read its current state before choosing the live worker budget.
         with self._lock:
@@ -2033,6 +2121,14 @@ class SignalMonitor:
         manual = self.screening.status()
         monitor_status = self.monitor.status()
         if monitor_status['status'] in ACTIVE:
+            with self._control_lock:
+                with self._lock:
+                    state = self._load()
+                    active = set(state.get('active_symbols', [])) - set(state.get('active_consumed_symbols', []))
+                    live_active = active & set(state.get('active_live_symbols', []))
+                    demand = (len(live_active) + state.get('pending_live_tasks', 0)
+                              + min(2, len(active - live_active) + state.get('pending_background_tasks', 0))) if state['enabled'] else 0
+                self._monitor_capacity(max(1, demand) if demand else 0, manual['status'] in ACTIVE)
             self._yield_live_for_priority(now, monitor_status, control_version,
                                           expected_seed, expected_run)
             self._yield_background_for_live(now,monitor_status,control_version,
@@ -2214,34 +2310,22 @@ class SignalMonitor:
                 return
             # Live clocks precede historical rebuilds. Within each class keep
             # holdings/watchlist priority, bounded retries and queue rotation.
-            pending.sort(key=lambda symbol: (_symbol_key(symbol) not in recent,
-                                             planned_periods[_symbol_key(symbol)][0] == '1m',
-                                             _symbol_key(symbol) not in state["holding_symbols"],
-                                             _symbol_key(symbol) not in urgent,
-                                             _symbol_key(symbol) in retries,
-                                             symbol.get("origin") != "watchlist",
-                                             state["attempted_cutoffs"].get(_symbol_key(symbol), 0)))
             backlog = len(pending)
             pending_keys={_symbol_key(symbol) for symbol in pending}
             forced = ({_symbol_key(s) for s in pending} if state["force"]
                       else set(state.get("force_pending_symbols", [])))
             forced |= {_symbol_key(symbol) for symbol in pending} & previous_calendar_errors
-            # Every task has one period. A slow minute calculation can neither
-            # hold a completed five-minute proof nor precede a due key period.
-            critical = [symbol for symbol in pending
-                        if planned_periods[_symbol_key(symbol)][0] != '1m']
-            if any(_symbol_key(symbol) in recent for symbol in critical):
-                pending = critical
-            batch_size = (min(MONITOR_BATCH_SIZE, MONITOR_DURING_SCREENING_BATCH_SIZE)
-                          if screening_active else MONITOR_BATCH_SIZE)
-            workers = min(cpu_capacity(), state['settings'].get('monitor_workers', MAX_WORKERS))
-            if screening_active:
-                manual_workers=manual.get('effective_workers')
-                if type(manual_workers) is not int:
-                    manual_workers=worker_capacity(manual.get('settings',{}).get('workers',MAX_WORKERS))
-                workers=min(workers,max(1,cpu_capacity()-manual_workers))
             live_pending=[symbol for symbol in pending if _symbol_key(symbol) in recent]
+            live_work = sum(len(planned_periods[_symbol_key(symbol)]) for symbol in live_pending)
+            historical_work = sum(len(value) for value in planned_periods.values()) - live_work
+            demand = live_work + min(2, historical_work)
+            workers = min(role_limits(cpu_capacity(), demand, screening_active)['monitor_capacity'],
+                          state['settings'].get('monitor_workers', MAX_WORKERS))
+            batch_size = min(MONITOR_BATCH_SIZE, workers * MONITOR_WORKER_WAVES)
             mode='live' if live_pending else 'background'
+            fair_cursor = state.get('monitor_fair_cursor', 0)
+            plan_options = dict(state=state, targets=planned_targets, minute_decisions=minute_decisions,
+                                urgent=urgent, now=now.timestamp())
             if live_pending:
                 historical=[symbol for symbol in pending if _symbol_key(symbol) not in recent]
                 protected=sum(_symbol_key(symbol) in state['holding_symbols'] or _symbol_key(symbol) in urgent
@@ -2254,10 +2338,19 @@ class SignalMonitor:
                 # and the existing force queue rotate the remaining members.
                 reserved=min(workers,max(1,batch_size//4),len(historical),
                              max(0,batch_size-max(1,protected)))
-                pending=[*live_pending[:batch_size-reserved],*historical[:reserved]]
-            elif recent:
+                tasks, fair_cursor = plan_batch(live_pending, planned_periods,
+                    limit=batch_size-reserved, cursor=fair_cursor, **plan_options)
+                old_tasks, fair_cursor = plan_batch(historical, planned_periods,
+                    limit=reserved, cursor=fair_cursor, **plan_options)
+                tasks.extend(old_tasks)
+            else:
                 batch_size=min(batch_size,workers*MONITOR_BACKGROUND_WAVES)
-            pending = pending[:batch_size]
+                tasks, fair_cursor = plan_batch(pending, planned_periods,
+                    limit=batch_size, cursor=fair_cursor, **plan_options)
+            pending = [task['symbol'] for task in tasks]
+            queue_counts = Counter(task_lane(frequency, minute_decisions.get(key, {}))
+                                   for key, frequencies in planned_periods.items() for frequency in frequencies)
+            queue_counts.subtract(task['lane'] for task in tasks)
             cutoffs = {_symbol_key(symbol): cutoffs[_symbol_key(symbol)] for symbol in pending}
             # Keep capacity for the waiting backlog when an urgent batch is
             # small. The pool starts children only when it has an actual task;
@@ -2268,12 +2361,23 @@ class SignalMonitor:
             runtime_periods={_symbol_key(symbol):sorted({p['frequency'] for p in state['holding_risk_plans'].values()
                 if p.get('active') and f"{p['market']}:{p['code']}"==_symbol_key(symbol)}) for symbol in pending}
             runtime_periods={k:v for k,v in runtime_periods.items() if set(v)-set(seed['settings']['frequencies'])}
-            due_periods={_symbol_key(symbol): planned_periods[_symbol_key(symbol)][:1] for symbol in pending}
+            due_periods={task['key']: [task['frequency']] for task in tasks}
             subset=any(set(due_periods[_symbol_key(s)]) != (set(seed['settings']['frequencies'])|set(runtime_periods.get(_symbol_key(s),[])))
                        for s in pending)
             # A cached membership snapshot still bounds computation while the
             # database recovers; publication separately requires current membership.
             catalog_args={'holding_snapshot':list(state['holding_symbols'])}
+            force_generation = {'seed': seed['run_id'], 'revision': revision,
+                                'control': control_version, 'request': self._check_requests.get(None, 0)}
+            minute_overrides = {key: force_generation for key, periods in planned_periods.items()
+                                if state['force'] and '1m' in periods}
+            minute_snapshots = {}
+            for key, frequencies in due_periods.items():
+                if '1m' not in frequencies:
+                    continue
+                minute_snapshots[key] = monitor_requests.snapshot(state, key)
+                if key in minute_overrides:
+                    minute_snapshots[key]['sources']['recheck'] = deepcopy(force_generation)
             launch={
                 'control_version':control_version,'seed':seed['run_id'],
                 'expected_run':expected_run,'expected_processed':expected_processed,
@@ -2281,7 +2385,7 @@ class SignalMonitor:
                 'options':deepcopy({**catalog_args,**({'monitor_periods':runtime_periods} if runtime_periods else {}),
                                    **({'due_periods':due_periods} if subset else {})}),
                 'cutoffs':cutoffs,'retries':retries,'forced':forced,
-                'deferred_periods':{key: planned_periods[key][1:] for key in cutoffs},
+                'deferred_periods':{key: [f for f in planned_periods[key] if f not in due_periods[key]] for key in cutoffs},
                 'period_targets':{f'{key}:{frequency}': planned_targets[f'{key}:{frequency}']
                                   for key, periods in due_periods.items() for frequency in periods},
                 'pending_before':set(state.get('force_pending_symbols',[])),
@@ -2289,12 +2393,47 @@ class SignalMonitor:
                 'notification_rechecks':set(cutoffs)&urgent,
                 'contract_generation':state.get('contract_check_generation', 0),
                 'source_revision': revision,
-                'minute_overrides': {key: self._check_requests.get(None, 0)
-                                     for key, periods in planned_periods.items()
-                                     if state['force'] and '1m' in periods},
+                'minute_overrides': minute_overrides,
+                'minute_request_snapshots': minute_snapshots,
+                'fair_cursor': fair_cursor,
+                'service_lanes': {task['key']: task['lane'] for task in tasks},
+                'service_deadlines': {task['key']: task['deadline'] for task in tasks},
+                'compute_demand': demand, 'screening_active': screening_active,
+                'active_live_symbols': sorted(set(cutoffs) & recent),
+                'pending_live_tasks': max(0, live_work - len(set(cutoffs) & recent)),
+                'pending_background_tasks': max(0, historical_work - len(set(cutoffs) - recent)),
+                'queue_counts': dict(queue_counts),
                 'interval':state['settings']['interval_seconds'],'check_requests':dict(self._check_requests),
             }
         self._dispatch_monitor(launch)
+
+    @staticmethod
+    def _trim_launch(launch, capacity):
+        """A lower live memory budget must not leave an oversized queued wave."""
+        waves = MONITOR_WORKER_WAVES if launch['mode'] == 'live' else MONITOR_BACKGROUND_WAVES
+        limit = min(MONITOR_BATCH_SIZE, max(1, capacity) * waves)
+        symbols = launch['settings']['symbols']
+        if len(symbols) <= limit:
+            return
+        removed = {_symbol_key(symbol) for symbol in symbols[limit:]}
+        live_removed = removed & set(launch.get('active_live_symbols', []))
+        for key in removed:
+            lane = launch.get('service_lanes', {}).get(key, 'critical')
+            launch['queue_counts'][lane] = launch['queue_counts'].get(lane, 0) + 1
+        launch['settings']['symbols'] = symbols[:limit]
+        launch['waiting'].update(removed)
+        launch['notification_rechecks'].difference_update(removed)
+        launch['fair_cursor'] = (launch['fair_cursor'] - len(removed)) % len(SERVICE_PATTERN)
+        launch['pending_live_tasks'] += len(live_removed)
+        launch['pending_background_tasks'] += len(removed - live_removed)
+        launch['active_live_symbols'] = sorted(set(launch.get('active_live_symbols', [])) - removed)
+        for field in ('cutoffs', 'deferred_periods', 'minute_request_snapshots', 'service_lanes', 'service_deadlines'):
+            launch[field] = {key: value for key, value in launch.get(field, {}).items() if key not in removed}
+        launch['period_targets'] = {key: value for key, value in launch['period_targets'].items()
+                                    if key.rsplit(':', 1)[0] not in removed}
+        for field in ('due_periods', 'monitor_periods'):
+            if field in launch['options']:
+                launch['options'][field] = {key: value for key, value in launch['options'][field].items() if key not in removed}
 
     def _dispatch_monitor(self, launch):
         # Launches are serialized with enable/pause, but their process/file I/O
@@ -2315,6 +2454,12 @@ class SignalMonitor:
                 if not self._start_allowed('live',context):
                     return
             try:
+                capacity = self._monitor_capacity(launch.get('compute_demand', len(launch['cutoffs'])),
+                                                  launch.get('screening_active', False))
+                if capacity < 1:
+                    return
+                launch['settings']['workers'] = min(launch['settings']['workers'], capacity)
+                self._trim_launch(launch, launch['settings']['workers'])
                 launched=monitor.start(launch['settings'],**launch['options'])
             except Exception as error:
                 self._record_start_failure('live',context,error)
@@ -2327,7 +2472,8 @@ class SignalMonitor:
                     self._clear_start_failure('live',state)
                     state.pop('monitor_read_error',None)
                     state.pop('abandoned_monitor_run',None)
-                    state.setdefault('minute_force_pending', {}).update(launch.get('minute_overrides', {}))
+                    for key, generation in launch.get('minute_overrides', {}).items():
+                        monitor_requests.add(state, key, 'recheck', generation)
                     for key in cutoffs:
                         requested = set(launch['options'].get('due_periods', {}).get(key,
                                         launch['settings']['frequencies']))
@@ -2357,6 +2503,11 @@ class SignalMonitor:
                     pool=set(seed['codes'])
                     newer_full_check=self._check_requests.get(None,0)!=launch['check_requests'].get(None,0)
                     state.update(force=state['force'] if newer_full_check else False,last_error='',
+                                 monitor_fair_cursor=launch.get('fair_cursor', state.get('monitor_fair_cursor', 0)),
+                                 pending_live_tasks=launch.get('pending_live_tasks', 0),
+                                 pending_background_tasks=launch.get('pending_background_tasks', 0),
+                                 monitor_queue_counts=launch.get('queue_counts', {}),
+                                 monitor_queue_at=launch['scheduled_at'],
                                  force_pending_symbols=sorted(((launch['forced']|changed)-acknowledged)&pool),
                                  pending_symbols_count=len((launch['waiting']|changed)&pool),
                                  next_check_at=launch['scheduled_at']+launch['interval'])
@@ -2370,9 +2521,10 @@ class SignalMonitor:
                                  _symbol_key(symbol): launch['settings']['frequencies']
                                  for symbol in launch['settings']['symbols']}),
                              active_period_targets=launch.get('period_targets', {}),
-                             active_minute_override_tokens={key: state['minute_force_pending'][key]
-                                 for key in cutoffs if key in state.get('minute_force_pending', {})
-                                 and f'{key}:1m' in launch.get('period_targets', {})},
+                             active_service_lanes=deepcopy(launch.get('service_lanes', {})),
+                             active_service_deadlines=deepcopy(launch.get('service_deadlines', {})),
+                             active_live_symbols=launch.get('active_live_symbols', []),
+                             active_minute_override_tokens=deepcopy(launch.get('minute_request_snapshots', {})),
                              active_scheduled_at=launch['scheduled_at'],active_symbols=list(cutoffs),
                              active_cutoffs=cutoffs,active_consumed_symbols=[],
                              active_partial_periods={},

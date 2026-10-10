@@ -76,13 +76,25 @@ def test_bound_shorter_period_does_not_make_other_symbols_scan_that_period(
 
     cutoff_30=trading_context(clock[0],'30m',1,1)['cutoff']
     cutoff_5=trading_context(clock[0],'5m',1,1)['cutoff']
-    original=live.committed_results
-    def results(*args,**kwargs):
-        value=original(*args,**kwargs)
-        value['verified_periods'].append({'market':'a','code':'SH.600088','frequency':'5m',
-                                         'source_closed_at':cutoff_5,'consolidation_checked':True})
-        return value
-    live.committed_results=results;live.finish(cutoff_30);service._consume_monitor()
+    expected = {'30m': cutoff_30, '5m': cutoff_5}
+    checked = {}
+    # Each task now requests exactly one physical period. Commit only the
+    # dispatched work; a bound sibling must arrive through a subsequent batch.
+    for _ in range(4):
+        requested = set()
+        for symbol in live.state['settings']['symbols']:
+            periods = symbol.get('_monitor_periods', live.state['settings']['frequencies'])
+            requested.update(periods)
+            checked.setdefault(symbol['code'], set()).update(periods)
+        live.finish(max(expected[period] for period in requested))
+        live.state['cutoffs'] = {period: expected[period] for period in requested}
+        service._consume_monitor()
+        if checked.get('SH.600088') == {'30m', '5m'} and checked.get('SH.600089') == {'30m'}:
+            break
+        before = len(live.started)
+        service._schedule_monitor(clock[0], None)
+        assert len(live.started) > before, 'the bound sibling period was not scheduled'
+    assert checked == {'SH.600088': {'30m', '5m'}, 'SH.600089': {'30m'}}
     assert service._load()['last_cutoffs']['30m']==cutoff_30
     assert service._load()['last_cutoffs']['5m']==cutoff_5
 

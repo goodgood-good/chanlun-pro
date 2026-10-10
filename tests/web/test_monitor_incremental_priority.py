@@ -55,9 +55,20 @@ def periods(live):
             for symbol in live.started[-1]['symbols']]
 
 
-def test_key_periods_get_separate_commits_before_minute_work_and_do_not_repeat(monitor):
+def schedule_until_period(service, live, clock, frequency):
+    """A due sibling may use its fair share before the period under test."""
+    for _ in range(3):
+        service._schedule_monitor(clock[0], None)
+        if periods(live) == [[frequency]]:
+            return
+        live.errors = []
+        finish(service, live, clock)
+    raise AssertionError(f'{frequency} did not receive a fair service slot')
+
+
+def test_fair_periods_get_separate_commits_and_do_not_repeat(monitor):
     service, _, live, clock = monitor
-    for expected in [['30m'], ['5m'], ['1m']]:
+    for expected in [['1m'], ['5m'], ['30m']]:
         service._schedule_monitor(clock[0], None)
         assert periods(live) == [expected]
         finish(service, live, clock)
@@ -66,17 +77,14 @@ def test_key_periods_get_separate_commits_before_minute_work_and_do_not_repeat(m
     assert len(live.started) == 3
     clock[0] += timedelta(minutes=1)
     service._schedule_monitor(clock[0], None)
-    assert periods(live) == [['5m']]
+    assert periods(live) == [['1m']]
     finish(service, live, clock)
     service._schedule_monitor(clock[0], None)
-    assert periods(live) == [['1m']]
+    assert periods(live) == [['5m']]
 
 
 def test_key_boundary_interrupts_minute_work_and_requeues_without_failure(monitor):
     service, _, live, clock = monitor
-    for _ in range(2):
-        service._schedule_monitor(clock[0], None)
-        finish(service, live, clock)
     service._schedule_monitor(clock[0], None)
     assert periods(live) == [['1m']]
     clock[0] += timedelta(minutes=1)
@@ -86,21 +94,24 @@ def test_key_boundary_interrupts_minute_work_and_requeues_without_failure(monito
     assert not service._load()['retry_symbols']
     assert not service._load()['errors']
     service._schedule_monitor(clock[0], None)
+    assert periods(live) == [['1m']]
+    assert set(service._load()['deferred_monitor_periods']['a:SH.600088']) == {'5m', '30m'}
+    finish(service, live, clock)
+    service._schedule_monitor(clock[0], None)
     assert periods(live) == [['5m']]
-    assert service._load()['deferred_monitor_periods']['a:SH.600088'] == ['1m']
 
 
 def test_failed_key_period_does_not_hold_other_periods(monitor):
     service, _, live, clock = monitor
+    service._load()['seed']['settings']['frequencies'] = ['1m', '30m']
+    service._load()['monitor_fair_cursor'] = 2
     service._schedule_monitor(clock[0], None)
     live.errors = [{'market': 'a', 'code': 'SH.600088', 'frequency': '30m', 'reasons': ['ENGINE_ERROR']}]
     finish(service, live, clock)
     service._schedule_monitor(clock[0], None)
-    assert periods(live) == [['5m']]
+    assert periods(live) == [['1m']]
     live.errors = []
     finish(service, live, clock)
-    service._schedule_monitor(clock[0], None)
-    assert periods(live) == [['1m']]
     assert service._load()['selection_checks']['a:SH.600088:30m']['error']
 
 
@@ -110,10 +121,12 @@ def test_notification_recheck_does_not_repeat_unrelated_period_or_starve_sibling
     target = int(clock[0].timestamp()) // (int(frequency[:-1]) * 60) * int(frequency[:-1]) * 60
     service._notification_rechecks[('a:SH.600088', frequency)] = {
         'cutoff': target, 'revision': 'current', 'expires': clock[0].timestamp() + 1800}
-    for expected in ['30m', '5m', '1m']:
+    seen = []
+    for _ in range(3):
         service._schedule_monitor(clock[0], None)
-        assert periods(live) == [[expected]]
+        seen.extend(periods(live)[0])
         finish(service, live, clock)
+    assert set(seen) == {'1m', '5m', '30m'}
     service._schedule_monitor(clock[0], None)
     assert len(live.started) == 3
     assert not service._notification_rechecks
@@ -155,7 +168,7 @@ def test_period_retry_survives_faster_minute_clock_and_sibling_success(monitor, 
     assert len(live.started) == 3
     clock[0] += timedelta(seconds=30)
     live.errors = []
-    service._schedule_monitor(clock[0], None)
+    schedule_until_period(service, live, clock, frequency)
     assert periods(live) == [[frequency]]
     assert service._load()['retry_symbols'][key]['period_cutoff'] == target
     finish(service, live, clock)
@@ -177,16 +190,22 @@ def test_two_failed_periods_keep_independent_retry_budgets_and_do_not_erase_each
     assert set(state['retry_symbols'][key]['by_period']) == {'30m', '5m'}
     clock[0] += timedelta(minutes=1)
     service._schedule_monitor(clock[0], None)
-    assert periods(live) == [['30m']]
-    live.errors = [{'market':'a','code':'SH.600088','frequency':'30m','reasons':['ENGINE_ERROR']}]
+    if periods(live) == [['1m']]:
+        live.errors = []
+        finish(service, live, clock)
+        assert all(row['failures'] == 1 for row in state['retry_symbols'][key]['by_period'].values())
+        service._schedule_monitor(clock[0], None)
+    failed_period = periods(live)[0][0]
+    other_period = ({'30m', '5m'} - {failed_period}).pop()
+    live.errors = [{'market':'a','code':'SH.600088','frequency':failed_period,'reasons':['ENGINE_ERROR']}]
     finish(service, live, clock)
     records = state['retry_symbols'][key]['by_period']
-    assert records['30m']['failures'] == 2 and records['5m']['failures'] == 1
+    assert records[failed_period]['failures'] == 2 and records[other_period]['failures'] == 1
     service._schedule_monitor(clock[0], None)
-    assert periods(live) == [['5m']]
+    assert periods(live) == [[other_period]]
     live.errors = []
     finish(service, live, clock)
-    assert state['retry_symbols'][key]['periods'] == ['30m']
+    assert state['retry_symbols'][key]['periods'] == [failed_period]
     assert state['retry_symbols'][key]['failures'] == 2
 
 
@@ -201,13 +220,18 @@ def test_new_bar_of_failed_period_resets_its_own_exhausted_budget(monitor):
     service._load()['retry_symbols'][key].update(failures=3, retry_at=None)
     clock[0] = clock[0].replace(hour=11, minute=0)
     live.errors = []
-    service._schedule_monitor(clock[0], None)
+    schedule_until_period(service, live, clock, '30m')
     assert periods(live) == [['30m']]
     assert key not in service._load()['retry_symbols']
 
 
-def test_slow_thirty_minute_tail_yields_to_five_minute_sibling(monitor):
+def test_slow_thirty_minute_tail_yields_to_hot_minute_then_gets_one_complete_attempt(monitor):
     service, _, live, clock = monitor
+    state = service._load()
+    state.update(force=False, monitor_fair_cursor=2)
+    state['selection_checks']['a:SH.600088:5m'] = {
+        'symbol': 'a:SH.600088', 'revision': 'current', 'error': False, 'identities': [],
+        'cutoff': int(clock[0].timestamp()) // 300 * 300, 'input_fingerprint': 'a'*64}
     service._schedule_monitor(clock[0], None)
     assert periods(live) == [['30m']]
     clock[0] += timedelta(seconds=30)
@@ -215,7 +239,7 @@ def test_slow_thirty_minute_tail_yields_to_five_minute_sibling(monitor):
     assert live.state['cancel_requested']
     finish(service, live, clock, cancelled=True, committed=[])
     service._schedule_monitor(clock[0], None)
-    assert periods(live) == [['5m']]
+    assert periods(live) == [['1m']]
     finish(service, live, clock)
     service._schedule_monitor(clock[0], None)
     assert periods(live) == [['30m']]
@@ -233,6 +257,7 @@ def test_cancelled_legacy_partial_record_keeps_unfinished_period_unchecked(monit
     state = service._load()
     state['active_periods'] = {'a:SH.600088': ['30m', '5m']}
     state['deferred_monitor_periods'] = {}
+    state['minute_force_pending'] = {}  # This fixture represents a legacy 30m/5m-only request.
     state['yielding_monitor_run'] = live.state['run_id']
     committed = live.committed_results
 
@@ -368,7 +393,7 @@ def test_blocked_screening_audit_does_not_delay_key_schedule_or_start_more_reade
         for _ in range(3):
             service._consume_screening_increment(manual.status(), service._control_version, clock[0])
         service._schedule_monitor(clock[0], None)
-        assert periods(live) == [['30m']]
+        assert periods(live) == [['1m']]
         finish(service, live, clock)
         service._schedule_monitor(clock[0], None)
         assert periods(live) == [['5m']]

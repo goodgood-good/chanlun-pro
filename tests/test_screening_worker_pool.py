@@ -140,17 +140,19 @@ def test_worker_retirement_removes_affinity_and_never_owns_a_new_child(pool, tmp
     assert not pool._affinity
 
 
-def test_affinity_holding_protection_is_bounded_per_worker_and_per_pool(pool, tmp_path, monkeypatch):
+@pytest.mark.parametrize('frequency', ['1m', '5m', '30m'])
+def test_affinity_holding_protection_is_bounded_per_worker_and_per_pool(pool, tmp_path, monkeypatch, frequency):
     from chanlun.screening import worker_pool
     monkeypatch.setattr(worker_pool, 'MAX_AFFINITY_KEYS', 2)
     monkeypatch.setattr(worker_pool, 'MAX_SLOT_AFFINITY_KEYS', 2)
     stocks = [{'code':f'SH.60000{n}','name':str(n),'holding':n == 0} for n in range(3)]
-    results(scan(pool, tmp_path/'ordinary', stocks))
+    results(scan(pool, tmp_path/'ordinary', stocks, settings={'frequencies':[frequency]}))
     assert len(pool._affinity) == 2
-    assert ('a', stocks[0]['code'], '5m') in pool._affinity
-    results(scan(pool, tmp_path/'held', [{**stock,'holding':True} for stock in stocks[1:]]))
+    assert ('a', stocks[0]['code'], frequency) in pool._affinity
+    results(scan(pool, tmp_path/'held', [{**stock,'holding':True} for stock in stocks[1:]],
+                 settings={'frequencies':[frequency]}))
     assert len(pool._affinity) == 2
-    assert ('a', stocks[0]['code'], '5m') not in pool._affinity
+    assert ('a', stocks[0]['code'], frequency) not in pool._affinity
 
 
 def test_memory_pressure_releases_idle_workers_and_resumes_without_losing_stocks(pool,tmp_path,monkeypatch):

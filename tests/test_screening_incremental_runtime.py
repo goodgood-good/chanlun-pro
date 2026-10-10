@@ -217,18 +217,19 @@ def test_failed_render_is_discarded_and_lru_source_bar_budget_is_enforced(tmp_pa
     assert metrics["mode"] == "cold"
 
 
-def test_held_period_priority_survives_other_symbols_but_keeps_hard_budget(tmp_path, monkeypatch):
+@pytest.mark.parametrize('frequency', ['1m', '5m', '30m'])
+def test_held_period_priority_survives_other_symbols_but_keeps_hard_budget(tmp_path, monkeypatch, frequency):
     frame = recorded("QQQ.US_30m.parquet", "us")
     monkeypatch.setattr(runtime_cache, "MAX_ENTRIES", 2)
     with runtime_cache.incremental_snapshot_scope(tmp_path, "held", priority=True):
-        runner.snapshot_for(frame, "QQQ.US", "30m")
-    calculate(frame, "QQQ.US", "30m", tmp_path, revision="ordinary-1")
-    calculate(frame, "QQQ.US", "30m", tmp_path, revision="ordinary-2")
+        runner.snapshot_for(frame, "QQQ.US", frequency)
+    calculate(frame, "QQQ.US", frequency, tmp_path, revision="ordinary-1")
+    calculate(frame, "QQQ.US", frequency, tmp_path, revision="ordinary-2")
     assert len(runtime_cache._entries) == 2
     with runtime_cache.incremental_snapshot_scope(tmp_path, "held", priority=True) as metrics:
-        runner.snapshot_for(frame, "QQQ.US", "30m")
+        runner.snapshot_for(frame, "QQQ.US", frequency)
     assert metrics["mode"] == "unchanged"
     monkeypatch.setattr(runtime_cache, "MAX_ENTRIES", 1)
     with runtime_cache.incremental_snapshot_scope(tmp_path, "new-held", priority=True):
-        runner.snapshot_for(frame, "QQQ.US", "30m")
+        runner.snapshot_for(frame, "QQQ.US", frequency)
     assert len(runtime_cache._entries) == 1

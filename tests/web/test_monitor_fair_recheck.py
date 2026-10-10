@@ -110,10 +110,11 @@ def test_fair_recheck_shares_the_existing_budget_with_a_full_screening_run(mixed
     manual.state = {'status': 'running', 'effective_workers': 14, 'settings': {'workers': 16}}
     service._schedule_monitor(clock[0], None)
     batch = live.started[-1]
-    assert batch['workers'] == 2
-    assert len(batch['symbols']) == signal_monitor.MONITOR_DURING_SCREENING_BATCH_SIZE == 16
-    assert sum(s['market'] == 'a' for s in batch['symbols']) == 2
-    assert sum(s['market'] == 'us' for s in batch['symbols']) == 14
+    assert batch['workers'] == 12
+    assert len(batch['symbols']) == 28
+    assert len(batch['symbols']) <= batch['workers'] * signal_monitor.MONITOR_WORKER_WAVES
+    assert sum(s['market'] == 'a' for s in batch['symbols']) == 8
+    assert sum(s['market'] == 'us' for s in batch['symbols']) == 20
 
 
 def test_mixed_batch_notifies_new_live_point_without_replaying_historical_point(mixed, monkeypatch):

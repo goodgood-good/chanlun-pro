@@ -192,9 +192,12 @@ def test_unowned_cancellation_still_reports_unchecked_work_for_retry(mixed):
     assert set(service._load()["retry_symbols"]) == active
 
 
-def test_yielded_completed_prefix_is_fully_consumed_before_replacement(mixed):
+def test_yielded_completed_prefix_is_fully_consumed_before_replacement(mixed, monkeypatch):
     service, _, live, clock, closed = mixed
-    # No recent clocks initially: a large closed-market batch is permitted.
+    # Exercise recovery of an existing large background batch independently
+    # from the normal short-wave admission policy.
+    monkeypatch.setattr('cl_app.services.signal_monitor.MONITOR_BACKGROUND_WAVES', 16)
+    monkeypatch.setattr('cl_app.services.signal_monitor.MONITOR_WORKER_WAVES', 16)
     closed["us"] = closed["a"]
     service._load()["attempted_cutoffs"]["us:LIVE.US"] = closed["us"]
     service._schedule_monitor(clock[0], None)

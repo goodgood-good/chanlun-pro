@@ -196,6 +196,13 @@ class DingTalkOutbox:
                 (CASE WHEN status='sent' THEN COALESCE(sent,created) ELSE created END) DESC,id DESC);
             CREATE TABLE IF NOT EXISTS delivery_settings (key TEXT PRIMARY KEY, value REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS inline_charts (signal_key TEXT PRIMARY KEY,url TEXT NOT NULL,created REAL NOT NULL,outbox_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS delivery_timings (
+                outbox_id TEXT PRIMARY KEY, first_claimed REAL, last_claimed REAL,
+                validation_started REAL, validation_finished REAL,
+                validation_attempts INTEGER NOT NULL DEFAULT 0, validation_seconds REAL,
+                request_started REAL, request_finished REAL
+            );
+            CREATE INDEX IF NOT EXISTS delivery_timings_claimed ON delivery_timings(last_claimed);
             """)
             if 'send_started' not in {row[1] for row in db.execute('PRAGMA table_info(outbox)')}:
                 try:
@@ -329,12 +336,19 @@ class DingTalkOutbox:
         self._wake.set()
 
     def signal_events(self, events, *, since):
+        from .notification_coalescing import append_pending, bucket as coalesce_bucket, BATCH_PREFIX
         stamp = self.now()
         eligible = eligible_signal_events(events,since=since,stamp=stamp)
         if not eligible:
             return
         inline_events = []
         with self._lock, self._connect() as db:
+            # Independent outbox instances must not both read a missing marker
+            # or overwrite the same pending packet before either commits.
+            if not db.in_transaction:
+                db.execute('BEGIN IMMEDIATE')
+            stamp = self.now()
+            eligible = eligible_signal_events(eligible.values(), since=since, stamp=stamp)
             fresh = [(key, row) for key, row in eligible.items()
                      if row['recorded_at'] >= self._window_start(db)
                      and db.execute("SELECT 1 FROM markers WHERE id=?", (key,)).fetchone() is None]
@@ -353,11 +367,25 @@ class DingTalkOutbox:
                 group = []
                 for pair in bucket:
                     if group and (len(group) == 5 or len(self._signal_content([row for _, row in [*group, pair]], stamp).encode("utf-8")) > 3300):
-                        groups.append(group); group = []
+                        groups.append(group)
+                        group = []
                     group.append(pair)
                 if group:
                     groups.append(group)
             for group in groups:
+                if coalesce_bucket(group[0][1]) is not None:
+                    for key, event in group:
+                        merged = append_pending(db, event, stamp, self._signal_content)
+                        if merged is None:
+                            # A separate namespace prevents a later pending
+                            # subset from colliding with this stable batch id.
+                            identity = BATCH_PREFIX + hashlib.sha256(json.dumps([key]).encode()).hexdigest()
+                            self._insert(db, identity, 'signals', self._signal_content([event], stamp),
+                                         stamp, event['recorded_at'] + 1800 - stamp)
+                            db.execute('INSERT OR IGNORE INTO signal_payloads VALUES (?,?)',
+                                       (identity, json.dumps([event], ensure_ascii=False, allow_nan=False)))
+                        db.execute('INSERT OR IGNORE INTO markers VALUES (?,?)', (key, stamp))
+                    continue
                 identity = "signals:" + hashlib.sha256(json.dumps(sorted(key for key, _ in group)).encode()).hexdigest()
                 payload = [row for _, row in group]
                 # Individual members are pruned on every dispatch/retry. A
@@ -555,6 +583,13 @@ class DingTalkOutbox:
                     return next_due
                 return
             db.execute("UPDATE outbox SET status='sending',attempts=attempts+1,next_try=? WHERE id=?", (stamp+30, row["id"]))
+            # Bound diagnostics even when every queued event expires during
+            # validation and no transport call reaches normal receipt cleanup.
+            db.execute('DELETE FROM delivery_timings WHERE last_claimed<?', (stamp - 30 * 86400,))
+            db.execute('''INSERT INTO delivery_timings(outbox_id,first_claimed,last_claimed) VALUES (?,?,?)
+                ON CONFLICT(outbox_id) DO UPDATE SET last_claimed=excluded.last_claimed,
+                validation_started=NULL,validation_finished=NULL,request_started=NULL,request_finished=NULL''',
+                (row['id'], stamp, stamp))
             saved = db.execute("SELECT events FROM signal_payloads WHERE outbox_id=?", (row["id"],)).fetchone()
         content, pending = row["content"], None
         try:
@@ -565,11 +600,13 @@ class DingTalkOutbox:
             events=[]
         inline = row['kind']=='signals' and len(events)==1 and events[0].get('inline_chart') is True
         dispatch_events = events
+        validation_started = validation_finished = None
         if row["kind"] in {"signals", "chart"}:
             self.progress.phase('signal_validation')
             # Never acquire the monitor lock while holding the outbox lock:
             # event ingestion takes those locks in the opposite order.
             events = live_signal_events(events,stamp)
+            validation_started = self.now()
             try:
                 valid, pending = self.signal_validator(events) if events and self.signal_validator else (events, [])
                 valid=_retain_recorded_times(valid,events)
@@ -577,10 +614,12 @@ class DingTalkOutbox:
             except Exception:
                 valid, pending = [], events
             stamp=self.now()
+            validation_finished = stamp
             valid=live_signal_events(valid,stamp)
             pending=live_signal_events(pending,stamp)
             if not valid:
                 with self._lock, self._connect() as db:
+                    self._record_validation(db, row['id'], validation_started, validation_finished)
                     if self._current_delivery(db, row) is None:
                         return
                     db.execute("UPDATE outbox SET status=?,attempts=?,next_try=?,error=? WHERE id=? AND status='sending'",
@@ -591,7 +630,9 @@ class DingTalkOutbox:
                                    (max(e['recorded_at']+1800 for e in pending),row['id']))
                     db.execute("UPDATE signal_payloads SET events=? WHERE outbox_id=?",
                                (json.dumps(pending, ensure_ascii=False, allow_nan=False), row["id"]))
-                return
+                    # No provider request consumed the shared send budget.
+                    # Continue ready work without adding an idle four seconds.
+                    return db.execute("SELECT MIN(next_try) FROM outbox WHERE status IN ('pending','retry','sending')").fetchone()[0]
             if inline:
                 # Validity uses current state, but text and image both describe
                 # the exact frozen event which initiated this notification.
@@ -599,6 +640,7 @@ class DingTalkOutbox:
             dispatch_events=events if row['kind']=='chart' or inline else valid
             content = self._signal_content(valid, stamp) if row["kind"] == "signals" else content
             with self._lock, self._connect() as db:
+                self._record_validation(db, row['id'], validation_started, validation_finished)
                 # Validation/formatting can outlast a notification switch.
                 # Check before splitting or rewriting any canceled receipt.
                 if self._current_delivery(db, row) is None:
@@ -623,7 +665,7 @@ class DingTalkOutbox:
                 if chart is None:
                     db.execute("UPDATE outbox SET status='retry',attempts=?,next_try=?,error='等待图文消息生成' WHERE id=? AND status='sending'",
                                (row['attempts'],stamp+3,row['id']))
-                    return
+                    return db.execute("SELECT MIN(next_try) FROM outbox WHERE status IN ('pending','retry','sending')").fetchone()[0]
                 content=json.dumps(illustrated_signal(events[0],chart['url'],stamp),ensure_ascii=False)
                 db.execute('UPDATE outbox SET content=? WHERE id=?',(content,row['id']))
         error = ""
@@ -659,6 +701,7 @@ class DingTalkOutbox:
                            ('retry' if retry else 'expired',row['attempts'],dispatch_now,
                             '部分信号已过期，等待复核其余信号' if retry else '通知已过期，未补发旧信号',row['id']))
             return
+        request_started = None
         try:
             self.progress.phase('provider_request')
             if row["kind"] == "chart" or inline:
@@ -666,16 +709,21 @@ class DingTalkOutbox:
                 # Retire navigation links in messages queued by an older version
                 # while preserving the inline PNG source needed by the client.
                 markdown['text'] = re.sub(r'\n*\[查看当前图表\]\([^\n]*\)', '', markdown['text'])
+                request_started = self.now()
                 self.transport.send_markdown(markdown["title"], markdown["text"])
             else:
-                self.transport.send('\n'.join(line for line in content.splitlines()
-                                              if not line.startswith(('查看当前图表：','选股工作台：'))))
+                text = '\n'.join(line for line in content.splitlines()
+                                 if not line.startswith(('查看当前图表：','选股工作台：')))
+                request_started = self.now()
+                self.transport.send(text)
         except DeliveryError as exc:
             error = str(exc)
         except Exception as exc:
             error = f"通知发送失败（{type(exc).__name__}）"
         finished = self.now()
         with self._lock, self._connect() as db:
+            db.execute('UPDATE delivery_timings SET request_started=?,request_finished=? WHERE outbox_id=?',
+                       (request_started, finished if request_started is not None else None, row['id']))
             if error:
                 attempts = row["attempts"] + 1
                 db.execute("UPDATE outbox SET status=?,next_try=?,error=? WHERE id=? AND status='sending'",
@@ -689,6 +737,7 @@ class DingTalkOutbox:
             db.execute("DELETE FROM signal_payloads WHERE outbox_id NOT IN (SELECT id FROM outbox)")
             db.execute("DELETE FROM markers WHERE created<?", (finished-90*86400,))
             db.execute('DELETE FROM inline_charts WHERE outbox_id NOT IN (SELECT id FROM outbox)')
+            db.execute('DELETE FROM delivery_timings WHERE outbox_id NOT IN (SELECT id FROM outbox)')
         if not error and row["kind"] == "signals" and not inline and self.charts is not None:
             try:
                 with self._read_connect() as db:
@@ -697,14 +746,28 @@ class DingTalkOutbox:
             except (OSError, ValueError, sqlite3.Error):
                 pass  # The chart worker recovers committed text deliveries after a restart.
 
+    @staticmethod
+    def _record_validation(db, identity, started, finished):
+        duration = finished - started if finished >= started else None
+        db.execute('''UPDATE delivery_timings SET validation_started=?,validation_finished=?,
+            validation_attempts=validation_attempts+1,
+            validation_seconds=CASE WHEN ? IS NULL THEN validation_seconds
+                                    ELSE COALESCE(validation_seconds,0)+? END WHERE outbox_id=?''',
+                   (started, finished, duration, duration, identity))
+
     def latency_summary(self):
         from .notification_metrics import summarize
         if not self.path.is_file():
             return {'groups':[], 'days':7, 'error':''}
         try:
             with self._read_connect() as db:
-                rows = db.execute('''SELECT o.kind,o.created,o.sent,o.send_started,p.events
-                    FROM outbox o JOIN signal_payloads p ON p.outbox_id=o.id
+                measured = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='delivery_timings'").fetchone()
+                fields = ('first_claimed', 'last_claimed', 'validation_started', 'validation_finished',
+                          'validation_attempts', 'validation_seconds', 'request_started', 'request_finished')
+                columns = ','.join('t.' + field if measured else 'NULL AS ' + field for field in fields)
+                joined = ' LEFT JOIN delivery_timings t ON t.outbox_id=o.id' if measured else ''
+                rows = db.execute('''SELECT o.kind,o.created,o.sent,o.send_started,p.events,''' + columns + '''
+                    FROM outbox o JOIN signal_payloads p ON p.outbox_id=o.id''' + joined + '''
                     WHERE o.status='sent' AND o.kind IN ('signals','chart') AND o.sent>=?''',
                     (self.now()-7*86400,)).fetchall()
             return {'groups':summarize(rows),'days':7,'error':''}

@@ -5,11 +5,9 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime
 from decimal import Decimal
-import gzip
 import hashlib
 import json
 import multiprocessing
-from multiprocessing.connection import wait as wait_connections
 import os
 from pathlib import Path
 import re
@@ -448,27 +446,8 @@ def _select_consolidation_alerts(snapshot, frame, context, reviewed, code, frequ
 
 
 def _save_evidence(run_dir, code, frequency, frame, snapshot):
-    from chanlun.screening.markets import storage_symbol
-    market = frame.attrs.get("screening_market", "a")
-    base = Path(run_dir, "evidence", f"{storage_symbol(code, market)}_{frequency}")
-    base.parent.mkdir(parents=True, exist_ok=True)
-    parquet, packed = Path(str(base) + ".parquet"), Path(str(base) + ".json.gz")
-    temp_parquet, temp_packed = Path(str(parquet) + ".tmp"), Path(str(packed) + ".tmp")
-    try:
-        frame.to_parquet(temp_parquet, index=False)
-        # Level 3 keeps the same lossless format without spending most of the
-        # persistence budget on maximum compression of frequently replaced data.
-        temp_packed.write_bytes(gzip.compress(json.dumps(snapshot, ensure_ascii=False, allow_nan=False).encode("utf-8"),compresslevel=3))
-        os.replace(temp_parquet, parquet)
-        os.replace(temp_packed, packed)
-        return {"status": "complete", "market": market, "chart_saved": bool(snapshot.get("chart")), "parquet_bytes": parquet.stat().st_size,
-                "snapshot_bytes": packed.stat().st_size,
-                "parquet_sha256": hashlib.sha256(parquet.read_bytes()).hexdigest(),
-                "snapshot_sha256": hashlib.sha256(packed.read_bytes()).hexdigest(),
-                "input_fingerprint": input_fingerprint(frame, code, frequency)}
-    finally:
-        temp_parquet.unlink(missing_ok=True)
-        temp_packed.unlink(missing_ok=True)
+    from .evidence_publication import save_evidence
+    return save_evidence(run_dir, code, frequency, frame, snapshot)
 
 
 def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision=None,
@@ -522,7 +501,7 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             structure_started = time.monotonic()
             from chanlun.screening.runtime_cache import incremental_snapshot_scope
             with incremental_snapshot_scope(cache_root, calculation_revision, enabled=not force_rebuild,
-                                            priority=include_consolidation and frequency in {"5m", "30m"}) as continuation:
+                                            priority=include_consolidation and frequency in {"1m", "5m", "30m"}) as continuation:
                 snapshot = cached["snapshot"] if cached is not None else (
                     snapshot_for(frame, code, frequency, include_consolidation=True) if include_consolidation
                     else snapshot_for(frame, code, frequency))

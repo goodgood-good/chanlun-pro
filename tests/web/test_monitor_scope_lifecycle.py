@@ -261,6 +261,7 @@ def test_checking_only_five_minutes_cannot_exit_an_untouched_minute_signal(lifec
     state['seed']['settings']['frequencies'] = ['1m', '5m']
     state['selection_checks'][key + ':5m'] = {'symbol': key, 'cutoff': previous - 300,
         'revision': 'scope-test', 'error': False, 'identities': [], 'input_fingerprint': 'c' * 64}
+    state['monitor_fair_cursor'] = 2  # Isolate a critical-period service slot for this lifecycle check.
     service._schedule_monitor(clock[0], None)
     assert state['active_periods'][key] == ['5m']
     before = deepcopy(state['signals'][event['id']])

@@ -8,6 +8,11 @@ import math
 def summarize(rows):
     groups = {}
     for row in rows:
+        def measured(name):
+            try:
+                return row[name]
+            except (KeyError, IndexError):
+                return None
         try:
             events = json.loads(row["events"])
         except (ValueError, TypeError):
@@ -50,6 +55,10 @@ def summarize(rows):
                 "detection_to_sent": (detected, row["sent"]),
                 "queue": (row["created"], row["send_started"]),
                 "provider": (row["send_started"], row["sent"]),
+                "queue_before_first_claim": (row['created'], measured('first_claimed')),
+                "validation": (measured('validation_started'), measured('validation_finished')),
+                "send_preparation": (measured('validation_finished'), measured('request_started')),
+                "request": (measured('request_started'), measured('request_finished')),
             }
             for name, (start, end) in metrics.items():
                 if (
@@ -62,6 +71,11 @@ def summarize(rows):
                     and 0 < start <= end
                 ):
                     group["values"][name].append(end - start)
+            total = measured('validation_seconds')
+            attempts = measured('validation_attempts')
+            if (type(total) in (int, float) and math.isfinite(total) and total >= 0
+                    and type(attempts) is int and attempts > 0):
+                group['values']['validation_total'].append(total)
     result = []
     for (market, frequency, kind), group in sorted(groups.items()):
         measures = {}

@@ -6,6 +6,7 @@ import pytest
 
 from cl_app.services.signal_monitor import SignalMonitor
 from cl_app.services.monitor_scope import record_minute_checkpoint
+from cl_app.services.monitor_requests import sources
 from tests.web.test_monitor_incremental_priority import monitor as monitor, finish, periods, publish_candidate, consume_increment
 from tests.web.test_signal_monitor import signal
 
@@ -109,10 +110,10 @@ def test_explicit_check_survives_other_period_batches_then_expires_once(cold, mo
     monkeypatch.setattr(service, '_control_snapshot', lambda options=None: {})
     clock[0] += timedelta(minutes=1)
     service.check_now()
-    for expected in ['30m', '5m', '1m']:
+    for expected in ['1m', '5m', '30m']:
         service._schedule_monitor(clock[0], None)
         assert periods(live) == [[expected]]
-        assert KEY in state['minute_force_pending']
+        assert (KEY in state['minute_force_pending']) is (expected == '1m')
         finish(service, live, clock)
     assert state['minute_force_pending'] == {}
     assert state['minute_cadence_checkpoints'][KEY]['cutoff'] == cutoff+60
@@ -129,7 +130,7 @@ def test_five_and_thirty_minute_due_checks_are_unchanged(cold):
         state['selection_checks'][f'{KEY}:{frequency}'] = {
             **state['selection_checks'][KEY+':1m'], 'cutoff': cutoff}
     clock[0] += timedelta(minutes=5)
-    for expected in ['5m', '1m']:
+    for expected in ['1m', '5m']:
         service._schedule_monitor(clock[0], None)
         assert periods(live) == [[expected]]
         finish(service, live, clock)
@@ -137,10 +138,12 @@ def test_five_and_thirty_minute_due_checks_are_unchanged(cold):
     service._schedule_monitor(clock[0], None)
     assert len(live.started) == 2
     clock[0] += timedelta(minutes=24)
-    for expected in ['30m', '5m', '1m']:
+    observed = []
+    for _ in range(3):
         service._schedule_monitor(clock[0], None)
-        assert periods(live) == [[expected]]
+        observed.extend(periods(live)[0])
         finish(service, live, clock)
+    assert set(observed) == {'1m', '5m', '30m'}
 
 
 def test_restart_preserves_closed_clock_and_does_not_reset_cold_wait(cold):
@@ -258,7 +261,7 @@ def test_audited_increment_promotes_existing_cold_member_only_for_a_minute_point
     if candidate_period == '5m':
         assert not live.started and token is None
         return
-    assert token['source'] == 'screening'
+    assert next(iter(sources(token).values()))['source'] == 'screening'
     assert periods(live) == [['1m']]
     finish(service, live, clock)
     assert KEY not in state['minute_force_pending']

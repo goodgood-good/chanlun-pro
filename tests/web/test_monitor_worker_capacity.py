@@ -7,7 +7,7 @@ from tests.web.test_monitor_live_priority import mixed, finish
 from tests.test_screening_worker_pool import pool, scan, results
 
 
-@pytest.mark.parametrize('full_scan,expected', [(False, 4), (True, 2)])
+@pytest.mark.parametrize('full_scan,expected', [(False, 4), (True, 3)])
 def test_urgent_batch_keeps_backlog_capacity_within_the_current_resource_budget(mixed, full_scan, expected):
     service, manual, live, clock, _closed = mixed
     if full_scan:

@@ -106,7 +106,7 @@
     </form>
     </details>
     <details class="monitor-policy"><summary>调度与行情更新说明</summary>
-    <p class="muted">选股与监听共享最多 16 个计算进程；同时运行时会给实时监听保留资源。我的持仓始终检查一、二、三类买卖点，普通标的沿用选股的类型筛选。</p>
+    <p class="muted">选股与监听共享最多 16 个计算进程；有实时监听待办时优先分配监听算力，空闲资源可交给选股，内存不足时自动减量。实时 1m、5m／30m 和后台巡检轮转处理，持仓与待发送通知的复核优先。我的持仓始终检查一、二、三类买卖点，普通标的沿用选股的类型筛选。</p>
     <p class="muted">监听最近一轮选股候选及自选组中的标的；自选标的无需先入选或出现信号。各所选 K 线周期独立计算已确认中枢与买卖点，随对应市场的新收盘 K 线更新。提醒在本页保留，可开启钉钉推送，关闭网页后后台任务仍继续。</p>
     <p class="muted">1m 分层跟踪：持仓、自选和有当前有效买卖点的标的每分钟检查；其余自动候选在成功核验无有效 1m 信号后，每 5 分钟巡检一次，发现有效信号后恢复每分钟检查。后台巡检仍计算 1m 走势，可能较晚发现或错过短暂信号。5m、30m 的检查频率保持不变；数据异常和待核验结果不会当作无信号降频。</p>
     <p class="muted">“我的持仓”分组同时接收盘整背驰提前预警及确认通知。提前预警结合未完成线段的力度减弱、已收盘行情的动能收缩与局部转折，后续可能确认或失效。数据异常时等待复核，失效预警保留在变化记录中。启用前的历史信号不补发；移出持仓分组后停止该标的的盘整背驰提醒。</p>
@@ -122,7 +122,7 @@
   </details>
   <section class="monitor-stages">
     <article class="panel"><small>01 · 午间与盘后</small><h2>选股任务</h2><strong id="daily-status">正在读取…</strong><p id="daily-detail" class="muted"></p><progress id="daily-progress" hidden></progress><a href="/screening" target="_blank" rel="noopener">查看选股进度与结果 →</a></article>
-    <article class="panel"><small>02 · 跟踪候选</small><h2>实时监听</h2><strong id="live-status">正在读取…</strong><p id="live-detail" class="muted"></p><progress id="live-progress" hidden></progress><p id="pool-source" class="muted"></p></article>
+    <article class="panel"><small>02 · 跟踪候选</small><h2>实时监听</h2><strong id="live-status">正在读取…</strong><p id="live-detail" class="muted"></p><p id="live-queue-detail" class="muted" hidden></p><progress id="live-progress" hidden></progress><p id="pool-source" class="muted"></p></article>
   </section>
   </section>
   <section id="monitor-diagnostics-panel" role="tabpanel" aria-labelledby="monitor-diagnostics-tab" data-monitor-panel="diagnostics" hidden aria-label="运行诊断">

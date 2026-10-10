@@ -756,30 +756,27 @@ def test_full_screening_keeps_the_previous_pool_live_with_bounded_workers(setup,
     service.check_now()
     service.tick()
     assert len(live.started) == 2
-    assert live.started[-1]["workers"] == 4
-    assert len(live.started[-1]["symbols"]) == 16
+    assert live.started[-1]["workers"] == 12
+    assert len(live.started[-1]["symbols"]) == 30
     assert live.started[-1]["symbols"][0] == holding
     assert service.snapshot()["seed"]["run_id"] == old_seed
-    assert service.snapshot()["pending_symbols_count"] == 14
+    assert service.snapshot()["pending_symbols_count"] == 0
     assert all(s["code"] != "SZ.000001" for s in live.started[-1]["symbols"])
     service.tick()
     assert len(live.started) == 2  # Never overlap two monitor jobs.
 
     live.finish(cutoff)
     service.tick()
-    assert len(live.started) == 3
-    assert len(live.started[-1]["symbols"]) == 14
-    assert live.started[-1]["workers"] == 4
-    live.finish(cutoff)
+    assert len(live.started) == 2  # Drain the second committed prefix before replacing this run.
     service.tick()
     assert service.snapshot()["pending_symbols_count"] == 0
-    assert len(live.started) == 3
+    assert len(live.started) == 2
     assert {s["code"] for job in live.started[1:] for s in job["symbols"]} == {r["code"] for r in rows}
 
     manual.rows = rows
     manual.finish(cutoff)
     service.tick()
-    assert len(live.started) == 4
+    assert len(live.started) == 3
     assert len(live.started[-1]["symbols"]) == 30
     assert live.started[-1]["workers"] == 16
     assert service.snapshot()["seed"]["run_id"] == manual.state["run_id"]
@@ -811,7 +808,7 @@ def test_scheduled_full_scan_limits_monitor_workers_in_the_same_scheduler_tick(s
     assert len(manual.started) == len(live.started) == 2
     assert manual.state["status"] == "running"
     assert live.started[-1]["workers"] == 2
-    assert len(live.started[-1]["symbols"]) == 16
+    assert len(live.started[-1]["symbols"]) == 4  # Historical work yields short waves to the scan.
 
 
 def test_routes_require_login_and_csrf_and_reads_do_not_launch_jobs(monkeypatch):

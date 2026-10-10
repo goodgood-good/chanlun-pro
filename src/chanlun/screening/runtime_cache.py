@@ -101,7 +101,7 @@ def runtime_for_snapshot(frame, code, frequency):
             with _registry_lock:
                 _entries[identity] = _Entry(runtime.cd, fingerprint, len(frame), priority)
                 while len(_entries) > MAX_ENTRIES or sum(item.bars for item in _entries.values()) > MAX_SOURCE_BARS:
-                    # Held 5m/30m positions survive ordinary universe churn;
+                    # Held positions (including 1m) survive universe churn;
                     # the same hard caps still apply if holdings fill the cache.
                     victim = next((key for key, item in _entries.items() if not item.priority), next(iter(_entries)))
                     del _entries[victim]
