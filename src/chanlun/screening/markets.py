@@ -44,8 +44,17 @@ def watchlist_symbols():
 
 def holding_symbols():
     """Explicit manual holdings, kept separate from the all-group watchlist."""
-    from chanlun.zixuan import MANUAL_HOLDING_ZX_GROUP, ZiXuan
-    rows = ZiXuan("a").zx_stocks(MANUAL_HOLDING_ZX_GROUP)
+    from chanlun.zixuan import MANUAL_HOLDING_ZX_GROUP
+    from chanlun.persistence.db import db
+    # Reading holdings must not create missing default groups. Notification
+    # dependency reads can finish after their caller has yielded its budget.
+    stocks = db.zx_get_global_group_stocks(MANUAL_HOLDING_ZX_GROUP)
+    rows, seen = [], set()
+    for stock in stocks:
+        identity = stock.market, stock.stock_code
+        if identity not in seen:
+            seen.add(identity)
+            rows.append({"market": stock.market, "code": stock.stock_code, "name": stock.stock_name})
     if any(not validate_symbol(row["market"], row["code"]) for row in rows):
         raise ValueError("持仓分组包含无效标的")
     return [{"market": row["market"], "code": row["code"], "name": row["name"], "origin": "watchlist"}

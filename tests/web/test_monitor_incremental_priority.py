@@ -93,12 +93,19 @@ def test_key_boundary_interrupts_minute_work_and_requeues_without_failure(monito
     finish(service, live, clock, cancelled=True, committed=[])
     assert not service._load()['retry_symbols']
     assert not service._load()['errors']
-    service._schedule_monitor(clock[0], None)
-    assert periods(live) == [['1m']]
-    assert set(service._load()['deferred_monitor_periods']['a:SH.600088']) == {'5m', '30m'}
-    finish(service, live, clock)
-    service._schedule_monitor(clock[0], None)
-    assert periods(live) == [['5m']]
+    seen = set()
+    for _ in range(3):
+        service._schedule_monitor(clock[0], None)
+        frequency = periods(live)[0][0]
+        assert frequency not in seen
+        # A yielded minute has had an admission; overdue siblings may now
+        # keep their fair slots before it resumes. No requested period is lost.
+        assert set(service._load()['deferred_monitor_periods'].get('a:SH.600088', [])) == (
+            {'1m', '5m', '30m'} - seen - {frequency})
+        seen.add(frequency)
+        finish(service, live, clock)
+    assert seen == {'1m', '5m', '30m'}
+    assert not service._load()['retry_symbols'] and not service._load()['errors']
 
 
 def test_failed_key_period_does_not_hold_other_periods(monitor):

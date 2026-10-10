@@ -639,8 +639,11 @@ class DingTalkOutbox:
             # event ingestion takes those locks in the opposite order.
             events = live_signal_events(events,stamp)
             validation_started = self.now()
+            validation_retry_delay = 5
             try:
                 valid, pending = self.signal_validator(events) if events and self.signal_validator else (events, [])
+                from .notification_validation import retry_delay
+                validation_retry_delay = retry_delay(pending)
                 valid=_retain_recorded_times(valid,events)
                 pending=_retain_recorded_times(pending,events)
             except Exception:
@@ -655,7 +658,7 @@ class DingTalkOutbox:
                     if self._current_delivery(db, row) is None:
                         return
                     db.execute("UPDATE outbox SET status=?,attempts=?,next_try=?,error=? WHERE id=? AND status='sending'",
-                               ("retry" if pending else "expired", row["attempts"], stamp + 5,
+                               ("retry" if pending else "expired", row["attempts"], stamp + validation_retry_delay,
                                 "等待信号有效性复核" if pending else "信号已过期、退出或缺少可核验身份，未补发", row["id"]))
                     if pending:
                         db.execute('UPDATE outbox SET expires=? WHERE id=?',

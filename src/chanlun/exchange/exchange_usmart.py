@@ -42,6 +42,27 @@ from chanlun.exchange.quote_change import quote_change_rate, quote_price
 _REQUEST_DEADLINE = ContextVar('usmart_request_deadline', default=None)
 
 
+def _minute_contract_message(code, frequency, coverage):
+    """Expose bounded fault locations without publishing unverified prices."""
+    diagnostic = coverage.get('diagnostics') or {}
+    details = []
+    for label, prefix in (('无效分钟', 'invalid'), ('缺失分钟', 'missing'), ('重复分钟', 'duplicate')):
+        count = diagnostic.get(prefix + '_minute_count', 0)
+        if type(count) is not int or count <= 0:
+            continue
+        detail = f'{label} {count} 条'
+        stamps = diagnostic.get(prefix + '_minute_opens') or []
+        if stamps and type(stamps[0]) in (int, float):
+            try:
+                first = dt.datetime.fromtimestamp(stamps[0], dt.timezone.utc)
+                detail += f'，首处 {first:%Y-%m-%d %H:%M} UTC'
+            except (ValueError, OverflowError, OSError):
+                pass
+        details.append(detail)
+    reason = '；'.join(details) if details else '分钟源存在缺失或无效数据'
+    return f'{code} {frequency} 数据核验未通过：{reason}，当前周期暂停计算'
+
+
 def _request_remaining():
     deadline = _REQUEST_DEADLINE.get()
     if deadline is None:
@@ -945,7 +966,7 @@ class ExchangeUSmart(Exchange):
                 max_pages=4, timeout_seconds=min(20.,_positive_number(args.get('timeout',15),15)),
                 force=args.get('_bypass_history_cache') is True)
             if coverage['reason'] == 'minute_contract_error':
-                raise USmartAPIError('已收盘分钟源存在缺失或无效数据，不能构建高周期',
+                raise USmartAPIError(_minute_contract_message(code, frequency, coverage),
                                      code='usmart_minute_contract_error',retry_after=coverage.get('retry_after'))
             if coverage['reason'] == 'source_empty':
                 raise USmartAPIError('该标的暂无已收盘分钟历史', code='usmart_history_empty')

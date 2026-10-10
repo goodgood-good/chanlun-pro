@@ -280,11 +280,10 @@ def test_cached_clock_rejects_invalid_frequency_or_naive_time(frequency, observe
 
 
 def test_holdings_source_reads_only_the_explicit_manual_holding_group(monkeypatch):
-    watch = Mock()
-    watch.zx_stocks.return_value = [{"market": "us", "code": "TSLA.US", "name": "Tesla"}]
-    monkeypatch.setattr("chanlun.zixuan.ZiXuan", lambda _: watch)
+    source = Mock(return_value=[Mock(market="us", stock_code="TSLA.US", stock_name="Tesla")])
+    monkeypatch.setattr("chanlun.persistence.db.db.zx_get_global_group_stocks", source)
     assert markets.holding_symbols() == [{"market": "us", "code": "TSLA.US", "name": "Tesla", "origin": "watchlist"}]
-    watch.zx_stocks.assert_called_once_with("我的持仓")
+    source.assert_called_once_with("我的持仓")
 
 
 @pytest.mark.parametrize("holding_market,expected", [("a", True), ("us", False)])

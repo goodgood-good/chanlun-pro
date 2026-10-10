@@ -229,6 +229,19 @@ class ScreeningManager:
     def status(self):
         return self._status(self._directory())
 
+    def notification_source_status(self):
+        """Read only the current model identity for notification validation.
+
+        Full status also reconciles worker lifecycles and computes unrelated
+        market freshness. Neither belongs in a bounded notification reader.
+        Reuse the same five-second revision policy as the normal status path.
+        """
+        checked = time.monotonic()
+        if self._revision_checked is None or checked - self._revision_checked >= 5:
+            self._revision = source_revision()
+            self._revision_checked = time.monotonic()
+        return {"current_source_revision": self._revision}
+
     def _status(self, directory):
         """Read one pinned run; a concurrent start may change latest.json."""
         if directory is None:

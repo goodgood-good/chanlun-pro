@@ -1025,6 +1025,21 @@ class ExchangeQMT(Exchange):
             factors=price_basis_factors,
         )
         attach_price_basis_metadata(klines_df, metadata)
+        if frequency == '30m':
+            from chanlun.exchange.qmt_aggregate import reconstruct_thirty_minute
+
+            def read_five(opening, closing):
+                # Only the six real constituent rows may replace a malformed
+                # native aggregate. No download, fill or calendar relaxation.
+                return self._klines_once(
+                    code, '5m',
+                    start_date=(opening + pd.Timedelta(minutes=5)).strftime('%Y%m%d%H%M%S'),
+                    end_date=closing.strftime('%Y-%m-%d %H:%M:%S'),
+                    args={'exact_end': True, 'skip_download': True, 'local_only': True,
+                          'dividend_type': dividend_type},
+                )
+
+            klines_df = reconstruct_thirty_minute(klines_df, code, read_five)
         return klines_df
 
     def stock_info(self, code: str) -> Union[Dict, None]:

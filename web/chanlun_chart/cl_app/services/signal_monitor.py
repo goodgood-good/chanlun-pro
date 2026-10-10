@@ -357,6 +357,8 @@ class SignalMonitor:
         self._check_requests = {}
         self._notification_rechecks = {}
         self._notification_retry_after = {}
+        from .notification_validation import DependencyReads
+        self._notification_dependency_reads = DependencyReads()
         self._startup_retries = {}
         self._notifications = notifications
         self._analytics = None
@@ -410,15 +412,55 @@ class SignalMonitor:
         return self._notifications
 
     def _validate_notification_events(self, events):
-        """Dispatch only current confirmed signals; uncertainty waits in queue."""
-        # Complete dependency I/O first. A concurrent result may retire a
-        # signal during these reads; validation must use the state after them.
-        source = self.monitor.status()
+        """Yield slow dependencies; only current state may authorize sending."""
+        from .notification_validation import validation_deadline, remaining, holding_lane, DeferredEvents, state_epoch
+        deadline = validation_deadline()
+        # Loading a cold state can perform recovery I/O. Runtime startup owns
+        # that work; a queued notification waits instead of doing it here.
+        if not self._lock.acquire(timeout=remaining(deadline)):
+            return [], DeferredEvents(events)
+        try:
+            if self._state is None:
+                return [], events
+            scan_types = set((self._state.get('seed') or {}).get('settings', {}).get('point_types', []))
+            epoch = state_epoch(self._state, self._control_version, events)
+        finally:
+            self._lock.release()
+        frozen_events = deepcopy(events)
+        observed_minute = int(self.now().timestamp()) // 60
+        dependency_key = hashlib.sha256(json.dumps(
+            [frozen_events, epoch, observed_minute],
+            sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        dependencies = self._notification_dependency_reads.read(
+            'holding' if holding_lane(events) else 'ordinary',
+            lambda: self._read_notification_dependencies(frozen_events, scan_types), deadline,
+            key=dependency_key, context_key=(epoch, observed_minute))
+        if dependencies is None:
+            return [], DeferredEvents(events)
+        source, fresh_holdings, expected_cutoffs, observed_minute = dependencies
         revision = source.get('current_source_revision') or (
             source.get('source_revision') if source.get('source_current') is True else None)
         version_known = bool(revision) or source.get('source_current') is True
-        with self._lock:
-            scan_types=set((self._load().get('seed') or {}).get('settings',{}).get('point_types',[]))
+        if not self._lock.acquire(timeout=remaining(deadline)):
+            return [], DeferredEvents(events)
+        try:
+            if (self._state is None or not remaining(deadline) or expected_cutoffs
+                    and int(self.now().timestamp()) // 60 != observed_minute):
+                return [], DeferredEvents(events)
+            if epoch != state_epoch(self._state, self._control_version, events):
+                return [], DeferredEvents(events)
+            # Dependency workers never mutate signals or request rechecks.
+            # Re-read the live state here after all dependency I/O completes.
+            return self._validate_notification_state(events, revision, version_known, fresh_holdings, expected_cutoffs)
+        finally:
+            self._lock.release()
+
+    def _read_notification_dependencies(self, events, scan_types):
+        """Read-only phase; only its original request can resume a recent result."""
+        observed = self.now()
+        monitor = self.monitor
+        reader = getattr(monitor, 'notification_source_status', None)
+        source = reader() if callable(reader) else monitor.status()
         fresh_holdings = None
         if any(event.get("signal_type") in {"consolidation_divergence","holding_risk"}
                or event.get('holding') or event.get('point_type') not in scan_types for event in events):
@@ -435,11 +477,10 @@ class SignalMonitor:
                 continue
             try:
                 expected_cutoffs[key] = closed_bar_cutoff(
-                    event.get('market', 'a'), event['code'], self.now(), event.get('frequency'))
+                    event.get('market', 'a'), event['code'], observed, event.get('frequency'))
             except (ValueError, OSError, TypeError):
                 expected_cutoffs[key] = None
-        with self._lock:
-            return self._validate_notification_state(events, revision, version_known, fresh_holdings, expected_cutoffs)
+        return source, fresh_holdings, expected_cutoffs, int(observed.timestamp()) // 60
 
     def _validate_notification_state(self, events, revision, version_known, fresh_holdings, expected_cutoffs):
         """Validate in-memory facts while the caller holds the state lock."""
@@ -457,6 +498,10 @@ class SignalMonitor:
             key = _symbol_key(event)
             frequency = event.get("frequency")
             awaiting_commit = bool(recovering_run and event.get('run_id') == recovering_run)
+            holding_only = (event.get('signal_type') in {'holding_risk', 'consolidation_divergence'}
+                            or event.get('point_type') not in seed.get('settings', {}).get('point_types', []))
+            if holding_only and holding_current and key not in state['holding_symbols']:
+                continue
             if event.get('signal_type') == 'holding_risk':
                 if fresh_holdings is None or not holding_current:
                     pending.append(event);continue
@@ -2378,7 +2423,7 @@ class SignalMonitor:
                 'decisions':minute_decisions, 'urgent':urgent, 'recent':recent, 'cutoffs':cutoffs,
                 'now':now.timestamp(), 'capacity':workers, 'cursor':state.get('monitor_fair_cursor', 0),
                 'state':{name:state.get(name, {}) for name in ('selection_checks', 'attempted_cutoffs',
-                    'monitor_pending_deadlines', 'holding_symbols', 'monitor_critical_cursor')},
+                    'monitor_pending_deadlines', 'attempted_monitor_periods', 'holding_symbols', 'monitor_critical_cursor')},
                 'minute_requests':{key:monitor_requests.snapshot(state,key) for key in planned_periods},
                 'risk_periods':{key:sorted(_bound_risk_periods(state,key)) for key in planned_periods}})
             tasks, fair_cursor, critical_cursor = self._fair_batch(fair_plan, workers)
@@ -2588,7 +2633,8 @@ class SignalMonitor:
                     state['attempted_cutoffs'].update(cutoffs)
                     for key, target in launch.get('period_targets', {}).items():
                         state.setdefault('attempted_monitor_periods', {})[key] = {
-                            'cutoff': target, 'revision': launch.get('source_revision')}
+                            'cutoff': target, 'revision': launch.get('source_revision'),
+                            'scheduled_at': launch['scheduled_at']}
                     for key, periods in launch['options'].get('due_periods', {}).items():
                         yielded_periods = state.get('live_yielded_periods', {}).get(key, [])
                         if set(yielded_periods) <= set(periods):

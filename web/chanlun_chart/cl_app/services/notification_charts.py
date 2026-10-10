@@ -540,9 +540,10 @@ class NotificationCharts:
                     valid,pending=self.outbox.signal_validator([event])
                     check_deadline()
                     if pending:
+                        from .notification_validation import retry_delay
                         with self._db() as db:
                             db.execute("UPDATE jobs SET status='pending',attempts=?,next_try=?,error='等待信号有效性复核' WHERE id=? AND status='running'",
-                                       (row['attempts'],now+5,row['id']))
+                                       (row['attempts'],now+retry_delay(pending),row['id']))
                         return True
                     if not valid:
                         with self._db() as db:
