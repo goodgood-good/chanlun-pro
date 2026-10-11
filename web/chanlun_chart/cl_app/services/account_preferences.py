@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from threading import RLock
 from typing import Any
@@ -39,6 +40,13 @@ _LAYOUTS = {
     "vertical-2",
     "three",
     "four",
+}
+_PANE_SPLITS = {
+    "horizontal-2": ("rows",),
+    "horizontal-7-3": ("rows",),
+    "vertical-2": ("columns",),
+    "three": ("rows", "top"),
+    "four": ("rows", "top", "bottom"),
 }
 _INTERVALS = {
     "10S",
@@ -135,12 +143,31 @@ def _json_string(value: object, *, key: str) -> tuple[object, str]:
     return parsed, json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
 
 
+def _normalize_pane_ratios(raw: object) -> dict[str, dict[str, float]]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized = {}
+    for layout, splits in _PANE_SPLITS.items():
+        values = raw.get(layout)
+        if not isinstance(values, dict):
+            continue
+        ratios = {}
+        for split in splits:
+            value = values.get(split)
+            if (type(value) in (int, float) and 0.1 <= value <= 0.9
+                    and math.isfinite(value)):
+                ratios[split] = value
+        if ratios:
+            normalized[layout] = ratios
+    return normalized
+
+
 def _normalize_tv_chart(raw: object) -> str:
     parsed, _ = _json_string(raw, key="tv_chart")
     if not isinstance(parsed, dict):
         raise InvalidAccountPreferences("tv_chart must contain an object")
 
-    normalized: dict[str, str] = {}
+    normalized: dict[str, Any] = {}
     theme = parsed.get("theme")
     if theme in {"Light", "dark"}:
         normalized["theme"] = theme
@@ -150,6 +177,9 @@ def _normalize_tv_chart(raw: object) -> str:
     layout = parsed.get("chart_layout_type")
     if layout in _LAYOUTS:
         normalized["chart_layout_type"] = layout
+    ratios = _normalize_pane_ratios(parsed.get("chart_pane_ratios"))
+    if ratios:
+        normalized["chart_pane_ratios"] = ratios
 
     for selected_market in _MARKETS:
         code_key = f"{selected_market}_code"

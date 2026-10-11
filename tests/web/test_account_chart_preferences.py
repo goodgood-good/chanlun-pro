@@ -325,3 +325,99 @@ def test_physical_period_and_trend_preferences_roundtrip(app):
     saved = json.loads(client.get("/api/chart/preferences").get_json()
                        ["preferences"]["values"]["cl_show_config_1_1"])
     assert saved == display
+
+
+def _normalized_chart_preferences(chart, bucket="tv_chart"):
+    from cl_app.services.account_preferences import PREFERENCE_SCHEMA, normalize_preferences
+
+    result = normalize_preferences({"schema": PREFERENCE_SCHEMA, "values": {bucket: json.dumps(chart)}})
+    return json.loads(result["values"][bucket])
+
+
+@pytest.mark.parametrize("bucket", ["tv_chart", "phone_tv_chart"])
+def test_pane_ratios_preserve_all_supported_layouts_and_bucket_contract(bucket):
+    ratios = {
+        "horizontal-2": {"rows": 0.5},
+        "horizontal-7-3": {"rows": 0.7},
+        "vertical-2": {"columns": 0.5},
+        "three": {"rows": 0.3, "top": 0.6},
+        "four": {"rows": 0.1, "top": 0.9, "bottom": 0.45},
+    }
+    chart = {"theme": "dark", "chart_layout_type": "single", "a_interval_1": "5", "chart_pane_ratios": ratios}
+    assert _normalized_chart_preferences(chart, bucket) == chart
+
+
+@pytest.mark.parametrize("bucket", ["tv_chart", "phone_tv_chart"])
+def test_pane_ratios_filter_unknown_layouts_splits_and_other_tv_keys(bucket):
+    chart = {
+        "theme": "Light", "chart_layout_type": "four", "arbitrary_state": {"anything": True},
+        "chart_pane_ratios": {
+            "single": {"rows": 0.5}, "unknown": {"rows": 0.5},
+            "horizontal-2": {"rows": 0.4, "columns": 0.6, "top": 0.3},
+            "horizontal-7-3": {"rows": 0.8, "bottom": 0.5},
+            "vertical-2": {"columns": 0.65, "rows": 0.35},
+            "three": {"rows": 0.3, "top": 0.7, "bottom": 0.5},
+            "four": {"rows": 0.2, "top": 0.6, "bottom": 0.8, "extra": 0.5},
+        },
+    }
+    assert _normalized_chart_preferences(chart, bucket) == {
+        "theme": "Light", "chart_layout_type": "four",
+        "chart_pane_ratios": {
+            "horizontal-2": {"rows": 0.4}, "horizontal-7-3": {"rows": 0.8},
+            "vertical-2": {"columns": 0.65}, "three": {"rows": 0.3, "top": 0.7},
+            "four": {"rows": 0.2, "top": 0.6, "bottom": 0.8},
+        },
+    }
+
+
+@pytest.mark.parametrize("value", [True, False, None, "0.5", [], {}, 0, 1, -0.1, 0.099999, 0.900001,
+                                  float("nan"), float("inf"), float("-inf"), 10 ** 400])
+def test_invalid_pane_values_are_removed_without_discarding_valid_siblings(value):
+    chart = {"chart_pane_ratios": {"four": {"rows": value, "top": 0.4, "bottom": 0.7}}}
+    assert _normalized_chart_preferences(chart) == {"chart_pane_ratios": {"four": {"top": 0.4, "bottom": 0.7}}}
+
+
+@pytest.mark.parametrize("value", [None, True, 0.5, "0.5", [], {}])
+def test_malformed_or_empty_pane_ratio_containers_are_omitted(value):
+    assert _normalized_chart_preferences({"theme": "dark", "chart_pane_ratios": value}) == {"theme": "dark"}
+    assert _normalized_chart_preferences({"theme": "dark", "chart_pane_ratios": {"four": value}}) == {"theme": "dark"}
+
+
+def test_chart_pane_ratios_roundtrip_per_account_and_device_with_existing_merge_api(app):
+    alice, bob = app.test_client(), app.test_client()
+    _login(alice, "alice-layout-test", "alice-password")
+    _login(bob, "bob-layout-test", "bob-password")
+    original = _preferences("four", "dark", 520)
+    desktop = json.loads(original["values"]["tv_chart"])
+    desktop["chart_pane_ratios"] = {"four": {"rows": 0.35, "top": 0.6, "bottom": 0.4}}
+    original["values"]["tv_chart"] = json.dumps(desktop)
+    assert alice.put("/api/chart/preferences", json=original).status_code == 200
+    phone = {"chart_layout_type": "single", "chart_pane_ratios": {"four": {"rows": 0.8}}}
+    assert alice.put("/api/chart/preferences", json={
+        "schema": original["schema"], "merge": True, "changed_keys": ["phone_tv_chart"],
+        "values": {"phone_tv_chart": json.dumps(phone)},
+    }).status_code == 200
+    assert bob.put("/api/chart/preferences", json=_preferences("single", "Light", 340)).status_code == 200
+    values = alice.get("/api/chart/preferences").get_json()["preferences"]["values"]
+    assert json.loads(values["tv_chart"]) == desktop
+    assert json.loads(values["phone_tv_chart"]) == phone
+    assert values["chart_menu_width"] == "520"
+    bob_values = bob.get("/api/chart/preferences").get_json()["preferences"]["values"]
+    assert "chart_pane_ratios" not in json.loads(bob_values["tv_chart"])
+    assert "phone_tv_chart" not in bob_values
+    # Clearing just the ratio map removes the old split positions on readback.
+    cleared = {**desktop, "chart_pane_ratios": {}}
+    assert alice.put("/api/chart/preferences", json={
+        "schema": original["schema"], "merge": True, "changed_keys": ["tv_chart"],
+        "values": {"tv_chart": json.dumps(cleared)},
+    }).status_code == 200
+    values = alice.get("/api/chart/preferences").get_json()["preferences"]["values"]
+    assert "chart_pane_ratios" not in json.loads(values["tv_chart"])
+    assert json.loads(values["phone_tv_chart"]) == phone
+
+
+def test_pane_ratios_are_not_a_new_top_level_preference_bucket():
+    from cl_app.services.account_preferences import InvalidAccountPreferences, PREFERENCE_SCHEMA, normalize_preferences
+
+    with pytest.raises(InvalidAccountPreferences, match="unsupported preference key"):
+        normalize_preferences({"schema": PREFERENCE_SCHEMA, "values": {"chart_pane_ratios": "{}"}})

@@ -44,6 +44,7 @@
       src="{{ url_for('static', filename='datafeeds/udf/dist/bundle.js') }}?asset={{ static_asset_token }}"></script>
     {% include 'dark.html' %}
     {% include 'workspace_head.html' %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/chart_pane_layout.css') }}?asset={{ static_asset_token }}" />
   </head>
 
   <body class="cp-ui cp-workbench" data-chart-focus="lowest-center">
@@ -792,6 +793,7 @@
   <script src="{{ url_for('static', filename='js/chart_line_states.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_analysis.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_navigation.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/chart_pane_layout.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/macd_stats.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/zixuan.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/bkgn.js') }}?asset={{ static_asset_token }}"></script>
@@ -1632,105 +1634,12 @@
           (url_bootstrap && url_bootstrap.layout) ||
           Utils.get_local_data("chart_layout_type") || "single";
         chart_layout_type = window.WorkspaceDevice?.layout(chart_layout_type) || chart_layout_type;
-        let charts_area = $("#tv_charts_area");
-        charts_area.empty();
-        let win_height = document.getElementById("chart_container")?.clientHeight || window.innerHeight;
-        let win_width = charts_area.width() || window.innerWidth;
-        let chart_configs = [];
-        if (chart_layout_type === "single") {
-          chart_configs = [{ id: "1", style: "flex:1;" }];
-          charts_area.css({ display: "flex", flexDirection: "column" });
-        } else if (chart_layout_type === "vertical-2") {
-          chart_configs = [
-            { id: "1", style: "flex:1;" },
-            { id: "2", style: "flex:1;" },
-          ];
-          charts_area.css({ display: "flex", flexDirection: "row" });
-        } else if (chart_layout_type === "horizontal-2") {
-          chart_configs = [
-            { id: "1", style: "flex:1;" },
-            { id: "2", style: "flex:1;" },
-          ];
-          charts_area.css({ display: "flex", flexDirection: "column" });
-        } else if (chart_layout_type === "three") {
-          chart_configs = [{ id: "1" }, { id: "2" }, { id: "3" }];
-          charts_area.css({ display: "flex", flexDirection: "column" });
-        } else if (chart_layout_type === "horizontal-7-3") {
-          chart_configs = [{ id: "1" }, { id: "2" }];
-          charts_area.css({ display: "flex", flexDirection: "column" });
-        } else if (chart_layout_type === "four") {
-          chart_configs = [
-            { id: "1", style: "width:50%;height:50%;float:left;" },
-            { id: "2", style: "width:50%;height:50%;float:left;" },
-            { id: "3", style: "width:50%;height:50%;float:left;" },
-            { id: "4", style: "width:50%;height:50%;float:left;" },
-          ];
-          charts_area.css({
-            display: "flex",
-            flexDirection: "row",
-            flexWrap: "wrap",
-          });
-        }
-
-        chart_widgets = [];
-        if (chart_layout_type === "horizontal-7-3") {
-          charts_area.append(
-            '<div id="tv_chart_container_1" style="width:100%;height:' +
-              win_height * 0.7 +
-              'px;"></div>'
-          );
-          charts_area.append(
-            '<div id="tv_chart_container_2" style="width:100%;height:' +
-              win_height * 0.3 +
-              'px;"></div>'
-          );
-          chart_widgets.push(Charts.show_tv_chart("1", win_height * 0.7));
-          chart_widgets.push(Charts.show_tv_chart("2", win_height * 0.3));
-        } else if (chart_layout_type === "three") {
-          // 上面一行两个图
-          let rowDiv = $(
-            '<div style="display:flex;width:100%;height:' +
-              win_height / 2 +
-              'px;"></div>'
-          );
-          rowDiv.append(
-            '<div id="tv_chart_container_1" style="flex:1;"></div>'
-          );
-          rowDiv.append(
-            '<div id="tv_chart_container_2" style="flex:1;"></div>'
-          );
-          charts_area.append(rowDiv);
-          // 下面一行一个图
-          charts_area.append(
-            '<div id="tv_chart_container_3" style="width:100%;height:' +
-              win_height / 2 +
-              'px;"></div>'
-          );
-          chart_widgets.push(Charts.show_tv_chart("1", win_height / 2));
-          chart_widgets.push(Charts.show_tv_chart("2", win_height / 2));
-          chart_widgets.push(Charts.show_tv_chart("3", win_height / 2));
-        } else {
-          chart_configs.forEach(function (cfg, idx) {
-            let div_id = "tv_chart_container_" + cfg.id;
-            charts_area.append(
-              '<div id="' +
-                div_id +
-                '" style="' +
-                (cfg.style || "") +
-                '"></div>'
-            );
-            let chart_height =
-              chart_layout_type === "single"
-                ? win_height
-                : chart_layout_type === "vertical-2" ||
-                  chart_layout_type === "horizontal-2"
-                ? win_height / 2
-                : chart_layout_type === "four"
-                ? win_height / 2
-                : win_height;
-            chart_widgets.push(Charts.show_tv_chart(cfg.id, chart_height));
-          });
-        }
+        const pane_layout = ChartPaneLayout.create(document.getElementById("tv_charts_area"), chart_layout_type, {
+          read: function () { return Utils.get_local_data("chart_pane_ratios"); },
+          write: function (ratios) { Utils.set_local_data("chart_pane_ratios", ratios); },
+          onResize: function () { window.dispatchEvent(new Event("resize")); },
+        });
+        chart_widgets = pane_layout.ids.map(function (id) { return Charts.show_tv_chart(id); });
         ZiXuan.render_zixuan_opts();
       }
 
