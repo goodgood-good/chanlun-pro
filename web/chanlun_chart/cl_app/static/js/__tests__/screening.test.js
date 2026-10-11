@@ -22,8 +22,21 @@ class Element {
   }
   replaceChildren(...children) { this.children = children; }
   addEventListener(name, fn) { this.listeners[name] = fn; }
-  click() { this.listeners.click?.(); }
+  click() {
+    if(this.disabled)return;
+    if(this.type==='checkbox'){this.checked=!this.checked;this.listeners.change?.({target:this});}
+    this.listeners.click?.({target:this});
+  }
   setAttribute(name,value) {this.attributes[name]=value;}
+  getAttribute(name) {return this.attributes[name]??null;}
+  closest(selector) {
+    let element=this;
+    while(element){
+      if(selector.startsWith('.')&&String(element.className||'').split(/\s+/).includes(selector.slice(1)))return element;
+      element=element.parentElement;
+    }
+    return null;
+  }
   querySelectorAll(selector) {
     if (!selector.startsWith('.')) return [];
     const name=selector.slice(1);
@@ -41,13 +54,27 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
   get('auto-quotes').checked = autoQuotes;
   const frequency = ['1m','5m','30m'].map(value => ({value,checked:value!=='1m'}));
   const point = ['1buy','2buy','3buy','1sell','2sell','3sell'].map(value => ({value,checked:true}));
-  const pointButtons = [...template.matchAll(/<button\b[^>]*\bdata-point=["']([^"']+)["'][^>]*>([^<]*)<\/button>/g)].map(match => {
-    const element = new Element(); element.dataset.point = match[1]; element.textContent = match[2];
-    element.classList.toggle('active',match[1]==='all');
-    element.setAttribute('aria-pressed',String(match[1]==='all'));
+  const attribute=(tag,name)=>tag.match(new RegExp('\\b'+name+'=["\']([^"\']*)["\']'))?.[1];
+  const signalCells=[...template.matchAll(/<input\b[^>]*>/g)].map(match=>match[0]).filter(tag=>attribute(tag,'data-signal-point')).map(tag=>{
+    const element=new Element();element.type='checkbox';element.checked=/\bchecked\b/.test(tag);
+    element.dataset.signalFrequency=attribute(tag,'data-signal-frequency');
+    element.dataset.signalPoint=attribute(tag,'data-signal-point');
+    element.id=attribute(tag,'id');
+    element.setAttribute('aria-label',attribute(tag,'aria-label'));
+    element.parentElement=new Element();element.parentElement.className='signal-choice';
+    if(element.id)elements.set(element.id,element);
     return element;
   });
-  get('point-filters').append(...pointButtons);
+  const buttonsFor=(name,key)=>[...template.matchAll(/<button\b[^>]*>[\s\S]*?<\/button>/g)]
+    .filter(match=>attribute(match[0],name)).map(match=>{
+      const element=new Element();element.dataset[key]=attribute(match[0],name);
+      element.textContent=match[0].replace(/<[^>]*>/g,'');return element;
+    });
+  const presetButtons=buttonsFor('data-signal-preset','signalPreset');
+  const periodAll=buttonsFor('data-signal-period-all','signalPeriodAll');
+  const periodClear=buttonsFor('data-signal-period-clear','signalPeriodClear');
+  get('signal-preset-period').value='all';
+  get('include-previous').type='checkbox';get('include-previous').checked=true;
   const periods = ['1m','5m','30m','d'].map(frequency => {
     const element = new Element(); element.dataset.frequency = frequency; return element;
   });
@@ -69,7 +96,13 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
       querySelector:s => s==='main' ? {dataset:{user:'tester'}} : {content:'test-csrf'},
       querySelectorAll:s => {
         if(s==='[data-frequency]')return periods;
-        if(s==='[data-point]')return pointButtons;
+        if(s.includes('[data-signal-')) {
+          const attributes=[...s.matchAll(/\[data-([\w-]+)(?:=["']([^"']*)["'])?\]/g)];
+          return [...signalCells,...presetButtons,...periodAll,...periodClear].filter(element=>attributes.every(([,key,value])=>{
+            const property=key.replace(/-([a-z])/g,(_match,letter)=>letter.toUpperCase());
+            return element.dataset[property]!==undefined&&(value===undefined||element.dataset[property]===value);
+          })&&(!s.includes(':checked')||element.checked));
+        }
         const inputs=s.includes('#screen-form [name=frequency]')?frequency:s.includes('#screen-form [name=point]')?point:[];
         return s.endsWith(':checked')?inputs.filter(i=>i.checked):inputs;
       },
@@ -79,11 +112,27 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
     setTimeout:(fn,delay) => {timerDelays.push(delay);return timers.push(fn);}, clearTimeout:id=>{timers[id-1]=()=>{};},
   };
   vm.runInNewContext(source,sandbox);
-  return {get, timers, timerDelays, exports, advance:ms=>{clock.now+=ms;}, periods, pointButtons, body, documentEvents,
+  return {get, timers, timerDelays, exports, advance:ms=>{clock.now+=ms;}, periods, signalCells,presetButtons,periodAll,periodClear,body, documentEvents,
     setHidden:value=>{sandbox.document.hidden=value;for(const fn of documentEvents.visibilitychange||[])fn();}};
 }
 const response = (value, status=200) => ({ok:status>=200&&status<300, status, redirected:false, json:async () => value});
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(setImmediate); };
+const SIGNAL_PERIODS=['1m','5m','30m'];
+const SIGNAL_POINTS=['1buy','2buy','3buy','1sell','2sell','3sell'];
+const allSignalSelection=()=>Object.fromEntries(SIGNAL_PERIODS.map(period=>[period,[...SIGNAL_POINTS]]));
+const selectedSignals=ui=>Object.fromEntries(SIGNAL_PERIODS.map(period=>[period,
+  ui.signalCells.filter(cell=>cell.dataset.signalFrequency===period&&cell.checked).map(cell=>cell.dataset.signalPoint)]));
+const displayedIds=ui=>ui.get('signal-list').children.map(row=>row.dataset.id);
+function choose(ui,id,value){ui.get(id).value=value;ui.get(id).listeners.change?.({target:ui.get(id)});}
+function setSignal(ui,frequency,point,checked=true){
+  const cell=ui.signalCells.find(item=>item.dataset.signalFrequency===frequency&&item.dataset.signalPoint===point);
+  assert.ok(cell,`missing actual template checkbox ${frequency}/${point}`);
+  cell.checked=checked;cell.listeners.change({target:cell});
+}
+function preset(ui,type){
+  const button=ui.presetButtons.find(item=>item.dataset.signalPreset===type);
+  assert.ok(button,`missing actual template preset ${type}`);button.click();
+}
 
 test('a missing quote becomes an explicit reference while other symbols stay current',async()=>{
   const latest=withCandidate(),stocks=[{market:'a',code:'SH.600000'},{market:'a',code:'SH.600001'}];
@@ -572,134 +621,165 @@ function crossPeriodCandidates() {
   return data;
 }
 
-test('period-point controls show only matching rows with OR and clear conflicting quick controls',async()=>{
+test('presets and individual cells edit one selection through a complete read-only journey',async()=>{
   const latest=crossPeriodCandidates(),calls=[];
-  const ui=page(async (url,options)=>{calls.push({url,method:options?.method||'GET'});return dispatch(latest,url);},undefined,false,true);
+  const ui=page(async(url,options)=>{calls.push({url,method:options?.method||'GET'});return dispatch(latest,url);},undefined,false,true);
   await settle();
-  const choose=(id,value)=>{ui.get(id).value=value;ui.get(id).listeners.change();};
-  const ids=()=>ui.get('signal-list').children.map(row=>row.dataset.id);
-  const point=value=>ui.pointButtons.find(button=>button.dataset.point===value);
-  assert.equal(ui.pointButtons.length,7);
-  point('1buy').click();
-  choose('frequency-filter','1m');
-  assert.deepEqual(ids(),['a1','b1']);
-  assert.equal(point('1buy').attributes['aria-pressed'],'true');
-  choose('period-point-30m','3buy');
-  assert.equal(ui.get('frequency-filter').value,'all');
-  assert.deepEqual(ids(),['a30','b30']);
-  assert.ok(ui.pointButtons.every(button=>!button.classList.contains('active')&&button.attributes['aria-pressed']==='false'));
-  choose('period-point-5m','3sell');
-  assert.deepEqual(ids(),['a5','a30','b30']);
-  assert.match(ui.get('period-point-summary').textContent,/5m 三卖/);
-  assert.match(ui.get('period-point-summary').textContent,/30m 三买/);
-  assert.equal(templateIds.has('period-point-match'),false);
-  ui.get('period-point-clear').listeners.click();
-  assert.equal(ui.get('frequency-filter').value,'all');
-  assert.equal(ui.get('signal-list').children.length,5);
-  assert.equal(point('all').attributes['aria-pressed'],'true');
-  assert.equal(ui.get('period-point-clear').disabled,true);
-  choose('period-point-5m','3sell');
-  ui.get('reset').listeners.click();
-  assert.equal(ui.get('signal-list').children.length,5);
-  for(const period of ['1m','5m','30m'])assert.equal(ui.get('period-point-'+period).value,'all');
-  assert.ok(calls.every(call=>call.method==='GET'),'display filters must not start scans or write server state');
+  assert.equal(ui.signalCells.length,18);
+  assert.deepEqual(selectedSignals(ui),allSignalSelection());
+  assert.equal(ui.get('include-previous').checked,true);
+  choose(ui,'signal-preset-period','1m');
+  assert.deepEqual(displayedIds(ui),['a1','a5','a30','b1','b30'],'editing the next preset scope does not filter');
+  preset(ui,'1buy');
+  assert.deepEqual(selectedSignals(ui),{'1m':['1buy'],'5m':[],'30m':[]});
+  assert.deepEqual(displayedIds(ui),['a1','b1']);
+  setSignal(ui,'5m','3sell');setSignal(ui,'30m','3buy');
+  assert.deepEqual(displayedIds(ui),['a1','a5','a30','b1','b30']);
+  assert.deepEqual(selectedSignals(ui),{'1m':['1buy'],'5m':['3sell'],'30m':['3buy']});
+  setSignal(ui,'5m','3sell',false);
+  assert.deepEqual(displayedIds(ui),['a1','a30','b1','b30']);
+  const beforeScope=selectedSignals(ui);
+  choose(ui,'signal-preset-period','5m');
+  assert.deepEqual(selectedSignals(ui),beforeScope);
+  preset(ui,'3sell');
+  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':['3sell'],'30m':[]});
+  assert.deepEqual(displayedIds(ui),['a5']);
+  ui.get('signal-select-all').click();
+  assert.equal(ui.get('signal-preset-period').value,'all');
+  assert.deepEqual(selectedSignals(ui),allSignalSelection());
+  ui.get('signal-clear').click();
+  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':[],'30m':[]});
+  assert.deepEqual(displayedIds(ui),[]);
+  ui.get('include-previous').click();ui.get('reset').click();
+  assert.deepEqual(selectedSignals(ui),allSignalSelection());
+  assert.equal(ui.get('include-previous').checked,true);
+  assert.equal(ui.get('signal-preset-period').value,'all');
+  assert.deepEqual(displayedIds(ui),['a1','a5','a30','b1','b30']);
+  assert.ok(calls.every(call=>call.method==='GET'),'display changes never launch scans or mutate server state');
+  for(const old of ['frequency-filter','period-point-1m','period-point-5m','period-point-30m','period-point-match'])
+    assert.equal(templateIds.has(old),false,`retired filter ${old} must not remain as hidden state`);
 });
 
-test('quick point and frequency remain AND while either leaves period mode without hidden conflicts',async()=>{
-  const latest=crossPeriodCandidates(),writes=[];
-  const ui=page(async(url,options)=>{if(options?.method&&options.method!=='GET')writes.push(url);return dispatch(latest,url);});
-  await settle();
-  const choose=(id,value)=>{ui.get(id).value=value;ui.get(id).listeners.change();};
-  const click=value=>ui.pointButtons.find(button=>button.dataset.point===value).click();
-  const ids=()=>ui.get('signal-list').children.map(row=>row.dataset.id);
-  choose('period-point-30m','3buy');
-  choose('period-point-5m','3sell');
-  click('1buy');
-  assert.deepEqual(ids(),['a1','b1']);
-  assert.ok(['1m','5m','30m'].every(period=>ui.get('period-point-'+period).value==='all'));
-  choose('frequency-filter','30m');
-  assert.deepEqual(ids(),[],'quick point and quick period must both match the same row');
-  click('3buy');
-  assert.deepEqual(ids(),['a30','b30']);
-  assert.equal(ui.get('frequency-filter').value,'30m');
-  choose('period-point-5m','3sell');
-  assert.deepEqual(ids(),['a5']);
-  choose('frequency-filter','1m');
-  assert.deepEqual(ids(),['a1','b1']);
-  assert.ok(['1m','5m','30m'].every(period=>ui.get('period-point-'+period).value==='all'));
-  assert.equal(ui.pointButtons.find(button=>button.dataset.point==='all').attributes['aria-pressed'],'true');
-  choose('period-point-30m','3buy');
-  choose('period-point-30m','all');
-  assert.deepEqual(ids(),['a1','a5','a30','b1','b30']);
-  assert.equal(ui.get('frequency-filter').value,'all');
-  assert.equal(ui.pointButtons.find(button=>button.dataset.point==='all').attributes['aria-pressed'],'true');
-  assert.deepEqual(writes,[]);
-});
-
-test('every quick point button including all exits period mode and highlights only itself',async()=>{
-  const latest=crossPeriodCandidates();
-  const ui=page(async url=>dispatch(latest,url));await settle();
-  for(const button of ui.pointButtons) {
-    ui.get('period-point-30m').value='3buy';ui.get('period-point-30m').listeners.change();
-    assert.ok(ui.pointButtons.every(item=>item.attributes['aria-pressed']==='false'));
-    button.click();
-    assert.ok(['1m','5m','30m'].every(period=>ui.get('period-point-'+period).value==='all'));
-    assert.deepEqual(ui.pointButtons.filter(item=>item.classList.contains('active')).map(item=>item.dataset.point),[button.dataset.point]);
-    assert.equal(button.attributes['aria-pressed'],'true');
-    const expected=latest.candidates.filter(row=>button.dataset.point==='all'||row.point.point_type===button.dataset.point).map(row=>row.id);
-    assert.deepEqual(ui.get('signal-list').children.map(row=>row.dataset.id),expected);
+test('every preset replaces the matrix with exactly its selected scope and point family',async()=>{
+  const latest=crossPeriodCandidates(),ui=page(async url=>dispatch(latest,url));await settle();
+  assert.deepEqual(ui.presetButtons.map(button=>button.dataset.signalPreset),['all','buy','sell',...SIGNAL_POINTS]);
+  for(const scope of ['all',...SIGNAL_PERIODS])for(const type of ['all','buy','sell',...SIGNAL_POINTS]){
+    choose(ui,'signal-preset-period',scope);preset(ui,type);
+    const points=type==='all'?SIGNAL_POINTS:type==='buy'||type==='sell'?SIGNAL_POINTS.filter(point=>point.endsWith(type)):[type];
+    const expected=Object.fromEntries(SIGNAL_PERIODS.map(period=>[period,scope==='all'||scope===period?[...points]:[]]));
+    assert.deepEqual(selectedSignals(ui),expected,`${scope}/${type}`);
+    assert.deepEqual(ui.presetButtons.filter(button=>button.attributes['aria-pressed']==='true').map(button=>button.dataset.signalPreset),[type]);
+    assert.deepEqual(displayedIds(ui),latest.candidates.filter(row=>expected[row.frequency].includes(row.point.point_type)).map(row=>row.id));
   }
 });
 
-test('the always-visible queue summary describes signal mode and advanced filters',async()=>{
+test('per-period all and clear keep other periods and support several types in one period',async()=>{
+  const latest=crossPeriodCandidates(),ui=page(async url=>dispatch(latest,url));await settle();
+  ui.get('signal-clear').click();
+  ui.periodAll.find(button=>button.dataset.signalPeriodAll==='1m').click();
+  setSignal(ui,'5m','3sell');setSignal(ui,'5m','1buy');
+  assert.deepEqual(selectedSignals(ui),{'1m':SIGNAL_POINTS,'5m':['1buy','3sell'],'30m':[]});
+  assert.deepEqual(displayedIds(ui),['a1','a5','b1']);
+  ui.periodClear.find(button=>button.dataset.signalPeriodClear==='1m').click();
+  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':['1buy','3sell'],'30m':[]});
+  assert.deepEqual(displayedIds(ui),['a5']);
+  setSignal(ui,'5m','3sell',false);
+  assert.deepEqual(displayedIds(ui),[],'a selected type does not qualify another type on its symbol');
+});
+
+test('current, retained and watchlist rows retain independent visibility and count labels',async()=>{
+  const latest=withCandidate(),current=latest.candidates[0];
+  latest.candidates=[current,
+    {...current,id:'old-pending',refresh_state:'pending',result_source:'older',evidence_available:false},
+    {...current,id:'old-limited',refresh_state:'limited',result_source:'older',evidence_available:false},
+    {...current,id:'unverified',evidence_available:false},
+    {...current,id:'wrong-source',result_source:'different'},
+    {...current,id:'inactive',stage:'closed'}];
+  const watches=[{market:'a',code:current.code,name:'watch same symbol'},{market:'us',code:'AAPL.US',name:'watch only'}];
+  const ui=page(async url=>{
+    if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
+    if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:watches});
+    return dispatch(latest,url);
+  });await settle();
+  assert.deepEqual(displayedIds(ui),['candidate','old-pending','old-limited']);
+  ui.get('include-previous').click();assert.deepEqual(displayedIds(ui),['candidate']);
+  ui.get('signal-clear').click();assert.deepEqual(displayedIds(ui),[]);
+  choose(ui,'origin-filter','all');
+  assert.deepEqual(displayedIds(ui),['watch:a:SH.600000','watch:us:AAPL.US'],'watch placeholders never borrow signal predicates');
+  setSignal(ui,'5m','3buy');ui.get('include-previous').click();
+  assert.deepEqual(displayedIds(ui),['candidate','old-pending','old-limited','watch:a:SH.600000','watch:us:AAPL.US']);
+  const counts=ui.get('visible-breakdown').textContent;
+  assert.match(counts,/(?:本轮|当前)[^0-9]*1|1[^0-9]*(?:本轮|当前)/);
+  assert.match(counts,/(?:历史|上次|旧结果)[^0-9]*2|2[^0-9]*(?:历史|上次|旧结果)/);
+  assert.match(counts,/关注[^0-9]*2|2[^0-9]*关注/);
+  choose(ui,'origin-filter','watchlist');assert.deepEqual(displayedIds(ui),['watch:a:SH.600000','watch:us:AAPL.US']);
+});
+
+test('watch-only disables signal controls without discarding their canonical state and watch navigation resets all',async()=>{
+  const latest=crossPeriodCandidates(),ui=page(async url=>{
+    if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
+    if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:[{market:'us',code:'AAPL.US',name:'Apple'}]});
+    return dispatch(latest,url);
+  },undefined,false,true);await settle();
+  ui.get('signal-clear').click();setSignal(ui,'5m','3sell');ui.get('include-previous').click();
+  choose(ui,'signal-preset-period','30m');choose(ui,'origin-filter','watchlist');
+  const before=selectedSignals(ui);
+  assert.deepEqual(displayedIds(ui),['watch:us:AAPL.US']);
+  assert.ok([...ui.signalCells,...ui.presetButtons,...ui.periodAll,...ui.periodClear].every(control=>control.disabled));
+  for(const id of ['signal-select-all','signal-clear','signal-preset-period','include-previous'])assert.equal(ui.get(id).disabled,true);
+  preset(ui,'all');ui.get('signal-clear').click();
+  assert.deepEqual(selectedSignals(ui),before,'disabled bulk commands must not mutate saved choices');
+  choose(ui,'origin-filter','all');
+  assert.deepEqual(selectedSignals(ui),before);assert.equal(ui.get('include-previous').checked,false);
+  assert.ok(ui.signalCells.every(control=>!control.disabled));
+  assert.deepEqual(displayedIds(ui),['a5','watch:us:AAPL.US']);
+  ui.get('watch-list').children[0].click();await settle();
+  assert.deepEqual(selectedSignals(ui),allSignalSelection());
+  assert.equal(ui.get('include-previous').checked,true);assert.equal(ui.get('signal-preset-period').value,'all');
+  assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
+});
+
+test('the always-visible summary describes selected pairs and advanced filters',async()=>{
   const latest=crossPeriodCandidates();
   latest.sectors=[{id:'technology',name:'科技',symbol_count:2,signal_count:5,member_count:10}];
   latest.candidates=latest.candidates.map(row=>({...row,sectors:['technology'],confirmation_age_sessions:1,gain_pct:1,
     point:{...row.point,center_ordinal:1}}));
   const ui=page(async url=>dispatch(latest,url),undefined,false,true);await settle();
-  const choose=(id,value)=>{ui.get(id).value=value;ui.get(id).listeners.change();};
   const summary=()=>ui.get('active-filter-summary').textContent;
   assert.ok(templateIds.has('active-filter-summary'));
   assert.ok(template.indexOf('id="active-filter-summary"')<template.indexOf('id="signal-list"'));
   assert.doesNotMatch(template.match(/<[^>]*\bid="active-filter-summary"[^>]*>/)[0],/\bhidden\b/);
-  assert.match(summary(),/快速筛选.*全部周期.*全部买卖点/);
-  choose('period-point-30m','3buy');
-  choose('period-point-5m','3sell');
-  assert.match(summary(),/分周期筛选.*满足任一/);
-  assert.match(summary(),/5m 三卖/);
-  assert.match(summary(),/30m 三买/);
-  choose('market-filter','a');
-  choose('center-order-filter','first');
-  choose('age-filter','3');
-  choose('gain-filter','3');
-  choose('review-filter','pending');
-  choose('sort-filter','distance');
+  ui.get('signal-clear').click();setSignal(ui,'30m','3buy');setSignal(ui,'5m','3sell');
+  for(const text of ['5m','三卖','30m','三买'])assert.ok(summary().includes(text));
+  choose(ui,'market-filter','a');choose(ui,'center-order-filter','first');choose(ui,'age-filter','3');
+  choose(ui,'gain-filter','3');choose(ui,'review-filter','pending');choose(ui,'sort-filter','distance');
   ui.get('signal-search').value='SH.600000';ui.get('signal-search').listeners.input();
   ui.get('sector-list').children[1].click();
   for(const text of ['A 股','SH.600000','科技','首中枢','3 个交易日','3%','待复核','靠近拐点'])
     assert.ok(summary().includes(text),`active summary must retain ${text}`);
+  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':['3sell'],'30m':['3buy']});
   ui.get('reset').click();
-  assert.match(summary(),/快速筛选.*全部周期.*全部买卖点/);
+  assert.deepEqual(selectedSignals(ui),allSignalSelection());
   assert.doesNotMatch(summary(),/SH\.600000|科技|首中枢|3%|待复核|靠近拐点/);
-  for(const frequency of ['1m','5m','30m']) {
-    const control=template.match(new RegExp(`<select id="period-point-${frequency}">([\\s\\S]*?)</select>`))[1];
-    assert.match(control,/<option value="all">不参与<\/option>/);
-  }
 });
 
-for(const action of ['point','frequency','period-point','reset','sector','all-sectors'])
+for(const action of ['preset','cell','period-all','period-clear','select-all','include-previous','reset','sector','all-sectors'])
 test(`${action} returns the queue to page one and selects a card on that page`,async()=>{
   const latest=withCandidate(),base=latest.candidates[0];
   latest.status.settings={...latest.status.settings,frequencies:['1m','5m','30m']};
   latest.candidates=Array.from({length:121},(_,index)=>({...base,id:String(index),name:'Stock '+index,sectors:['technology']}));
   latest.sectors=[{id:'technology',name:'科技',symbol_count:121,signal_count:121,member_count:121}];
   const ui=page(async url=>dispatch(latest,url));await settle();
+  if(action==='period-all'||action==='select-all')setSignal(ui,'1m','1buy',false);
   ui.get('queue-next').click();ui.get('queue-next').click();await settle();
   assert.match(ui.get('queue-page').textContent,/3 \/ 3/);
   assert.match(ui.get('selected-title').textContent,/Stock 100/);
-  if(action==='point')ui.pointButtons.find(button=>button.dataset.point==='3buy').click();
-  else if(action==='frequency') {ui.get('frequency-filter').value='5m';ui.get('frequency-filter').listeners.change();}
-  else if(action==='period-point') {ui.get('period-point-5m').value='3buy';ui.get('period-point-5m').listeners.change();}
+  if(action==='preset')preset(ui,'3buy');
+  else if(action==='cell')setSignal(ui,'1m','1buy',false);
+  else if(action==='period-all')ui.periodAll.find(button=>button.dataset.signalPeriodAll==='1m').click();
+  else if(action==='period-clear')ui.periodClear.find(button=>button.dataset.signalPeriodClear==='1m').click();
+  else if(action==='select-all')ui.get('signal-select-all').click();
+  else if(action==='include-previous')ui.get('include-previous').click();
   else if(action==='reset')ui.get('reset').click();
   else ui.get('sector-list').children[action==='sector'?1:0].click();
   await settle();
@@ -711,66 +791,89 @@ test(`${action} returns the queue to page one and selects a card on that page`,a
   assert.match(ui.get('selected-title').textContent,new RegExp(`Stock ${active[0].dataset.id} ·`));
 });
 
-test('uncomputed period is explained and pending old rows cannot satisfy cross-period conditions',async()=>{
-  const latest=crossPeriodCandidates();
-  latest.status.settings.frequencies=['1m','5m'];
-  latest.candidates=latest.candidates.filter(row=>row.frequency!=='30m');
+test('editing only the next preset scope preserves the current selection, page and chart',async()=>{
+  const latest=withCandidate(),row=latest.candidates[0];
+  latest.candidates=Array.from({length:121},(_,index)=>({...row,id:String(index),name:'Stock '+index}));
   const ui=page(async url=>dispatch(latest,url));await settle();
-  ui.get('period-point-30m').value='3buy';ui.get('period-point-30m').listeners.change();
-  assert.equal(ui.get('signal-list').children.length,0);
-  assert.match(ui.get('period-point-summary').textContent,/本轮未覆盖：30m 三买/);
-  latest.candidates.push({...crossPeriodCandidates().candidates[2],refresh_state:'pending',result_source:'older'});
-  await ui.get('refresh').listeners.click();await settle();
-  assert.equal(ui.get('signal-list').children.length,0);
+  ui.get('queue-next').click();ui.get('queue-next').click();await settle();
+  const chart=ui.get('chart-frame').src,selected=ui.get('selected-title').textContent,checks=selectedSignals(ui);
+  choose(ui,'signal-preset-period','30m');
+  assert.deepEqual(selectedSignals(ui),checks);
+  assert.match(ui.get('queue-page').textContent,/3 \/ 3/);
+  assert.equal(ui.get('selected-title').textContent,selected);
+  assert.equal(ui.get('chart-frame').src,chart);
 });
 
-test('either explains its unscanned sell half and a quick unscanned period is also explained',async()=>{
+test('uncomputed choices identify absent coverage while retained rows are separately opt-in context',async()=>{
+  let latest=crossPeriodCandidates();
+  latest.status.settings.frequencies=['1m','5m'];latest.candidates=latest.candidates.filter(row=>row.frequency!=='30m');
+  const ui=page(async url=>dispatch(latest,url));await settle();
+  ui.get('signal-clear').click();setSignal(ui,'30m','3buy');
+  assert.deepEqual(displayedIds(ui),[]);
+  assert.match(ui.get('signal-coverage-message').textContent,/30m 三买/);
+  assert.match(ui.get('signal-selection-summary').textContent,/三买/);
+  latest={...latest,candidates:[...latest.candidates,{...crossPeriodCandidates().candidates[2],refresh_state:'pending',result_source:'older'}]};
+  await ui.get('refresh').listeners.click();await settle();
+  assert.deepEqual(displayedIds(ui),['a30']);
+  assert.match(ui.get('visible-breakdown').textContent,/历史|上次|旧结果/);
+  ui.get('include-previous').click();assert.deepEqual(displayedIds(ui),[]);
+});
+
+test('coverage checks each selected type independently and changing preset scope does not alter coverage',async()=>{
   const latest=crossPeriodCandidates(),calls=[];
-  latest.status.settings.frequencies=['30m'];
-  latest.status.settings.point_types=['3buy'];
+  latest.status.settings.frequencies=['30m'];latest.status.settings.point_types=['3buy'];
   latest.candidates=latest.candidates.filter(row=>row.frequency==='30m');
-  const ui=page(async(url,options)=>{calls.push({url,method:options?.method||'GET'});return dispatch(latest,url);});
-  await settle();
-  ui.get('period-point-30m').value='either';ui.get('period-point-30m').listeners.change();
-  assert.deepEqual(ui.get('signal-list').children.map(row=>row.dataset.id),['a30','b30']);
-  assert.match(ui.get('period-point-summary').textContent,/30m 三买或三卖/);
-  assert.match(ui.get('period-point-summary').textContent,/本轮未覆盖：30m 三卖/);
-  assert.doesNotMatch(ui.get('period-point-summary').textContent,/本轮未覆盖：[^。]*30m 三买/);
-  ui.get('frequency-filter').value='1m';ui.get('frequency-filter').listeners.change();
-  assert.equal(ui.get('period-point-30m').value,'all');
-  assert.equal(ui.get('signal-list').children.length,0);
-  assert.match(ui.get('active-filter-summary').textContent,/快速筛选：1m/);
-  assert.match(ui.get('period-point-summary').textContent,/本轮未覆盖：1m 三买/);
+  const ui=page(async(url,options)=>{calls.push({url,method:options?.method||'GET'});return dispatch(latest,url);});await settle();
+  ui.get('signal-clear').click();setSignal(ui,'30m','3buy');setSignal(ui,'30m','3sell');
+  assert.deepEqual(displayedIds(ui),['a30','b30']);
+  const coverage=ui.get('signal-coverage-message').textContent;
+  assert.match(coverage,/30m 三卖/);assert.doesNotMatch(coverage,/30m 三买/);
+  choose(ui,'signal-preset-period','1m');
+  assert.equal(ui.get('signal-coverage-message').textContent,coverage);
+  assert.deepEqual(displayedIds(ui),['a30','b30']);
+  preset(ui,'3buy');assert.deepEqual(displayedIds(ui),[]);
+  assert.match(ui.get('signal-coverage-message').textContent,/1m 三买/);
+  assert.match(ui.get('signal-selection-summary').textContent,/三买/);
   assert.ok(calls.every(call=>call.method==='GET'));
 });
 
-test('export freezes the cross-period conditions with the displayed candidate identities',async()=>{
+test('export freezes the canonical matrix and history choice while subsequent controls keep working',async()=>{
   const latest=crossPeriodCandidates();latest.compact=true;let release;
-  const ui=page(async url=>url==='/screening/workbench?compact=0'?new Promise(resolve=>{release=resolve;}):dispatch(latest,url));
-  await settle();
-  ui.get('period-point-30m').value='3buy';ui.get('period-point-30m').listeners.change();
+  const ui=page(async url=>url==='/screening/workbench?compact=0'?new Promise(resolve=>{release=resolve;}):dispatch(latest,url));await settle();
+  ui.get('signal-clear').click();setSignal(ui,'30m','3buy');
   const exportJob=ui.get('export').listeners.click();await settle();
-  ui.get('period-point-5m').value='3sell';ui.get('period-point-5m').listeners.change();
-  ui.pointButtons.find(button=>button.dataset.point==='1buy').click();
+  setSignal(ui,'5m','3sell');preset(ui,'1buy');ui.get('include-previous').click();
   release(response({...latest,compact:false}));await exportJob;
   const exported=JSON.parse(await ui.exports[0].text());
-  assert.equal(exported.filters.period_points['30m'],'3buy');
-  assert.equal(exported.filters.period_points['5m'],'all');
-  assert.equal(Object.hasOwn(exported.filters,'period_match'),false);
+  assert.deepEqual(exported.filters.signal_selection,{'1m':[],'5m':[],'30m':['3buy']});
+  assert.equal(exported.filters.include_previous,true);
+  for(const old of ['period_points','period_match','frequency','point'])assert.equal(Object.hasOwn(exported.filters,old),false);
   assert.deepEqual(exported.candidates.map(row=>row.id),['a30','b30']);
-  assert.deepEqual(ui.get('signal-list').children.map(row=>row.dataset.id),['a1','b1']);
+  assert.deepEqual(displayedIds(ui),['a1','b1']);
 });
 
-test('export rechecks period matches against fresh full results of the same run',async()=>{
+test('export rechecks selected rows against fresh full results of the same run',async()=>{
   const latest=crossPeriodCandidates();latest.compact=true;
   const full={...latest,compact:false,candidates:latest.candidates.filter(row=>row.id!=='a30')};
-  const ui=page(async url=>url==='/screening/workbench?compact=0'?response(full):dispatch(latest,url));
-  await settle();
-  ui.get('period-point-30m').value='3buy';ui.get('period-point-30m').listeners.change();
-  assert.deepEqual(ui.get('signal-list').children.map(row=>row.dataset.id),['a30','b30']);
+  const ui=page(async url=>url==='/screening/workbench?compact=0'?response(full):dispatch(latest,url));await settle();
+  ui.get('signal-clear').click();setSignal(ui,'30m','3buy');
+  assert.deepEqual(displayedIds(ui),['a30','b30']);
   await ui.get('export').listeners.click();
   const exported=JSON.parse(await ui.exports[0].text());
   assert.deepEqual(exported.candidates.map(row=>row.id),['b30']);
+});
+
+test('export includes every filtered page and rejects a new run rather than mixing snapshots',async()=>{
+  const latest=withCandidate(),row=latest.candidates[0];latest.compact=true;
+  latest.candidates=Array.from({length:121},(_,index)=>({...row,id:String(index),name:'Stock '+index}));
+  let source=latest.source;
+  const ui=page(async url=>url==='/screening/workbench?compact=0'?response({...latest,source,compact:false}):dispatch(latest,url));await settle();
+  ui.get('queue-next').click();ui.get('queue-next').click();
+  await ui.get('export').listeners.click();
+  assert.equal(JSON.parse(await ui.exports[0].text()).candidates.length,121);
+  source='changed-run';await ui.get('export').listeners.click();
+  assert.equal(ui.exports.length,1);assert.match(ui.get('page-message').textContent,/批次已更新/);
+  assert.equal(ui.get('export').disabled,false);
 });
 
 test('a new scan keeps the previous candidate and chart while its response is pending',async()=>{
@@ -794,7 +897,7 @@ test('a new scan keeps the previous candidate and chart while its response is pe
   assert.equal(ui.get('signal-count').textContent,0);
   assert.equal(ui.get('review-fields').disabled,true);
   const old={...latest.candidates[0],refresh_state:'pending',result_source:'a'};
-  const fresh={...old,id:'fresh',code:'SH.600001',name:'new result',refresh_state:undefined};
+  const fresh={...old,id:'fresh',code:'SH.600001',name:'new result',refresh_state:undefined,result_source:'next'};
   release(response({...latest,candidates:[fresh,old],status:{...latest.status,completed:1,previous_result_count:1,current_result_count:1}}));
   await starting;await settle();
   assert.equal(ui.get('signal-list').children.length,2);
@@ -875,7 +978,7 @@ test('current-run statistics exclude both pending and limited retained third-cla
   assert.match(ui.get('signal-breakdown').textContent,/2 条上次结果/);
   const stats=template.match(/<section class="summary"[\s\S]*?<\/section>/)[0];
   assert.match(stats,/本轮/);
-  ui.pointButtons.find(button=>button.dataset.point==='1buy').click();
+  preset(ui,'1buy');
   assert.equal(ui.get('signal-list').children.length,0);
   assert.equal(ui.get('signal-count').textContent,1,'display filters do not rewrite whole-run statistics');
   assert.match(ui.get('third-breakdown').textContent,/三类买卖点提醒 1 条/);
@@ -910,7 +1013,7 @@ test('age, price distance and sort refine confirmed evidence without changing th
     {id:'next',code:'SH.600003',market:'a',origin:'screening',frequency:'5m',stage:'confirmed',sectors:[],
       point:{point_type:'3sell',status:'confirmed',center_ordinal:2},nested_confirmation:{state:'confirmed'},confirmation_age_sessions:0,gain_pct:2},
   ];
-  const base={market:'all',origin:'screening',frequency:'all',point:'all',stage:'all',review:'all',sector:'',query:'',
+  const base={market:'all',origin:'screening',signal_selection:allSignalSelection(),include_previous:true,stage:'all',review:'all',sector:'',query:'',
     point_status:'confirmed',lower_status:'all',center_order:'all',age:'all',gain:'all',sort:'distance'};
   assert.deepEqual(filterRows(rows,base).map(r=>r.id),['near','next','older']);
   assert.deepEqual(filterRows(rows,{...base,age:'1',gain:'3',center_order:'first'}).map(r=>r.id),['near']);

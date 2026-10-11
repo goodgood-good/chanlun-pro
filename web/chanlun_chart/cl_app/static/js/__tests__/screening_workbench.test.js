@@ -2,7 +2,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {filterRows,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows}=require('../screening_workbench.js');
-const filters={market:'all',origin:'screening',frequency:'all',point:'all',sector:'',review:'all',stage:'all'};
+const filters={market:'all',origin:'screening',sector:'',review:'all',stage:'all'};
 const rows=[
   {id:'a',market:'a',code:'SH.600088',name:'中视传媒',frequency:'5m',point:{point_type:'3buy'},stage:'confirmed',origin:'screening',sectors:['media']},
   {id:'b',market:'us',code:'AAPL',name:'Apple',frequency:'5m',point:{},stage:'monitoring',origin:'watchlist'},
@@ -52,12 +52,13 @@ test('empty queue explains loading, idle, incompatible versions and view filters
 test('all-market watchlist stays distinct from confirmed screening signals',()=>{
   assert.deepEqual(filterRows(rows,filters).map(r=>r.id),['a','c']);
   assert.deepEqual(filterRows(rows,{...filters,origin:'watchlist',market:'us'}).map(r=>r.id),['b']);
-  assert.equal(filterRows(rows,{...filters,origin:'all',point:'3buy'}).length,1);
+  assert.deepEqual(filterRows(rows,{...filters,origin:'all',signal_selection:{'5m':['3buy']}}).map(r=>r.id),['a','b']);
+  assert.deepEqual(filterRows(rows,{...filters,origin:'all',signal_selection:{}}).map(r=>r.id),['b']);
 });
 test('sector, six point types, periods and review filters compose',()=>{
   assert.deepEqual(filterRows(rows,{...filters,query:'传媒'}, {}, {media:'传媒行业'}).map(r=>r.id),['a']);
-  assert.equal(filterRows(rows,{...filters,sector:'media',point:'3sell'}).length,0);
-  assert.deepEqual(filterRows(rows,{...filters,stage:'confirmed',frequency:'30m'}).map(r=>r.id),['c']);
+  assert.equal(filterRows(rows,{...filters,sector:'media',signal_selection:{'5m':['3sell']}}).length,0);
+  assert.deepEqual(filterRows(rows,{...filters,stage:'confirmed',signal_selection:{'30m':['2buy']}}).map(r=>r.id),['c']);
   assert.deepEqual(filterRows(rows,{...filters,review:'reviewed'},{a:{}}).map(r=>r.id),['a']);
   assert.deepEqual(filterRows(rows,{...filters,review:'pending',origin:'all'},{a:{}}).map(r=>r.id),['c']);
 });
@@ -65,9 +66,9 @@ test('sector, six point types, periods and review filters compose',()=>{
 test('forming results filter independently from confirmed candidates and watchlists',()=>{
   const waiting={...rows[0],id:'waiting',stage:'approaching',point:{point_type:'3buy',confirmed_at:null}};
   const mixed=[...rows,waiting];
-  assert.deepEqual(filterRows(mixed,{...filters,stage:'forming',frequency:'5m',point:'3buy'}).map(r=>r.id),['waiting']);
+  assert.deepEqual(filterRows(mixed,{...filters,stage:'forming',signal_selection:{'5m':['3buy']}}).map(r=>r.id),['waiting']);
   assert.deepEqual(filterRows(mixed,{...filters,stage:'confirmed'}).map(r=>r.id),['a','c']);
-  assert.deepEqual(filterRows(mixed,{...filters,stage:'forming',point:'1buy'}),[]);
+  assert.deepEqual(filterRows(mixed,{...filters,stage:'forming',signal_selection:{'5m':['1buy']}}),[]);
 });
 test('operational MACD risk filters only the view and keeps formal point rows',()=>{
   const candidates=[
