@@ -11,6 +11,8 @@
   - `/set_stock_zixuan`
 """
 
+import csv
+import io
 import re
 
 from flask import Blueprint, Response, render_template, request
@@ -19,8 +21,8 @@ from werkzeug.utils import secure_filename
 
 from chanlun.market import Market
 from chanlun.exchange import get_exchange, resolve_bounded_stock_info
-from chanlun.tools.log_util import LogUtil
 from chanlun.zixuan import ZiXuan
+from chanlun.screening.markets import validate_symbol
 from ..services.symbol_scope import admit_explicit_validation_codes
 
 
@@ -66,7 +68,9 @@ def _normalize_explicit_import_code(raw_code: str, market: str) -> str | None:
             code = target + code[len(source) :]
             break
     if code.isdigit() and len(code) == 6:
-        if code[0] in {"5", "6", "9"}:
+        if code.startswith("920"):
+            code = f"BJ.{code}"
+        elif code[0] in {"5", "6", "9"}:
             code = f"SH.{code}"
         elif code[0] in {"0", "1", "2", "3"}:
             code = f"SZ.{code}"
@@ -76,29 +80,47 @@ def _normalize_explicit_import_code(raw_code: str, market: str) -> str | None:
 
 
 def _parse_bounded_import_rows(content: str, market: str):
-    """Parse and admit explicit rows before any exchange/provider is opened."""
-
-    parsed = {}
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped:
+    """Read standard market/code/name CSV or legacy code/name, before I/O."""
+    parsed, issues, skipped = {}, [], 0
+    reader = csv.reader(io.StringIO(content, newline=""), strict=True)
+    header, first = False, True
+    for fields in reader:
+        if not fields or all(not value.strip() for value in fields):
             continue
-        import_infos = stripped.split(",", 1)
-        code = _normalize_explicit_import_code(import_infos[0], market)
-        if code is None:
-            LogUtil.warning(f"zixuan import skip invalid code: {stripped!r}")
+        if first and [value.strip().lower() for value in fields] == ["market", "code", "name"]:
+            header, first = True, False
             continue
-        name = import_infos[1].strip() if len(import_infos) == 2 else ""
-        if code in parsed:
-            del parsed[code]
-        parsed[code] = name
-    if not parsed:
-        return ()
-    admitted = admit_explicit_validation_codes(
-        tuple(parsed),
-        max_symbols=_MAX_BOUNDED_IMPORT_SYMBOLS,
-    )
-    return tuple((code, parsed[code]) for code in admitted)
+        first = False
+        line = reader.line_num
+        if header:
+            row_market = fields[0].strip().lower() if fields else ""
+            raw_code = fields[1] if len(fields) > 1 else ""
+            name = fields[2].strip() if len(fields) > 2 else ""
+            shape_ok = len(fields) == 3
+        else:
+            row_market, raw_code = market, fields[0]
+            # Old exports did not quote commas inside names. Preserve their
+            # first-comma split while accepting properly quoted legacy CSV.
+            name = ",".join(fields[1:]).strip()
+            shape_ok = True
+        code = _normalize_explicit_import_code(raw_code, row_market)
+        reason = ("列数不符合 market,code,name 或旧版 code,name" if not shape_ok else
+                  "市场无效" if row_market not in _VALID_MARKETS else
+                  "标的代码无效" if not code or not validate_symbol(row_market, code) else
+                  "标的名称超过 100 个字符" if len(name) > 100 else None)
+        identity = row_market, code
+        if not reason and identity in parsed:
+            reason = "重复标的，保留文件中最后一条"
+        if reason:
+            skipped += 1
+            if len(issues) < 50:
+                issues.append({"line": line, "market": row_market[:20], "code": str(raw_code)[:80], "reason": reason})
+            if identity not in parsed or not reason.startswith("重复"):
+                continue
+        parsed[identity] = {"market": row_market, "code": code, "name": name, "line": line}
+        admit_explicit_validation_codes(
+            [f"{m}:{c}" for m, c in parsed], max_symbols=_MAX_BOUNDED_IMPORT_SYMBOLS)
+    return list(parsed.values()), issues, skipped
 
 
 @zixuan_bp.before_request
@@ -193,12 +215,14 @@ def opt_zixuan_export():
         return {"ok": False, "msg": "无效的自选组名"}, 400
     zx = ZiXuan(market)
     stock_list = zx.zx_stocks(zx_group)
-    output = "".join(f"{s['code']},{s['name']}\n" for s in stock_list)
-    # 导出内容只有几 KB，直接以内存响应发送；下载名经 secure_filename 处理。
-    safe_name = secure_filename(f"zixuan_{zx_group}.txt") or "zixuan.txt"
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(("market", "code", "name"))
+    writer.writerows((s.get("market", market), s["code"], s["name"]) for s in stock_list)
+    safe_name = secure_filename(f"zixuan_{zx_group}.csv") or "zixuan.csv"
     return Response(
-        output,
-        mimetype="text/plain; charset=utf-8",
+        "\ufeff" + output.getvalue(),
+        mimetype="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
     )
 
@@ -229,7 +253,9 @@ def opt_zixuan_import():
         return {"ok": False, "msg": "文件必须使用 UTF-8 编码"}, 400
 
     try:
-        import_rows = _parse_bounded_import_rows(content, market)
+        import_rows, issues, skipped = _parse_bounded_import_rows(content, market)
+    except csv.Error:
+        return {"ok": False, "msg": "CSV 格式错误，请检查引号与列分隔"}, 400
     except ValueError:
         return {
             "ok": False,
@@ -239,44 +265,42 @@ def opt_zixuan_import():
     zx = ZiXuan(market)
     if zx_group not in {group["name"] for group in zx.zixuan_list}:
         return {"ok": False, "msg": "自选组不存在"}, 400
-    imported = {}
-    ex = get_exchange(Market(market)) if import_rows else None
-    for code, imported_name in import_rows:
+    imported, exchanges = [], {}
+    for row in import_rows:
+        row_market, code, imported_name = row["market"], row["code"], row["name"]
         try:
+            if row_market not in exchanges:
+                try:
+                    exchanges[row_market] = get_exchange(Market(row_market))
+                except Exception:
+                    exchanges[row_market] = None
+            if exchanges[row_market] is None:
+                raise ValueError("identity source unavailable")
             resolved = resolve_bounded_stock_info(
-                ex,
+                exchanges[row_market],
                 code,
                 fallback_name=imported_name,
                 allow_code_fallback=True,
                 fallback_when_missing=True,
             )
-            if resolved is None:
-                continue
-            resolved_name = str(resolved.get("name") or "").strip()
+            resolved_name = str((resolved or {}).get("name") or "").strip()
             if not resolved_name:
-                continue
-            imported[code] = {
-                "code": code,
-                "name": imported_name or resolved_name,
-            }
-        except (KeyError, TypeError, ValueError):
-            LogUtil.warning(f"zixuan import skip code: {code!r}")
-        except Exception as exc:
-            LogUtil.warning(
-                f"zixuan import identity lookup failed code={code!r}: {exc}"
-            )
-
+                raise ValueError("identity unavailable")
+            imported.append({"market": row_market, "code": code, "name": imported_name or resolved_name[:100]})
+        except Exception:
+            skipped += 1
+            if len(issues) < 50:
+                issues.append({"line": row["line"], "market": row_market, "code": code,
+                               "reason": "标的身份暂不可核验，未导入；请稍后重试"})
+    counts = {"added": 0, "updated": 0}
     if imported:
-        existing = [
-            stock
-            for stock in zx.zx_stocks(zx_group)
-            if stock.get("market", market) == market
-            and stock["code"] not in imported
-        ]
-        if not zx.replace_zx_stocks(zx_group, existing + list(imported.values())):
-            return {"ok": False, "msg": "导入失败"}, 409
-
-    return {"ok": True, "msg": f"成功导入 {len(imported)} 条记录"}
+        try:
+            counts = zx.merge_zx_stocks(zx_group, imported)
+        except Exception:
+            return {"ok": False, "msg": "导入保存失败，本次未写入任何标的，请重试"}, 409
+    return {"ok": bool(imported), "msg": f"导入 {len(imported)} 条：新增 {counts['added']}、更新 {counts['updated']}；跳过 {skipped} 条",
+            "imported": len(imported), **counts, "skipped": skipped, "issues": issues,
+            "issues_truncated": skipped > len(issues)}
 
 
 @zixuan_bp.route("/set_stock_zixuan", methods=["POST"])

@@ -258,6 +258,9 @@
               </div>
               <button type="button" id="ca-refresh-analysis" class="ca-action">刷新</button>
             </header>
+            <label class="ca-chart-target" for="ca-chart-target">分析图表
+              <select id="ca-chart-target" aria-label="选择侧栏分析的图表" disabled></select>
+            </label>
             <p id="ca-native-status" role="status" aria-live="polite">加载 K 线与中枢…</p>
             <p id="ca-segment-status" role="status" aria-live="polite"></p>
             <div class="ca-native-counts" aria-label="结构数量">
@@ -967,6 +970,13 @@
             self.state.selectedIndex = -1;
 
             var seq = ++self.state.loadSeq;
+            function showLoadError(message) {
+              var $cell = $('<td>').attr('colspan', 2).css({'text-align':'center'});
+              $cell.append($('<p>').text(message));
+              $cell.append($('<button>').attr('type', 'button').addClass('layui-btn layui-btn-sm')
+                .text('重试加载').on('click', function () { self.load(); }));
+              $tbody.empty().append($('<tr>').append($cell));
+            }
             AppRequest.ajax({
               url: '/symbols/list',
               method: 'GET',
@@ -977,7 +987,7 @@
               // 旧请求覆盖新结果保护：用户在加载期间又切了市场，丢弃旧响应
               if (seq !== self.state.loadSeq) return;
               if (!res || res.ok !== true) {
-                $tbody.html('<tr><td colspan="2" style="text-align:center; color:#c00;">标的加载失败，请重试</td></tr>');
+                showLoadError(res && res.msg || '标的加载失败，请重试');
                 return;
               }
               var items = res.items || [];
@@ -990,9 +1000,9 @@
               }
               self.state.allRows = items;
               self.applyFilter();
-            }).fail(function () {
+            }).fail(function (xhr) {
               if (seq !== self.state.loadSeq) return;
-              $tbody.html('<tr><td colspan="2" style="text-align:center; color:#c00;">网络异常，暂时无法加载标的</td></tr>');
+              showLoadError(xhr.responseJSON && xhr.responseJSON.msg || '网络异常，暂时无法加载标的');
             });
           },
 

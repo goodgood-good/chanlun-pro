@@ -215,3 +215,9 @@ class ZiXuan(object):
             for _g in self.zixuan_list
         ]
         return res_zx_group
+
+    def merge_zx_stocks(self, zx_group: str, stocks: List[Dict[str, str]]) -> dict:
+        """Import already resolved identities without replacing other members."""
+        if zx_group not in self.zx_names:
+            raise ValueError("自选组不存在或已删除")
+        return db.zx_merge_group_stocks(zx_group, stocks)

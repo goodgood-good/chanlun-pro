@@ -26,7 +26,8 @@ const listing=(items=[row()],extra={})=>({items,pagination:{page:1,size:25,pages
 const detail=(id='notice-1',overrides={})=>({...row(id),body:'已确认三买。',evidence_lines:['回抽守住中枢上沿'],
   images:[{frequency:'1m/5m/30m',periods:['1m','5m','30m'],url:'/monitor/notifications/'+id+'/images/0.png?version='+'a'.repeat(64),status:'sent'}],...overrides});
 function fixture(fetcher,phone=false){
-  const elements=new Map(),requests=[],timers=[];
+  const elements=new Map(),requests=[],timers=[],clock={now:Date.now()};
+  class FixtureDate extends Date{static now(){return clock.now;}}
   const get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
   get('notification-workspace').dataset.view='notifications';
   for(const id of ['status','kind','frequency','scope'])get('notifications-'+id).value='all';
@@ -36,10 +37,11 @@ function fixture(fetcher,phone=false){
   const context={document:{getElementById:get,createElement:tag=>new Element(tag),body:new Element('body'),
     querySelector:query=>query.startsWith('meta')?{content:'csrf'}:null,
     querySelectorAll:query=>query==='[data-monitor-tab]'?tabs:query==='[data-monitor-panel]'?panels:[]},
-    URLSearchParams,Date,AbortController,WorkspaceDevice:{isPhone:phone},
+    URLSearchParams,Date:FixtureDate,AbortController,WorkspaceDevice:{isPhone:phone},
     setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{},
     fetch:(url,options)=>{requests.push({url,options});return fetcher(url,options);}};
-  vm.runInNewContext(source,context);return {get,requests,timers,tabs,panels};
+  vm.runInNewContext(source,context);return {get,requests,timers,tabs,panels,
+    advance:ms=>{clock.now+=ms;},setHidden:value=>{context.document.hidden=value;}};
 }
 function dispatch(url,data=listing()){
   if(url.startsWith('/monitor/status'))return response(statusPayload);
@@ -324,4 +326,182 @@ test('read failures keep the previous delivery records and phone selection scrol
   assert.equal(ui.get('notifications-list').children.length,1);
   assert.match(ui.get('notifications-message').textContent,/保留上次记录/);
   ui.tabs[2].handlers.click();assert.equal(ui.panels[2].hidden,false);assert.equal(ui.panels[0].hidden,true);
+});
+
+test('a selected pending receipt leaving the filter refreshes by id and stays explicitly pinned',async()=>{
+  let sent=false,body='initial pending';
+  const receipt=()=>row('moving',{status:sent?'sent':'pending',delivery_status:sent?'sent':'pending',sent_at:sent?200:null});
+  const ui=fixture(async url=>url.endsWith('/moving')?response(detail('moving',{...receipt(),body,images:[]})):
+    dispatch(url,listing(sent?[]:[receipt()],{summary:{sent:sent?1:0,pending:sent?0:1,failed:0,holdings:1}})));
+  await settle();await settle();
+  ui.get('notifications-status').value='pending';ui.get('notifications-status').handlers.change();await settle();await settle();
+  const readCount=()=>ui.requests.filter(r=>r.url.endsWith('/moving')).length;
+  const initial=readCount();sent=true;body='now sent';
+  await ui.timers.find(t=>t.ms===5000).fn();await settle();await settle();
+  assert.equal(ui.get('notifications-list').children.length,0);
+  assert.equal(readCount(),initial+1,'leaving the filter requests a fresh detail immediately');
+  assert.match(text(ui.get('notification-detail-content')),/已发送.*now sent/);
+  assert.doesNotMatch(text(ui.get('notification-detail-content')),/尚未发送|initial pending/);
+  assert.equal(ui.get('notification-selection-note').hidden,false);
+  assert.match(ui.get('notification-selection-note').textContent,/不在当前列表.*自动更新/);
+  body='updated while pinned';ui.advance(16000);
+  await ui.timers.find(t=>t.ms===5000).fn();await settle();await settle();
+  assert.equal(readCount(),initial+2);
+  assert.match(text(ui.get('notification-detail-content')),/updated while pinned/);
+});
+
+test('changing pages retains the pinned detail with a notice and removes it when the row reappears',async()=>{
+  const ui=fixture(async url=>{
+    if(!url.startsWith('/monitor/notifications?'))return dispatch(url);
+    const page=Number(new URL(url,'http://local').searchParams.get('page'));
+    return response(listing([row(page===1?'first':'second')],{pagination:{page,size:25,total:26,pages:2,has_more:page===1,
+      as_of:2000,next_cursor:page===1?'after-first':null}}));
+  },true);
+  await settle();await settle();
+  ui.get('notifications-next').handlers.click();await settle();await settle();
+  assert.match(ui.get('notifications-page').textContent,/2 \/ 2/);
+  assert.equal(ui.get('notification-selection-note').hidden,false);
+  assert.match(byTag(ui.get('notification-detail-content'),'img')[0].src,/notifications\/first\//);
+  ui.get('notifications-prev').handlers.click();await settle();await settle();
+  assert.equal(ui.get('notification-selection-note').hidden,true);
+  assert.equal(ui.get('notifications-list').children[0]['aria-pressed'],'true');
+});
+
+test('a late pinned-detail response cannot overwrite a newly chosen receipt',async()=>{
+  let page=1,release,reads=0;
+  const ui=fixture(async url=>{
+    if(url.endsWith('/a')&&++reads>1)return new Promise(resolve=>{release=resolve;});
+    return dispatch(url,listing([row(page===1?'a':'b')],{pagination:{page,size:25,total:26,pages:2,has_more:page===1,as_of:2000,next_cursor:'cursor'}}));
+  });await settle();await settle();
+  page=2;ui.get('notifications-next').handlers.click();await settle();await settle();
+  assert.equal(typeof release,'function');
+  ui.get('notifications-list').children[0].handlers.click();await settle();await settle();
+  assert.equal(ui.get('notification-selection-note').hidden,true);
+  release(response(detail('a',{body:'late old detail'})));await settle();await settle();
+  assert.doesNotMatch(text(ui.get('notification-detail-content')),/late old detail/);
+  assert.match(byTag(ui.get('notification-detail-content'),'img')[0].src,/notifications\/b\//);
+});
+
+for(const html of [false,true])test('a missing pinned receipt clears old content without an automatic retry loop '+(html?'HTML':'JSON'),async()=>{
+  let missing=false;
+  const ui=fixture(async url=>{
+    if(url.endsWith('/gone')&&missing)return html?{ok:false,status:404,json:async()=>{throw SyntaxError('not json');}}:response({error:'gone'},404);
+    return dispatch(url,listing(missing?[]:[row('gone')]));
+  });await settle();await settle();
+  missing=true;await ui.timers.find(t=>t.ms===5000).fn();await settle();await settle();
+  assert.match(text(ui.get('notification-detail-content')),/已不存在.*选择其他/);
+  assert.equal(byTag(ui.get('notification-detail-content'),'img').length,0);
+  assert.equal(ui.get('notification-selection-note').hidden,true);
+  const reads=ui.requests.filter(r=>r.url.endsWith('/gone')).length;
+  ui.advance(60000);await ui.timers.find(t=>t.ms===5000).fn();await settle();
+  assert.equal(ui.requests.filter(r=>r.url.endsWith('/gone')).length,reads);
+});
+
+test('old image error events cannot erase a different image or a newer instance of the same tab',async()=>{
+  const images=['1m','5m'].map((frequency,index)=>({frequency,url:'/monitor/notifications/tabs/images/'+index+'.png?version='+String(index).repeat(64)}));
+  const ui=fixture(async url=>url.endsWith('/tabs')?response(detail('tabs',{images})):dispatch(url,listing([row('tabs')])));
+  await settle();await settle();
+  const content=ui.get('notification-detail-content'),frame=byTag(content,'div').find(el=>el.className==='notification-image-frame');
+  const first=byTag(frame,'img')[0];
+  byTag(content,'button').find(b=>b.textContent==='5m').handlers.click();
+  const second=byTag(frame,'img')[0];first.handlers.error();
+  assert.equal(byTag(frame,'img')[0],second);
+  byTag(content,'button').find(b=>b.textContent==='1m').handlers.click();
+  const returned=byTag(frame,'img')[0];
+  first.handlers.error();second.handlers.error();
+  assert.equal(byTag(frame,'img')[0],returned);
+  returned.handlers.error();assert.equal(byTag(frame,'img').length,0);
+  assert.match(text(frame),/图片暂不可读取/);
+});
+
+test('notification polling continues on fixed ticks while one status read remains pending',async()=>{
+  let blocked=false,release;
+  const ui=fixture(async url=>blocked&&url.startsWith('/monitor/status')?
+    new Promise(resolve=>{release=resolve;}):dispatch(url,listing([])));
+  await settle();await settle();
+  const count=prefix=>ui.requests.filter(r=>r.url.startsWith(prefix)).length;
+  const initialLists=count('/monitor/notifications?'),initialStatus=count('/monitor/status');
+  blocked=true;
+  const waiting=ui.timers.find(t=>t.ms===5000).fn();await settle();await settle();
+  assert.equal(count('/monitor/notifications?'),initialLists+1);
+  assert.equal(count('/monitor/status'),initialStatus+1);
+  await ui.timers.findLast(t=>t.ms===5000).fn();await settle();await settle();
+  assert.equal(count('/monitor/notifications?'),initialLists+2);
+  assert.equal(count('/monitor/status'),initialStatus+1,'in-flight status remains singular');
+  release(response(statusPayload));await waiting;await settle();
+});
+
+test('slow notification reads do not overlap and do not block status ticks',async()=>{
+  let blocked=false,release;
+  const ui=fixture(async url=>blocked&&url.startsWith('/monitor/notifications?')?
+    new Promise(resolve=>{release=resolve;}):dispatch(url,listing([])));
+  await settle();await settle();
+  const count=prefix=>ui.requests.filter(r=>r.url.startsWith(prefix)).length;
+  const initialLists=count('/monitor/notifications?'),initialStatus=count('/monitor/status');
+  blocked=true;await ui.timers.find(t=>t.ms===5000).fn();await settle();
+  await ui.timers.findLast(t=>t.ms===5000).fn();await settle();
+  assert.equal(count('/monitor/notifications?'),initialLists+1);
+  assert.equal(count('/monitor/status'),initialStatus+2);
+  release(response(listing([])));await settle();await settle();
+});
+
+test('independent ticks still respect hidden pages and inactive notification tabs',async()=>{
+  const ui=fixture(async url=>dispatch(url,listing([])));await settle();await settle();
+  const before=ui.requests.length;ui.setHidden(true);
+  await ui.timers.find(t=>t.ms===5000).fn();await settle();
+  assert.equal(ui.requests.length,before);
+  ui.setHidden(false);ui.tabs.find(tab=>tab.dataset.monitorTab==='signals').handlers.click();
+  const count=ui.requests.filter(r=>r.url.startsWith('/monitor/notifications?')).length;
+  await ui.timers.findLast(t=>t.ms===5000).fn();await settle();
+  assert.equal(ui.requests.filter(r=>r.url.startsWith('/monitor/notifications?')).length,count);
+  assert.ok(ui.requests.length>before,'the visible monitor status still refreshes');
+});
+
+test('a user can select another receipt after a missing detail was cleared',async()=>{
+  let missing=false;
+  const ui=fixture(async url=>{
+    if(url.endsWith('/gone')&&missing)return response({error:'gone'},404);
+    return dispatch(url,listing(missing?[row('replacement')]:[row('gone')]));
+  });await settle();await settle();
+  missing=true;await ui.timers.find(t=>t.ms===5000).fn();await settle();await settle();
+  assert.match(text(ui.get('notification-detail-content')),/已不存在/);
+  assert.equal(ui.get('notifications-list').children[0]['aria-pressed'],'false');
+  ui.get('notifications-list').children[0].handlers.click();await settle();await settle();
+  assert.equal(ui.get('notifications-list').children[0]['aria-pressed'],'true');
+  assert.doesNotMatch(text(ui.get('notification-detail-content')),/已不存在/);
+  assert.match(byTag(ui.get('notification-detail-content'),'img')[0].src,/notifications\/replacement\//);
+});
+
+test('a selected detail continues refreshing when the receipt list is temporarily unavailable',async()=>{
+  let failed=false;
+  const ui=fixture(async url=>{
+    if(failed&&url.startsWith('/monitor/notifications?'))return response({error:'list unavailable'},503);
+    if(url.endsWith('/kept'))return response(detail('kept',{body:failed?'fresh detail despite list error':'initial detail'}));
+    return dispatch(url,listing([row('kept')]));
+  });await settle();await settle();
+  failed=true;ui.advance(16000);
+  await ui.timers.find(t=>t.ms===5000).fn();await settle();await settle();
+  assert.match(ui.get('notifications-message').textContent,/list unavailable/);
+  assert.match(text(ui.get('notification-detail-content')),/fresh detail despite list error/);
+  assert.equal(ui.requests.filter(r=>r.url.endsWith('/kept')).length,2);
+});
+
+test('an independent detail read cannot roll back an in-flight page request',async()=>{
+  let release;
+  const ui=fixture(async url=>{
+    if(!url.startsWith('/monitor/notifications?'))return dispatch(url);
+    const page=Number(new URL(url,'http://local').searchParams.get('page'));
+    const result=listing([row(page===1?'a':'b')],{pagination:{page,size:25,total:26,pages:2,has_more:page===1,
+      as_of:2000,next_cursor:page===1?'after-a':null}});
+    return page===2?new Promise(resolve=>{release=()=>resolve(response(result));}):response(result);
+  });await settle();await settle();
+  ui.advance(16000);ui.get('notifications-next').handlers.click();await settle();
+  await ui.timers.find(t=>t.ms===5000).fn();await settle();await settle();
+  assert.equal(ui.requests.filter(r=>r.url.endsWith('/a')).length,2,'detail can update while list is pending');
+  release();await settle();await settle();
+  assert.match(ui.get('notifications-page').textContent,/2 \/ 2/);
+  await ui.timers.findLast(t=>t.ms===5000).fn();await settle();
+  const query=new URL(ui.requests.findLast(r=>r.url.startsWith('/monitor/notifications?')).url,'http://local');
+  assert.equal(query.searchParams.get('page'),'2');
+  assert.equal(query.searchParams.get('cursor'),'after-a');
 });

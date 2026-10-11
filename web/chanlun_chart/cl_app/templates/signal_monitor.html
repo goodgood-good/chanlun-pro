@@ -23,6 +23,8 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/screening_workbench.css') }}?asset={{ static_asset_token }}">
   {% include 'workspace_head.html' %}
+  <script nonce="{{ csp_nonce }}">window.__CHANLUN_ACCOUNT_PREFERENCES__ = {{ account_preferences_bootstrap|default(none)|tojson }};</script>
+  <script src="{{ url_for('static', filename='js/account_preferences.js') }}?asset={{ static_asset_token }}"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/signal_monitor.css') }}?asset={{ static_asset_token }}">
   <script defer src="{{ url_for('static', filename='js/signal_monitor.js') }}?asset={{ static_asset_token }}"></script>
 </head>
@@ -69,6 +71,7 @@
           </div>
           <article id="notification-detail" class="notification-detail" aria-label="选中通知详情">
             <div class="notification-detail-heading"><span id="notification-detail-eyebrow">通知详情</span><button id="notifications-back" type="button">返回列表 ↑</button></div>
+            <p id="notification-selection-note" class="muted" role="status" hidden></p>
             <div id="notification-detail-content"><div class="notification-detail-empty"><strong>查看通知的完整信息</strong><p>从左侧选择一条通知，查看发送状态、触发依据和各周期图表。</p></div></div>
           </article>
         </div>

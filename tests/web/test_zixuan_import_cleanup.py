@@ -1,12 +1,10 @@
 import io
 
-import pytest
-
 from cl_app import create_app
 import cl_app.blueprints.zixuan as zixuan_blueprint
 
 
-def test_import_propagates_setup_failure_before_any_group_write(monkeypatch):
+def test_import_reports_setup_failure_before_any_group_write(monkeypatch):
     app = create_app(
         test_config={
             "TESTING": True,
@@ -21,7 +19,7 @@ def test_import_propagates_setup_failure_before_any_group_write(monkeypatch):
         def __init__(self, _market):
             pass
 
-        def replace_zx_stocks(self, *_args, **_kwargs):
+        def merge_zx_stocks(self, *_args, **_kwargs):
             raise AssertionError("group must not be written before setup completes")
 
     monkeypatch.setattr(zixuan_blueprint, "ZiXuan", _ZiXuan)
@@ -31,8 +29,7 @@ def test_import_propagates_setup_failure_before_any_group_write(monkeypatch):
 
     monkeypatch.setattr(zixuan_blueprint, "get_exchange", fail_exchange)
 
-    with pytest.raises(RuntimeError, match="forced setup failure"):
-        app.test_client().post(
+    response = app.test_client().post(
             "/zixuan_opt_import",
             data={
                 "market": "a",
@@ -41,3 +38,8 @@ def test_import_propagates_setup_failure_before_any_group_write(monkeypatch):
             },
             content_type="multipart/form-data",
         )
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is False and body["imported"] == 0 and body["skipped"] == 1
+    assert body["issues"][0]["code"] == "SH.600000"
+    assert "暂不可核验" in body["issues"][0]["reason"]

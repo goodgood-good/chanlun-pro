@@ -8,6 +8,7 @@
   let managerId = null;
   let initialized = false;
   let pointRenderKey = null;
+  let targetOptionsKey = null;
   function formatPrice(value) {
     const n = Number(value);
     return value == null || !Number.isFinite(n) ? '—' : n.toLocaleString('zh-CN', {maximumFractionDigits: 6});
@@ -84,13 +85,42 @@
     if (state.awaiting_confirmation_segments) return `已确认 ${state.confirmed_segments} 条线段；${state.awaiting_confirmation_segments} 条线段仍在等待证据笔确认。`;
     return state.status === 'awaiting_pens' ? `已确认 ${state.confirmed_segments} 条线段；末尾等待新段形成。` : `已确认 ${state.confirmed_segments} 条线段。`;
   }
-  function currentManager(detail) {
-    const managers = Object.values(root.__cm || {});
-    if (detail?.managerId) managerId = detail.managerId;
+  function managerKey(manager) {
+    return String(manager.instanceId || manager.id);
+  }
+  function availableManagers() {
+    return Object.values(root.__cm || {}).filter(manager => manager && !manager._disposed);
+  }
+  function currentManager() {
+    const managers = availableManagers();
+    // A data-ready event identifies its producer, not the user's sidebar
+    // target. Keep that target until it is explicitly changed or disposed.
+    const manager = managers.find(item => managerKey(item) === managerId) || managers[0] || null;
+    managerId = manager ? managerKey(manager) : null;
     const registry = root.getTVRegistry?.();
-    const active = registry?.activeManagerId || managerId;
-    return managers.find(manager => manager.id === active || manager.instanceId === active)
-      || managers[0] || null;
+    if (registry) registry.activeManagerId = managerId;
+    return manager;
+  }
+  function syncChartTarget(manager) {
+    const select = root.document?.getElementById('ca-chart-target');
+    if (!select) return;
+    const options = availableManagers().map(item => {
+      let identity;
+      try { identity = item.getCurrentChartIdentity?.() || item.widget?.symbolInterval?.(); } catch (_) {}
+      return {value: managerKey(item), label: `图 ${item.id} · ${identity
+        ? identity.symbol + ' · ' + formatResolution(identity.interval) : '等待行情'}`};
+    });
+    const key = JSON.stringify(options);
+    if (key !== targetOptionsKey) {
+      targetOptionsKey = key;
+      select.replaceChildren(...options.map(item => {
+        const option = root.document.createElement('option');
+        option.value = item.value; option.textContent = item.label;
+        return option;
+      }));
+    }
+    select.value = manager ? managerKey(manager) : '';
+    select.disabled = options.length < 2;
   }
 
   function layerIsVisible(manager, layer) {
@@ -110,7 +140,8 @@
     if (element) element.textContent = value;
   }
   function refresh(detail = {}) {
-    const manager = currentManager(detail);
+    const manager = currentManager();
+    syncChartTarget(manager);
     let data = null;
     let identity = null;
     try {
@@ -171,6 +202,11 @@
   function init() {
     if (initialized || !root.document) return;
     initialized = true;
+    root.document.getElementById('ca-chart-target')?.addEventListener('change', event => {
+      const selected = availableManagers().find(item => managerKey(item) === event.target.value);
+      if (selected) managerId = managerKey(selected);
+      refresh();
+    });
     root.document.querySelectorAll('[data-chart-layer]').forEach(button => button.addEventListener('click', () => {
       const manager = currentManager({}); const layer = button.dataset.chartLayer;
       setLayerVisibility(manager, layer, !layerIsVisible(manager, layer)); refresh();

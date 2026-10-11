@@ -255,8 +255,36 @@ test('standalone cross-market symbol changes retain the full-page navigation fal
   const manager = Object.create(ChartManager.prototype);
   manager.handleSymbolChange({ ticker: 'US:MSFT.US' });
 
-  assert.deepEqual(writes, [['market', 'us']]);
-  assert.deepEqual(targets, ['/?market=us']);
+  assert.deepEqual(writes, [['market', 'us'], ['us_code', 'MSFT.US']]);
+  assert.deepEqual(targets, ['/?market=us&code=MSFT.US']);
+});
+
+test('cross-market navigation retains the selected code when account preferences defer navigation', () => {
+  const { ChartManager, sb } = loadChartManager();
+  const stored = { market: 'a', currency_spot_code: 'ETH/USDT' }, targets = [];
+  sb.Utils.get_market = () => stored.market;
+  sb.Utils.set_local_data = (key, value) => { stored[key] = value; };
+  sb.window.AccountPreferences = {navigateAfterSave: (target, replace) => targets.push({target, replace})};
+  const manager = Object.create(ChartManager.prototype);
+  manager.handleSymbolChange({ticker: 'CURRENCY_SPOT:BTC/USDT'});
+  assert.equal(stored.currency_spot_code, 'BTC/USDT');
+  assert.equal(stored.market, 'currency_spot');
+  assert.deepEqual(targets, [{target:'/?market=currency_spot&code=BTC%2FUSDT', replace:false}]);
+});
+
+test('initializing a later chart keeps an already selected live manager active',()=>{
+  const {ChartManager,sb}=loadChartManager();
+  const first={instanceId:'chosen-first'};
+  const registry={chartManagers:new Map([['chosen-first',first]]),datafeeds:new Map(),widgets:new Map(),activeManagerId:'chosen-first'};
+  sb.getTVRegistry=()=>registry;
+  sb.Utils.get_code=()=> 'SH.600000';sb.addEventListener=()=>{};
+  sb.TradingView.widget=function(){return {};};
+  sb.fetch=async()=>({ok:true,json:async()=>({status:'ok',data:{entries:[],complete:true}})});
+  const second=makeDrawingPersistenceManager(ChartManager);
+  second.id='2';second.instanceId='later-second';second.setupEventListeners=()=>{};
+  second.init();
+  assert.equal(registry.chartManagers.get('later-second'),second);
+  assert.equal(registry.activeManagerId,'chosen-first');
 });
 
 function makeReconcileManager(ChartManager) {

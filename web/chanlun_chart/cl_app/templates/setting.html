@@ -59,7 +59,7 @@
             </div>
             <div class="cp-note">
               <span aria-hidden="true">i</span>
-              <div><strong>使用提示</strong><br />查看数字货币行情时通常无需单独配置代理。</div>
+              <div><strong>使用提示</strong><br />这里显示当前生效的代理；同时清空 Host 和 Port 并保存后，使用直连。</div>
             </div>
           </div>
         </section>
@@ -68,7 +68,7 @@
           <button class="layui-btn cp-button" lay-submit lay-filter="setting_save" type="submit">
             保存系统配置
           </button>
-          <span class="cp-help-text">保存后对后续数据请求生效。</span>
+          <span class="cp-help-text" id="proxy-save-status" role="status">保存后对后续新请求生效，已发出的请求继续完成。</span>
         </div>
       </form>
 
@@ -79,7 +79,10 @@
         layui.use(function () {
           const form = layui.form;
           const layer = layui.layer;
+          var saving = false;
           form.on('submit(setting_save)', function (data) {
+            if (saving) return false;
+            saving = true;
             var $submit = $(data.elem);
             $submit.prop('disabled', true).addClass('layui-btn-disabled').text('保存中…');
             AppRequest.ajax({
@@ -90,11 +93,15 @@
               traditional: true,
               timeout: 15000,
               success: function (result) {
-                if (result && result.ok === true) layer.msg('配置保存成功');
-                else layer.msg((result && result.msg) || '配置保存失败');
+                var text = result && result.ok === true ? '配置已保存，后续新请求使用新配置。' : (result && result.msg) || '配置保存失败';
+                $('#proxy-save-status').text(text);layer.msg(text);
               },
-              error: function () { layer.msg('配置保存失败，请稍后重试'); },
+              error: function (xhr) {
+                var text = xhr.responseJSON && xhr.responseJSON.msg || '配置保存失败，请稍后重试';
+                $('#proxy-save-status').text(text);layer.msg(text);
+              },
               complete: function () {
+                saving = false;
                 $submit.prop('disabled', false).removeClass('layui-btn-disabled').text('保存系统配置');
               }
             });

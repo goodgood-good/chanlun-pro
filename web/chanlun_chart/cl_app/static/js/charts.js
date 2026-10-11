@@ -2611,7 +2611,9 @@ class ChartManager {
         const registry = getTVRegistry();
         registry.chartManagers.set(this.instanceId, this);
         registry.datafeeds.set(this.instanceId, this.udf_datafeed);
-        registry.activeManagerId = this.instanceId;
+        if (!registry.activeManagerId || !registry.chartManagers.has(registry.activeManagerId)) {
+            registry.activeManagerId = this.instanceId;
+        }
 
         // 诊断工具挂在 window，生产环境默认静默；设 window.__chanlunDebug=true 可开启详细日志。
         // 在 console 跑 __chanlunDiag() 一键 dump 当前图表状态，__chanlunDumpLines() 打印 shape 端点。
@@ -3562,7 +3564,9 @@ class ChartManager {
             });
             const registry = getTVRegistry();
             registry.widgets.set(this.instanceId, this.widget);
-            registry.activeManagerId = this.instanceId;
+            if (!registry.activeManagerId || !registry.chartManagers.has(registry.activeManagerId)) {
+                registry.activeManagerId = this.instanceId;
+            }
             this.widget._chanlunManagerId = this.instanceId;
             this.udf_datafeed._chanlunManagerId = this.instanceId;
 
@@ -3962,11 +3966,12 @@ class ChartManager {
         }
         if (Utils.get_market() !== market) {
             Utils.set_local_data("market", market);
-            const target = "/?market=" + encodeURIComponent(market);
+            Utils.set_local_data(`${market}_code`, code);
+            const target = "/?market=" + encodeURIComponent(market) + "&code=" + encodeURIComponent(code);
             if (window.AccountPreferences && typeof window.AccountPreferences.navigateAfterSave === "function") {
                 window.AccountPreferences.navigateAfterSave(target, false);
             } else {
-                location.assign("/?market=" + encodeURIComponent(market));
+                location.assign(target);
             }
             return;
         }

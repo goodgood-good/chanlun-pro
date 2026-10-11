@@ -64,7 +64,7 @@ from ..services.chart_cache import (
 )
 from ..services.chart_compute import compute_and_cache_chart_data, market_now_trading
 from ..services.constants import market_types, resolution_maps
-from ..services.stock_list import get_cached_processed_stocks
+from ..services.stock_list import get_cached_processed_stocks, get_symbol_readiness
 from ..services.symbol_scope import (
     DEFAULT_MAX_ADMITTED_UNIVERSE_SYMBOLS,
     SymbolScopeError,
@@ -103,6 +103,16 @@ _market_filtered_lock = threading.Lock()
 _MARKET_FILTERED_TTL = 60.0
 
 
+class CatalogUnavailable(RuntimeError):
+    def __init__(self, state):
+        self.failed = state.get("status") in {"failed", "error", "degraded"}
+        self.status = "error" if self.failed else "not_ready"
+        self.message = "市场目录读取失败，请稍后重试" if self.failed else "市场目录尚未就绪，请稍后重试"
+        if state.get("status") in {"disabled", "bounded_deferred"}:
+            self.message = "当前市场目录未启用，请检查数据源与目录设置"
+        super().__init__(self.message)
+
+
 def _items_fingerprint(items: List[dict]) -> str:
     """快速 fingerprint: 不对 11k 条做完整 md5, 取 count + 首/中/尾 code."""
     if not items:
@@ -125,17 +135,23 @@ def _get_market_filtered_stocks(market: str) -> Tuple[List[dict], str]:
     2. 跑 ``_apply_market_filter`` (a 股 type 过滤 + us 黑名单正则)
     3. 计算 fingerprint, 写回缓存
     """
+    # A cold directory is a loading/error state, never a successful empty list.
+    # This read may schedule the existing bounded loader, but does not wait for
+    # provider I/O or retain an empty filtered cache while it is still loading.
+    try:
+        raw = get_cached_processed_stocks(market, allow_sync_fallback=False)
+    except Exception:
+        raw = None
+    if not raw:
+        with _market_filtered_lock:
+            _market_filtered_cache.pop(market, None)
+        raise CatalogUnavailable(get_symbol_readiness(market))
     now = time.time()
     with _market_filtered_lock:
         cached = _market_filtered_cache.get(market)
         if cached and now - cached[2] < _MARKET_FILTERED_TTL:
             return cached[0], cached[1]
 
-    try:
-        raw = get_cached_processed_stocks(market, allow_sync_fallback=True) or []
-    except Exception as e:
-        LogUtil.error(f"[symbols_list] get stocks failed market={market}: {e}")
-        raw = []
     filtered = _apply_market_filter(market, raw)
     fp = _items_fingerprint(filtered)
     with _market_filtered_lock:
@@ -248,12 +264,23 @@ def symbols_list():
         page_size = MAX_PAGE_SIZE
 
     # 带 TTL 缓存 + ETag，避免每次重跑 _apply_market_filter 11k 条正则
-    all_stocks, market_fp = _get_market_filtered_stocks(market)
+    try:
+        all_stocks, market_fp = _get_market_filtered_stocks(market)
+    except CatalogUnavailable as error:
+        resp = jsonify({"ok": False, "market": market, "status": error.status,
+                        "msg": error.message, "total": None, "items": [], "retry_after_seconds": 2})
+        resp.status_code = 503 if error.failed else 202
+        resp.headers["Cache-Control"] = "private, no-store"
+        resp.headers["Retry-After"] = "2"
+        return resp
 
     # ETag 检查在过滤/分页之前：同一参数组合命中即 304，服务端跳过 query 扫描和切片
     etag = _build_response_etag(market_fp, query, page, page_size, return_all)
     if request.headers.get("If-None-Match") == etag:
-        resp = ("", 304)
+        resp = jsonify()
+        resp.status_code = 304
+        resp.headers["ETag"] = etag
+        resp.headers["Cache-Control"] = "private, no-cache"
         return resp
 
     if query:
@@ -302,8 +329,8 @@ def symbols_list():
     )
     resp.headers["ETag"] = etag
     # private: 含用户特定数据 (虽然 symbols 公开, 走 login_required 不应被 CDN 缓存)
-    # max-age=600: 与 _MARKET_FILTERED_TTL 60s 协同, 浏览器最多 10min 重发
-    resp.headers["Cache-Control"] = "private, max-age=600"
+    # Revalidate browser responses so a formerly cold directory is visible on retry.
+    resp.headers["Cache-Control"] = "private, no-cache"
     return resp
 
 # ---------------------------------------------------------------------------

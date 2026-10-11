@@ -74,6 +74,8 @@
           </div>
           <span id="total_tip" class="cp-status-pill" aria-live="polite">正在加载…</span>
         </header>
+        <p id="symbols_load_status" class="cp-help-text" role="status" aria-live="polite"></p>
+        <div id="symbols_retry_wrap" hidden><button id="symbols_retry" type="button" class="layui-btn cp-button cp-button--secondary">重试目录加载</button></div>
         <div id="symbols_table_wrap" class="cp-data-shell-body">
           <table class="layui-hide" id="symbols_table" lay-filter="symbols_table"></table>
         </div>
@@ -86,6 +88,8 @@
           const form = layui.form;
           const table = layui.table;
           const state = { market: $('#market_select').val(), q: '' };
+          let renderGeneration = 0, requestGeneration = 0, activeRequest = null;
+          let tableInitialized = false;
 
           function updateCount(total) {
             var copy = '共 ' + total + ' 条';
@@ -109,12 +113,20 @@
           }
 
           function renderTable() {
+            const generation = ++renderGeneration;
+            const requestMarket = state.market;
+            ++requestGeneration;
+            if (activeRequest && typeof activeRequest.abort === 'function') activeRequest.abort();
+            activeRequest = null;
             $('#total_tip').text('正在加载…');
+            $('#header_total_tip').text('加载中');
+            $('#symbols_load_status').text('');
+            $('#symbols_retry_wrap').prop('hidden', true);
             var compactColumns = usesCompactColumns();
             var columns = [
               {
                 field: 'code', title: '代码', width: compactColumns ? 132 : 220, templet: function (d) {
-                  const url = '/?market=' + encodeURIComponent(state.market)
+                  const url = '/?market=' + encodeURIComponent(requestMarket)
                     + '&code=' + encodeURIComponent(d.code);
                   const link = document.createElement('a');
                   link.className = 'symbol-code-link';
@@ -134,11 +146,36 @@
                 { field: 'type', title: '类型', width: 120 }
               );
             }
-            table.render({
+            const options = {
+              id: 'symbols_table',
               elem: '#symbols_table',
               url: '/symbols/list',
               method: 'get',
               where: { market: state.market, q: state.q },
+              ajax: function (options) {
+                const requestId = ++requestGeneration;
+                if (activeRequest && typeof activeRequest.abort === 'function') activeRequest.abort();
+                const current = () => generation === renderGeneration && requestId === requestGeneration;
+                const unavailable = function (message, failed) {
+                  if (current()) options.success({ok:true,total:0,items:[],unavailable:{message,failed}});
+                };
+                activeRequest = AppRequest.ajax(Object.assign({}, options, {
+                  timeout: 10000, cache: false,
+                  success: function (response) {
+                    if (!current()) return;
+                    if (!response || response.ok !== true) {
+                      unavailable(response?.msg || '市场目录尚未就绪，请稍后重试', response?.status === 'error');
+                    } else if (response.market !== requestMarket || !Array.isArray(response.items)) {
+                      unavailable('目录响应与当前市场不一致，请重试', true);
+                    } else options.success(response);
+                  },
+                  error: function (xhr, status) {
+                    if (status !== 'abort') unavailable(xhr?.responseJSON?.msg || '目录读取失败，请检查连接后重试', true);
+                  },
+                  complete: function () { if (current()) activeRequest = null; }
+                }));
+                return activeRequest;
+              },
               request: { pageName: 'page', limitName: 'page_size' },
               response: {
                 statusName: 'ok',
@@ -152,11 +189,25 @@
                 limit: 50
               },
               done: function (res) {
-                updateCount((res && res.total) || 0);
+                if (generation !== renderGeneration) return;
+                if (res?.unavailable) {
+                  $('#total_tip').text(res.unavailable.failed ? '读取失败' : '目录未就绪');
+                  $('#header_total_tip').text('—');
+                  $('#symbols_load_status').text(res.unavailable.message);
+                  $('#symbols_retry_wrap').prop('hidden', false);
+                } else {
+                  updateCount((res && res.total) || 0);
+                  $('#symbols_load_status').text(res?.total === 0 ? '目录已就绪，当前条件没有匹配标的。' : '');
+                  $('#symbols_retry_wrap').prop('hidden', true);
+                }
                 labelPaginationControls();
               },
               cols: [columns]
-            });
+            };
+            // Keep the same Layui instance: disposing it leaves its internal
+            // delayed layout callbacks pointing at cleared DOM references.
+            if (tableInitialized) table.reload('symbols_table', options);
+            else { table.render(options); tableInitialized = true; }
           }
 
           form.on('select(market_select)', function (data) {
@@ -183,6 +234,7 @@
             $('#search_input').val('').trigger('focus');
             renderTable();
           });
+          $('#symbols_retry').click(renderTable);
 
           var compactMedia = typeof window.matchMedia === 'function'
             ? window.matchMedia('(max-width: 720px)')

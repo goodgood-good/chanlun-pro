@@ -917,6 +917,46 @@ class DB(object):
                 raise
         return True
 
+    def zx_merge_group_stocks(self, zx_group: str, stocks: List[dict]) -> dict:
+        """Merge explicit cross-market identities atomically, retaining metadata."""
+        from sqlalchemy import text
+        with self.Session() as session:
+            try:
+                if session.get_bind().dialect.name == "sqlite":
+                    session.execute(text("BEGIN IMMEDIATE"))
+                groups = session.query(TableByZxGroup).filter(
+                    TableByZxGroup.zx_group == zx_group).with_for_update().all()
+                if not groups:
+                    raise ValueError("自选组不存在或已删除")
+                existing = session.query(TableByZixuan).filter(
+                    TableByZixuan.zx_group == zx_group).all()
+                by_identity, positions = {}, {}
+                for member in existing:
+                    by_identity.setdefault((member.market, member.stock_code), []).append(member)
+                    positions[member.market] = max(positions.get(member.market, -1), member.position or 0)
+                added = updated = 0
+                for stock in stocks:
+                    market, code, name = stock["market"], stock["code"], stock["name"]
+                    members = by_identity.get((market, code))
+                    if members:
+                        for member in members:
+                            member.stock_name = name
+                        updated += 1
+                    else:
+                        positions[market] = positions.get(market, -1) + 1
+                        member = TableByZixuan(
+                            market=market, zx_group=zx_group, stock_code=code, stock_name=name,
+                            position=positions[market], add_datetime=datetime.datetime.now(),
+                            stock_color="", stock_memo="")
+                        session.add(member)
+                        by_identity[(market, code)] = [member]
+                        added += 1
+                session.commit()
+                return {"added": added, "updated": updated}
+            except Exception:
+                session.rollback()
+                raise
+
     def zx_query_group_by_code(self, market: str, stock_code: str) -> List[str]:
         """查询指定标的所在的所有自选分组名称列表。"""
         with self.Session() as session:
@@ -1065,7 +1105,7 @@ class DB(object):
     _CACHE_GC_INTERVAL_SEC = 300
     _last_cache_gc_at = 0.0
 
-    def cache_get(self, key: str):
+    def cache_get(self, key: str, *, raise_on_error: bool = False):
         for attempt in range(2):
             try:
                 with self.Session() as session:
@@ -1114,6 +1154,8 @@ class DB(object):
                     time.sleep(0.05)
                     continue
                 LogUtil.error(f"[db.cache_get] failed key={key}: {e}", exc_info=True)
+                if raise_on_error:
+                    raise
                 return None
         return None
 

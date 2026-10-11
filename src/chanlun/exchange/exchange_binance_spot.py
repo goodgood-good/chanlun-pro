@@ -18,6 +18,7 @@ from chanlun.exchange.exchange_binance_common import (
     normalize_binance_kline_frame,
 )
 from chanlun.exchange.exchange_db import ExchangeDB
+from chanlun.http_proxy import ConfiguredProxySession
 from chanlun.utils import config_get_proxy
 
 
@@ -38,16 +39,9 @@ class ExchangeBinanceSpot(Exchange):
                 "defaultType": "spot",
                 "fetchCurrencies": False,
                 "fetchMarkets": {"types": ["spot"]},
-            }
+            },
+            "session": ConfiguredProxySession(proxy_reader=lambda: config_get_proxy()),
         }
-
-        proxy = config_get_proxy()
-
-        if proxy["host"] != "":
-            params["proxies"] = {
-                "https": f"http://{proxy['host']}:{proxy['port']}",
-                "http": f"http://{proxy['host']}:{proxy['port']}",
-            }
 
         # Public Spot quotes/K-lines need no account credentials.  Do not load
         # API keys into this process; the adapter has no private trading methods.

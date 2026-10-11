@@ -49,6 +49,7 @@ function loadCodeTemplate() {
       click() { return this; },
       keydown() { return this; },
       text() { return this; },
+      prop() { return this; },
     };
   }
   const table = { render(options) { renderOptions = options; } };

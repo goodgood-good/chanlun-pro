@@ -1237,6 +1237,8 @@ html.cl-theme-dark #chart_menu {
 }
 
 /* Native center overview */
+.ca-chart-target {display:flex;flex-direction:column;gap:4px;margin:8px 0;font-size:12px;}
+.ca-chart-target select {width:100%;min-width:0;min-height:34px;padding:5px 7px;border:1px solid var(--cp-border,#94a3b8);border-radius:5px;background:var(--cp-surface,#fff);color:inherit;}
 .ca-native-counts {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:12px 0;font-size:12px;}
 .ca-native-counts span {display:flex;flex-direction:column;gap:4px;}
 .ca-native-counts strong {font-size:18px;}

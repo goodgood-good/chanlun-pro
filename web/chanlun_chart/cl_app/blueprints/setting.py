@@ -9,6 +9,7 @@ from flask import Blueprint, render_template, request
 from flask_login import login_required
 
 from chanlun.persistence.db import db
+from chanlun.utils import config_get_proxy
 
 
 setting_bp = Blueprint("setting", __name__)
@@ -16,10 +17,10 @@ setting_bp = Blueprint("setting", __name__)
 @setting_bp.route("/setting", methods=["GET"])
 @login_required
 def setting():
-    proxy = db.cache_get("req_proxy")
+    proxy = config_get_proxy()
     set_config = {
-        "proxy_host": proxy["host"] if proxy is not None else "",
-        "proxy_port": proxy["port"] if proxy is not None else "",
+        "proxy_host": proxy["host"],
+        "proxy_port": proxy["port"],
     }
     return render_template("setting.html", **set_config)
 
@@ -56,6 +57,7 @@ def setting_save():
         "port": proxy_port,
     }
 
-    db.cache_set_many({"req_proxy": proxy})
+    if db.cache_set_many({"req_proxy": proxy}) is False:
+        return {"ok": False, "msg": "配置保存失败，请重试"}, 503
 
     return {"ok": True}

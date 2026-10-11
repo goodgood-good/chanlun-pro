@@ -65,15 +65,8 @@ class BinanceSpotPageSource:
 
     def _get_session(self):
         if self._session is None:
-            import requests
-            from chanlun.utils import config_get_proxy
-            session = requests.Session()
-            session.trust_env = False  # Never load netrc/account credentials.
-            proxy = config_get_proxy()
-            if proxy.get('host'):
-                address = f"http://{proxy['host']}:{proxy['port']}"
-                session.proxies.update({'http': address, 'https': address})
-            self._session = session
+            from chanlun.http_proxy import ConfiguredProxySession
+            self._session = ConfiguredProxySession()
         return self._session
 
     def __call__(self, *, code, frequency, cursor, remaining, **_):

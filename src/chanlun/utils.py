@@ -60,7 +60,10 @@ def config_get_proxy() -> Dict[str, str]:
 
     Returns a dict with `host` and `port`.
     """
-    db_proxy = db.cache_get("req_proxy")
-    if db_proxy is not None and db_proxy.get("host") and db_proxy.get("port"):
-        return db_proxy
+    # A read failure must not silently change an explicit route to defaults.
+    db_proxy = db.cache_get("req_proxy", raise_on_error=True)
+    if isinstance(db_proxy, dict) and "host" in db_proxy and "port" in db_proxy:
+        # An explicitly saved empty pair means direct access, not "use defaults".
+        return {"host": str(db_proxy.get("host") or "").strip(),
+                "port": str(db_proxy.get("port") or "").strip()}
     return {"host": config.PROXY_HOST, "port": config.PROXY_PORT}

@@ -86,7 +86,7 @@ def test_duplicate_group_returns_actionable_failure_contract(monkeypatch):
     }
 
 
-def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
+def test_import_resolves_codes_once_and_merges_group_atomically(monkeypatch):
     replaced = []
     identity_calls = []
 
@@ -106,9 +106,9 @@ def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
                 }
             ]
 
-        def replace_zx_stocks(self, group, stocks):
+        def merge_zx_stocks(self, group, stocks):
             replaced.append((group, stocks))
-            return True
+            return {"added": len(stocks), "updated": 0}
 
         def add_stock(self, *_args, **_kwargs):
             raise AssertionError("import must not commit one row at a time")
@@ -146,20 +146,16 @@ def test_import_resolves_codes_once_and_replaces_group_atomically(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "msg": "成功导入 2 条记录"}
+    assert response.get_json() == {"ok": True, "msg": "导入 2 条：新增 2、更新 0；跳过 0 条",
+                                   "imported": 2, "added": 2, "updated": 0, "skipped": 0,
+                                   "issues": [], "issues_truncated": False}
     assert identity_calls == ["SH.600000", "SZ.000001"]
     assert replaced == [
         (
             "关注",
             [
-                {
-                    "code": "SH.601398",
-                    "name": "工商银行",
-                    "color": "#ff5722",
-                    "memo": "keep",
-                },
-                {"code": "SH.600000", "name": "浦发"},
-                {"code": "SZ.000001", "name": "平安"},
+                {"market": "a", "code": "SH.600000", "name": "浦发"},
+                {"market": "a", "code": "SZ.000001", "name": "平安"},
             ],
         )
     ]
@@ -208,9 +204,9 @@ def test_non_a_import_never_calls_catalog_expanding_stock_info(monkeypatch):
         def zx_stocks(self, _group):
             return []
 
-        def replace_zx_stocks(self, group, stocks):
+        def merge_zx_stocks(self, group, stocks):
             replaced.append((group, stocks))
-            return True
+            return {"added": len(stocks), "updated": 0}
 
     class _CatalogExpandingExchange:
         def all_stocks(self):
@@ -246,6 +242,7 @@ def test_non_a_import_never_calls_catalog_expanding_stock_info(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "msg": "成功导入 1 条记录"}
-    assert replaced == [("关注", [{"code": "HK.00700", "name": "腾讯控股"}])]
+    assert response.get_json()["imported"] == 1
+    assert response.get_json()["added"] == 1 and response.get_json()["skipped"] == 0
+    assert replaced == [("关注", [{"market": "hk", "code": "HK.00700", "name": "腾讯控股"}])]
     assert calls == {"stock_info": 0, "all_stocks": 0, "basicinfo": 0}

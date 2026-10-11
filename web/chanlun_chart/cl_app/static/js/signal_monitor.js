@@ -54,8 +54,10 @@
     const response = await fetch(path, options);
     if(response.status===304)return {unchanged:true};
     if(response.redirected || response.status === 401)throw Error('登录已过期，请重新登录后打开监听页面。');
-    const result = await response.json();
-    if(!response.ok)throw Error(result.error || result.errmsg || '请求失败');
+    let result;
+    try{result=await response.json();}
+    catch(error){if(response.ok)throw error;const failure=Error(`请求失败（${response.status}）`);failure.status=response.status;throw failure;}
+    if(!response.ok){const failure=Error(result.error || result.errmsg || '请求失败');failure.status=response.status;throw failure;}
     const etag=isStatus&&response.headers?.get?.('ETag');
     return isStatus?{payload:result,cache:etag?{path,etag}:null}:result;
     } finally { if(deadline!==null)clearTimeout(deadline); }
@@ -64,7 +66,7 @@
   let activePanel='notifications';
   const inbox={page:1,size:phone?15:25,asOf:null,frozen:false,pageCursors:new Map([[1,null]]),
     request:0,pending:false,controller:null,data:null,
-    selectedId:null,detailRequest:0,detailController:null,detail:null,detailVersion:null,detailFetchedAt:0,
+    selectedId:null,selectedRow:null,autoSelect:true,detailRequest:0,detailController:null,detail:null,detailVersion:null,detailFetchedAt:0,
     detailLoading:false,imageIndex:0,listVersion:null,searchTimer:null,searchPending:false};
   const deliveryNames={sent:'已发送',pending:'待发送',sending:'发送中',retry:'等待重试',
     failed:'发送失败',expired:'已过期 · 未补发',suppressed:'静默 · 未发送',cancelled:'已取消'};
@@ -131,8 +133,28 @@
     $('notifications-next').disabled=inbox.pending||inbox.searchPending||(pagination.has_more!==undefined?!pagination.has_more:page>=(pagination.pages||1));
   }
   function inboxMessage(value){$('notifications-message').textContent=value||'';}
+  function notificationSelectionNote(){
+    const note=$('notification-selection-note');
+    if(!note)return;
+    const outside=!!inbox.selectedId&&!(inbox.data?.items||[]).some(row=>row.id===inbox.selectedId);
+    note.hidden=!outside;
+    const value=outside?'所选通知不在当前列表，详情仍会自动更新；可从列表选择其他记录。':'';
+    if(note.textContent!==value)note.textContent=value;
+  }
+  function syncNotificationSelection(){
+    for(const button of $('notifications-list').children)
+      button.setAttribute('aria-pressed',String(button.dataset.notificationId===inbox.selectedId));
+    notificationSelectionNote();
+  }
+  function refreshSelectedNotification(){
+    if(!notificationWorkspaceEnabled||activePanel!=='notifications'||inbox.detailLoading||!inbox.selectedRow)return;
+    const row=(inbox.data?.items||[]).find(item=>item.id===inbox.selectedId)||inbox.selectedRow;
+    if(inbox.detailVersion!==notificationVersion(row)||Date.now()-inbox.detailFetchedAt>=15000)
+      void selectNotification(row);
+  }
   function notificationVersion(row){return JSON.stringify([row.id,row.updated_at,row.status,row.delivery_status,row.sent_at,row.error,row.image_count,row.images,row.chart_role,row.chart_coverage_status,row.chart_missing_periods,row.chart_missing_history_periods,row.chart_history_status]);}
   function renderNotificationList(result){
+    const selectedWasListed=!!inbox.selectedId&&(inbox.data?.items||[]).some(row=>row.id===inbox.selectedId);
     inbox.data=result;
     const summary=result.summary||{},pagination=result.pagination||{},rows=result.items||[];
     for(const key of ['sent','pending','failed','holdings'])$('notification-'+key+'-count').textContent=Number.isInteger(summary[key])?summary[key]:'—';
@@ -157,6 +179,7 @@
       inbox.listVersion=signature;
       $('notifications-list').replaceChildren(...rows.map(row=>{
         const button=node('button',undefined,'notification-row');button.type='button';
+        button.dataset.notificationId=row.id;
         button.setAttribute('aria-pressed',String(row.id===inbox.selectedId));
         const head=node('div',undefined,'notification-row-head');
         head.append(node('strong',notificationTitle(row)),node('time',date(row.sent_at||row.created_at||row.event_at)));
@@ -177,11 +200,13 @@
         return button;
       }));
     }
-    if(!inbox.selectedId&&rows.length)void selectNotification(rows[0]);
+    notificationSelectionNote();
+    if(!inbox.selectedId&&inbox.autoSelect&&rows.length)void selectNotification(rows[0]);
     else{
       const selected=rows.find(row=>row.id===inbox.selectedId);
-      if(selected&&(inbox.detailVersion!==notificationVersion(selected)
-        ||!inbox.detailLoading&&Date.now()-inbox.detailFetchedAt>=15000))void selectNotification(selected);
+      const target=selected||inbox.selectedRow;
+      if(target&&(inbox.detailVersion!==notificationVersion(target)||!selected&&selectedWasListed
+        ||!inbox.detailLoading&&Date.now()-inbox.detailFetchedAt>=15000))void selectNotification(target);
     }
   }
   function safeNotificationImage(value){
@@ -211,17 +236,21 @@
     expand.addEventListener('click',()=>{const image=images[inbox.imageIndex],url=safeNotificationImage(image?.url);if(url)openNotificationImage(url,imageLabel(image,inbox.imageIndex));});
     heading.append(expand);
     const tabs=node('div',undefined,'notification-image-tabs'),frame=node('div',undefined,'notification-image-frame');
-    const buttons=[];
+    const buttons=[];let currentPicture=null;
     const choose=index=>{
       inbox.imageIndex=index;
       const image=images[index],label=imageLabel(image,index),url=safeNotificationImage(image.url);
       expand.disabled=!url;
       buttons.forEach((button,i)=>button.setAttribute('aria-pressed',String(i===index)));
-      frame.replaceChildren();
+      currentPicture=null;frame.replaceChildren();
       if(url){
         const button=node('button',undefined,'notification-image-open');button.type='button';button.setAttribute('aria-label','放大 '+label);
         const picture=node('img');picture.src=url;picture.alt=label+' · K线、MACD 与 MACD HTF';picture.loading='lazy';picture.decoding='async';
-        picture.addEventListener('error',()=>{frame.replaceChildren(node('p','图片暂不可读取，请刷新后重试。','notification-image-unavailable'));});
+        currentPicture=picture;
+        picture.addEventListener('error',()=>{
+          if(currentPicture!==picture)return;
+          currentPicture=null;frame.replaceChildren(node('p','图片暂不可读取，请刷新后重试。','notification-image-unavailable'));
+        });
         button.append(picture);button.addEventListener('click',()=>openNotificationImage(url,label));frame.append(button);
         const caption=node('div',undefined,'notification-image-caption');caption.append(node('span',label),node('span','点击放大'));frame.append(caption);
         if(image.status_note)frame.append(node('p',image.status_note,'muted'));
@@ -290,8 +319,9 @@
   async function selectNotification(row,scroll=false){
     if(!row?.id)return;
     const changed=inbox.selectedId!==row.id;
-    inbox.selectedId=row.id;inbox.detailVersion=notificationVersion(row);inbox.detailLoading=true;
-    if(inbox.data){inbox.listVersion=null;renderNotificationList(inbox.data);}
+    inbox.selectedId=row.id;inbox.selectedRow=row;inbox.autoSelect=true;
+    inbox.detailVersion=notificationVersion(row);inbox.detailLoading=true;
+    syncNotificationSelection();
     if(changed){inbox.detail=null;inbox.imageIndex=0;$('notification-detail-content').replaceChildren(node('p','正在读取通知详情…','notification-empty'));}
     if(scroll&&phone)$('notification-detail').scrollIntoView?.({block:'start',behavior:'smooth'});
     inbox.detailController?.abort();inbox.detailController=typeof AbortController==='function'?new AbortController():null;
@@ -304,6 +334,13 @@
       if(changedContent)renderNotificationDetail(result);
     }catch(error){
       if(request!==inbox.detailRequest)return;
+      if(error.status===404){
+        inbox.selectedId=null;inbox.selectedRow=null;inbox.detail=null;inbox.detailVersion=null;
+        inbox.autoSelect=false;inbox.imageIndex=0;inbox.detailFetchedAt=0;
+        $('notification-detail-content').replaceChildren(node('p','所选通知已不存在或已超过保存期限，请选择其他记录。','notification-empty'));
+        syncNotificationSelection();
+        return;
+      }
       inbox.detailVersion=null;
       if(!inbox.detail)$('notification-detail-content').replaceChildren(node('p',error.name==='AbortError'?'详情读取超时，请点选重试。':error.message,'notification-error'));
       else inboxMessage('详情暂未更新，保留上次内容。'+error.message);
@@ -707,8 +744,10 @@
     const filterChanged=()=>{
       clearTimeout(inbox.searchTimer);inbox.searchTimer=null;inbox.searchPending=false;
       filterToggleLabel();
-      resetNotificationPaging();inbox.selectedId=null;inbox.detail=null;inbox.detailVersion=null;inbox.detailLoading=false;
+      resetNotificationPaging();inbox.selectedId=null;inbox.selectedRow=null;inbox.autoSelect=true;
+      inbox.detail=null;inbox.detailVersion=null;inbox.detailLoading=false;
       ++inbox.detailRequest;inbox.detailController?.abort();
+      syncNotificationSelection();
       $('notification-detail-content').replaceChildren(node('p','选择一条通知查看详情。','notification-empty'));
       void refreshNotifications(true);
     };
@@ -724,12 +763,13 @@
       if(delta>0&&!current.has_more)return;
       if(delta>0&&!current.next_cursor){inboxMessage('分页信息尚不完整，请刷新通知后重试。');return;}
       inbox.frozen=true;inbox.page=next;
+      inbox.autoSelect=true;
       if(delta>0)inbox.pageCursors.set(next,current.next_cursor);
       void refreshNotifications(true);
     };
     const latestNotifications=()=>{
       if(inbox.searchPending){filterChanged();return;}
-      resetNotificationPaging();inbox.detailVersion=null;void refreshNotifications(true);
+      resetNotificationPaging();inbox.autoSelect=true;inbox.detailVersion=null;void refreshNotifications(true);
     };
     $('notifications-prev').addEventListener('click',()=>movePage(-1));
     $('notifications-next').addEventListener('click',()=>movePage(1));
@@ -738,5 +778,13 @@
     $('notifications-back').addEventListener('click',()=>$('notifications-list').scrollIntoView?.({block:'start',behavior:'smooth'}));
     void refreshNotifications();
   }
-  void refresh();const poll=async()=>{if(!document.hidden){await refresh();void refreshNotifications();}setTimeout(poll,5000);};setTimeout(poll,5000);
+  void refresh();
+  const poll=()=>{
+    // Fixed ticks start both independently guarded readers. A slow status
+    // request must not postpone notification reads or the next scheduled tick.
+    setTimeout(poll,5000);
+    if(document.hidden)return Promise.resolve();
+    const status=refresh();void refreshNotifications();refreshSelectedNotification();return status;
+  };
+  setTimeout(poll,5000);
 })();

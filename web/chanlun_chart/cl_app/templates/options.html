@@ -63,6 +63,7 @@
         <button type="button" class="layui-btn" id="save_cl_config_btn">保存显示配置</button>
         <button type="button" class="layui-btn layui-btn-primary" id="delete_cl_config_btn">删除当前标的配置</button>
       </div>
+      <p id="config-save-status" role="status" aria-live="polite"></p>
     </form>
   </main>
 
@@ -70,34 +71,74 @@
     layui.use(['form', 'layer'], function () {
       var form = layui.form;
       var layer = layui.layer;
+      var saving = false;
+      var requestSerial = 0;
+      var editRevision = 0;
 
-      function postConfig(isDelete) {
+      function displayValues() {
         var values = form.val('cl_config') || {};
-        var data = {
-          market: '{{ market }}',
-          code: '{{ code }}',
-          is_del: isDelete ? 'true' : 'false',
+        return {
           config_use_type: values.config_use_type || 'common',
           chart_show_fx: values.chart_show_fx || '0',
           chart_show_bi: values.chart_show_bi || '0',
           chart_show_xd: values.chart_show_xd || '0'
         };
-        $.ajax({
+      }
+      function setBusy(value) {
+        saving = value;
+        $('#save_cl_config_btn, #delete_cl_config_btn').prop('disabled', value);
+        $('.cl_config_setting').attr('aria-busy', String(value));
+      }
+      function notice(message) { $('#config-save-status').text(message); }
+      function edited() {
+        editRevision += 1;
+        notice(saving ? '正在保存提交的版本；新修改尚未保存。' : '显示配置有未保存的修改。');
+      }
+      function postConfig(isDelete) {
+        if (saving) return;
+        var submitted = displayValues();
+        var revision = editRevision;
+        var serial = ++requestSerial;
+        var data = Object.assign({market: '{{ market }}', code: '{{ code }}',
+          is_del: isDelete ? 'true' : 'false'}, submitted);
+        function stillCurrent() {
+          return serial === requestSerial && revision === editRevision
+            && JSON.stringify(displayValues()) === JSON.stringify(submitted);
+        }
+        setBusy(true);
+        notice(isDelete ? '正在删除当前标的配置…' : '正在保存显示配置…');
+        try { AppRequest.ajax({
           type: 'POST',
           url: '/set_cl_config',
           data: data,
           dataType: 'json',
+          timeout: 15000,
           success: function (result) {
-            if (result.ok === true) {
-              layer.msg('显示配置已更新', {time: 1200}, function () { location.reload(); });
+            if (result && result.ok === true) {
+              var message = isDelete ? '当前标的配置已删除' : '显示配置已保存';
+              notice(stillCurrent() ? message : message + '；后续修改尚未保存。');
+              layer.msg(message, {time: 1200}, function () {
+                if (stillCurrent()) location.reload();
+                else if (serial === requestSerial) notice(message + '；后续修改尚未保存。');
+              });
             } else {
-              layer.msg(result.msg || '显示配置更新失败');
+              notice(result && result.msg || '显示配置更新失败，当前修改已保留。');
             }
           },
-          error: function () { layer.msg('显示配置更新失败'); }
-        });
+          error: function (_xhr, status) {
+            notice(status === 'timeout' ? '请求超时，保存结果未确认；当前修改已保留，可重新保存。'
+              : '显示配置更新失败，当前修改已保留。');
+          },
+          complete: function () { setBusy(false); }
+        }); } catch (_) {
+          setBusy(false);
+          notice('显示配置更新失败，当前修改已保留。');
+        }
       }
 
+      $('.cl_config_setting').on('input change', edited);
+      form.on('checkbox', edited);
+      form.on('select', edited);
       $('#save_cl_config_btn').on('click', function () { postConfig(false); });
       $('#delete_cl_config_btn').on('click', function () { postConfig(true); });
       form.render();

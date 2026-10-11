@@ -16,6 +16,7 @@ from chanlun.exchange.exchange_binance_common import (
     normalize_binance_kline_frame,
 )
 from chanlun.exchange.exchange_db import ExchangeDB
+from chanlun.http_proxy import ConfiguredProxySession
 from chanlun.utils import config_get_proxy
 
 
@@ -28,15 +29,8 @@ class ExchangeBinance(Exchange):
     g_all_stocks = []
 
     def __init__(self):
-        params = {"options": {"fetchCurrencies": False}}
-
-        proxy = config_get_proxy()
-
-        if proxy["host"] != "":
-            params["proxies"] = {
-                "https": f"http://{proxy['host']}:{proxy['port']}",
-                "http": f"http://{proxy['host']}:{proxy['port']}",
-            }
+        params = {"options": {"fetchCurrencies": False},
+                  "session": ConfiguredProxySession(proxy_reader=lambda: config_get_proxy())}
 
         # binanceusdm：币安 U 本位合约（永续/交割），区别于现货 ccxt.binance
         self.exchange = ccxt.binanceusdm(params)

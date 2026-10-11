@@ -13,6 +13,7 @@ from chanlun.exchange.exchange_binance_common import (
 from chanlun.exchange.exchange_binance_spot import ExchangeBinanceSpot
 import chanlun.exchange.exchange_binance as futures_module
 import chanlun.exchange.exchange_binance_spot as spot_module
+from chanlun.http_proxy import ConfiguredProxySession
 
 
 def _real_cls(wrapper):
@@ -55,10 +56,9 @@ def test_constructor_uses_public_market_data(
     cls.__init__(instance)
 
     assert captured["options"] == expected_options
-    assert captured["proxies"] == {
-        "http": "http://127.0.0.1:10808",
-        "https": "http://127.0.0.1:10808",
-    }
+    assert isinstance(captured["session"], ConfiguredProxySession)
+    assert not captured["session"].trust_env
+    assert "proxies" not in captured  # Per-request routing is not a frozen CCXT option.
     assert "apiKey" not in captured
     assert "secret" not in captured
     if module is spot_module:
