@@ -76,6 +76,8 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
     if(element.id)elements.set(element.id,element);return element;
   });
   get('advanced-filters').open=false;
+  get('sector-level').value='industry';
+  get('sector-matches-only').type='checkbox';get('sector-matches-only').checked=true;
   get('include-previous').type='checkbox';get('include-previous').checked=true;
   const periods = ['1m','5m','30m','d'].map(frequency => {
     const element = new Element(); element.dataset.frequency = frequency; return element;
@@ -126,6 +128,9 @@ const selectedSignals=ui=>({signal_period:ui.signalPeriods.find(radio=>radio.che
   signal_points:ui.signalCells.filter(cell=>cell.checked).map(cell=>cell.dataset.signalPoint)});
 const signalFields=filters=>({signal_period:filters.signal_period,signal_points:filters.signal_points});
 const displayedIds=ui=>ui.get('signal-list').children.map(row=>row.dataset.id);
+const sectorIds=ui=>ui.get('sector-list').children.map(card=>card.dataset.sectorId);
+const elementText=element=>[element.textContent,...element.children.map(elementText)].filter(Boolean).join(' ');
+function sectorCard(ui,id){const card=ui.get('sector-list').children.find(row=>row.dataset.sectorId===id);assert.ok(card,`sector card ${id} is not on the current page`);return card;}
 function choose(ui,id,value){ui.get(id).value=value;ui.get(id).listeners.change?.({target:ui.get(id)});}
 function setSignal(ui,point,checked=true){
   const cell=ui.signalCells.find(item=>item.dataset.signalPoint===point);
@@ -766,7 +771,7 @@ test('the always-visible summary describes selected pairs and advanced filters',
   choose(ui,'market-filter','a');choose(ui,'center-order-filter','first');choose(ui,'age-filter','3');
   choose(ui,'gain-filter','3');choose(ui,'review-filter','pending');choose(ui,'sort-filter','distance');
   ui.get('signal-search').value='SH.600000';ui.get('signal-search').listeners.input();
-  ui.get('sector-list').children[1].click();
+  sectorCard(ui,'technology').click();
   for(const text of ['A 股','SH.600000','科技','首中枢','3 个交易日','3%','待复核','靠近拐点'])
     assert.ok(summary().includes(text),`active summary must retain ${text}`);
   assert.deepEqual(selectedSignals(ui),{signal_period:'30m',signal_points:['3buy','3sell']});
@@ -792,7 +797,8 @@ test(`${action} returns the queue to page one and selects a card on that page`,a
   else if(action==='cell')setSignal(ui,'1buy',false);
   else if(action==='include-previous')ui.get('include-previous').click();
   else if(action==='reset')ui.get('reset').click();
-  else ui.get('sector-list').children[action==='sector'?1:0].click();
+  else if(action==='sector')sectorCard(ui,'technology').click();
+  else ui.get('sector-all').click();
   await settle();
   assert.match(ui.get('queue-page').textContent,/1 \/ 3/);
   assert.equal(ui.get('signal-list').children[0].dataset.id,action==='period'?'one0':'0');
@@ -2270,4 +2276,190 @@ test('a new source preserves saved view refinements but cannot reuse the previou
   assert.equal(session.getItem('screening-selection:tester:a'),'n100');assert.equal(session.getItem('screening-selection:tester:new-run'),'n0');
   assert.equal(session.getItem(viewKey('tester')),saved);assert.equal(ui.get('signal-search').value,'n');
   assert.deepEqual(selectedSignals(ui),{signal_period:'5m',signal_points:['3buy']});assert.equal(ui.get('include-previous').checked,false);
+});
+
+const industryId=index=>'qmt-gics3:'+String(index).padStart(2,'0');
+function sectorPageCase(){
+  const data=withCandidate(),base=data.candidates[0];
+  data.status.settings.frequencies=['1m','5m','30m'];data.status.settings.point_types=SIGNAL_POINTS;
+  data.sectors=Array.from({length:25},(_,index)=>({id:industryId(index),name:'行业 '+String(index).padStart(2,'0'),
+    symbol_count:999,signal_count:999,member_count:10000,historical_rank:25-index,historical_regime:'up'}));
+  data.sectors.push(...Array.from({length:6},(_,index)=>({id:'qmt-gics4:'+index,name:'细分 '+index,member_count:100})),
+    {id:'legacy-sector',name:'旧目录',member_count:10},{id:'empty-sector',name:'空目录',member_count:10});
+  data.candidates=Array.from({length:25},(_,index)=>['5m','1m'].map(frequency=>({...base,
+    id:frequency+'-'+index,name:'标的 '+index,code:'SH.'+(601000+index),frequency,sectors:[industryId(index)],
+    result_source:data.source,evidence_available:true,selection_available_at:frequency==='5m'?1000+index:2000+25-index,
+    point:{...base.point,point_id:frequency+'-'+index,status:'confirmed',available_at:100+index}}))).flat();
+  data.candidates.push(...Array.from({length:121},(_,index)=>({...base,id:'detail-'+index,name:'同标的信号 '+index,
+    code:'SH.601014',sectors:[industryId(14)],result_source:data.source,evidence_available:true,selection_available_at:900,
+    point:{...base.point,point_id:'detail-'+index,status:'confirmed',available_at:900}})),
+    ...Array.from({length:6},(_,index)=>({...base,id:'sub-'+index,code:'SH.'+(602000+index),sectors:['qmt-gics4:'+index],
+      result_source:data.source,evidence_available:true,selection_available_at:800-index,point:{...base.point,status:'confirmed'}})),
+    {...base,id:'legacy-row',code:'SH.603000',sectors:['legacy-sector'],result_source:data.source,evidence_available:true,
+      selection_available_at:700,point:{...base.point,status:'confirmed'}});
+  return data;
+}
+function sectorSearch(ui,value){ui.get('sector-search').value=value;ui.get('sector-search').listeners.input();}
+
+for(const phone of [false,true])test('sector pages contain six globally ranked cards and browsing leaves the candidate page intact '+(phone?'phone':'desktop'),async()=>{
+  const data=sectorPageCase(),calls=[],ui=page(async url=>{calls.push(url);return dispatch(data,url);},undefined,false,true,phone);await settle();
+  assert.equal(ui.get('sector-level').value,'industry');assert.equal(ui.get('sector-matches-only').checked,true);
+  assert.deepEqual(sectorIds(ui),[24,23,22,21,20,19].map(industryId));assert.equal(templateIds.has('sector-more'),false);
+  assert.equal(ui.get('sector-list').children.length,6);assert.ok(sectorIds(ui).every(Boolean),'all is outside the card list');
+  ui.get('queue-next').click();ui.get('queue-next').click();await settle();
+  const candidatePage=ui.get('queue-page').textContent,title=ui.get('selected-title').textContent,chart=ui.get('chart-frame').src;
+  const requests=calls.length;
+  ui.get('sector-next').click();assert.deepEqual(sectorIds(ui),[18,17,16,15,14,13].map(industryId));
+  assert.match(ui.get('sector-page').textContent,/2\s*\/\s*5/);
+  for(let index=0;index<3;index++)ui.get('sector-next').click();
+  assert.deepEqual(sectorIds(ui),[industryId(0)]);assert.equal(ui.get('sector-next').disabled,true);
+  assert.equal(ui.get('queue-page').textContent,candidatePage);assert.equal(ui.get('selected-title').textContent,title);assert.equal(ui.get('chart-frame').src,chart);
+  assert.equal(calls.length,requests,'board paging must not refetch candidates or evidence');
+  ui.get('sector-prev').click();assert.deepEqual(sectorIds(ui),[6,5,4,3,2,1].map(industryId));
+});
+
+test('sector selection and all change candidate membership without resetting the board page or filtering its own statistics',async()=>{
+  const data=sectorPageCase(),session=sessionFixture(),ui=page(async url=>dispatch(data,url),undefined,false,true,false,session);await settle();
+  ui.get('sector-next').click();const board=sectorIds(ui);
+  sectorCard(ui,industryId(14)).click();
+  assert.match(ui.get('queue-page').textContent,/^1\s*\/\s*3/);assert.equal(ui.get('visible-count').textContent,'122 条');
+  assert.deepEqual(sectorIds(ui),board);assert.match(ui.get('sector-page').textContent,/2\s*\/\s*5/);
+  assert.match(ui.get('sector-active-selection').textContent,/行业 14/);assert.equal(readView(session).filters.sector,industryId(14));
+  ui.get('sector-next').click();assert.ok(!sectorIds(ui).includes(industryId(14)));
+  assert.match(ui.get('sector-active-selection').textContent,/行业 14/);assert.equal(ui.get('visible-count').textContent,'122 条');
+  ui.get('sector-all').click();assert.equal(readView(session).filters.sector,'');assert.match(ui.get('sector-page').textContent,/3\s*\/\s*5/);
+  assert.match(ui.get('queue-page').textContent,/^1\s*\//);assert.equal(ui.get('visible-count').textContent,'153 条');
+});
+
+test('board search level and matches controls leave filters and candidate selection intact',async()=>{
+  const data=sectorPageCase(),session=sessionFixture(),ui=page(async url=>dispatch(data,url),undefined,false,true,false,session);await settle();
+  ui.get('sector-next').click();sectorCard(ui,industryId(14)).click();ui.get('queue-next').click();await settle();
+  const before=readView(session),selected=ui.get('selected-title').textContent,candidatePage=ui.get('queue-page').textContent;
+  sectorSearch(ui,'行业 00');assert.deepEqual(sectorIds(ui),[industryId(0)]);assert.match(ui.get('sector-page').textContent,/1\s*\/\s*1/);
+  assert.match(ui.get('sector-active-selection').textContent,/行业 14/);assert.equal(ui.get('selected-title').textContent,selected);
+  sectorSearch(ui,'');choose(ui,'sector-level','subindustry');assert.equal(sectorIds(ui).length,6);assert.ok(sectorIds(ui).every(id=>id.startsWith('qmt-gics4:')));
+  choose(ui,'sector-level','other');assert.deepEqual(sectorIds(ui),['legacy-sector']);
+  ui.get('sector-matches-only').click();assert.deepEqual(new Set(sectorIds(ui)),new Set(['legacy-sector','empty-sector']));
+  assert.equal(ui.get('queue-page').textContent,candidatePage);assert.equal(ui.get('selected-title').textContent,selected);assert.deepEqual(readView(session),before);
+  assert.match(ui.get('sector-active-selection').textContent,/行业 14/);
+});
+
+test('candidate period point and advanced changes recompute sector ranks from page one',async()=>{
+  const data=sectorPageCase(),ui=page(async url=>dispatch(data,url),undefined,false,true);await settle();
+  ui.get('sector-next').click();setPeriod(ui,'1m');assert.deepEqual(sectorIds(ui),[0,1,2,3,4,5].map(industryId));
+  assert.match(ui.get('sector-page').textContent,/1\s*\/\s*5/);
+  ui.get('sector-next').click();preset(ui,'sell');assert.deepEqual(sectorIds(ui),[]);assert.equal(ui.get('sector-empty').hidden,false);
+  preset(ui,'all');ui.get('sector-next').click();choose(ui,'market-filter','us');assert.deepEqual(sectorIds(ui),[]);
+  choose(ui,'market-filter','all');assert.deepEqual(sectorIds(ui),[0,1,2,3,4,5].map(industryId));
+  ui.get('sector-next').click();ui.get('signal-search').value='SH.601024';ui.get('signal-search').listeners.input();
+  assert.deepEqual(sectorIds(ui),[industryId(24)]);assert.match(ui.get('sector-page').textContent,/1\s*\/\s*1/);
+});
+
+test('same-source polling preserves or clamps board pagination while a new source returns to page one',async()=>{
+  let data=sectorPageCase();const ui=page(async url=>dispatch(data,url),undefined,false,true);await settle();
+  for(let index=0;index<4;index++)ui.get('sector-next').click();assert.match(ui.get('sector-page').textContent,/5\s*\/\s*5/);
+  data={...data,status:{...data.status,completed:2}};await ui.timers[0]();await settle();assert.match(ui.get('sector-page').textContent,/5\s*\/\s*5/);
+  data={...data,candidates:data.candidates.filter(row=>!row.sectors.includes(industryId(0))),status:{...data.status,completed:3}};
+  await ui.timers[0]();await settle();assert.match(ui.get('sector-page').textContent,/4\s*\/\s*4/);assert.equal(ui.get('sector-next').disabled,true);
+  data={...data,source:'other-run',status:{...data.status,run_id:'other-run'},candidates:data.candidates.map(row=>({...row,result_source:'other-run'}))};
+  await ui.timers[0]();await settle();assert.match(ui.get('sector-page').textContent,/1\s*\/\s*4/);
+});
+
+test('a stored sector opens its own level and remains selected when board search or newer catalog omits it',async()=>{
+  let data=sectorPageCase();const session=sessionFixture();saveView(session,{sector:'qmt-gics4:4'});
+  const ui=page(async url=>dispatch(data,url),undefined,false,true,false,session);await settle();
+  assert.equal(ui.get('sector-level').value,'subindustry');assert.match(ui.get('sector-active-selection').textContent,/细分 4/);
+  assert.deepEqual(displayedIds(ui),['sub-4']);sectorSearch(ui,'no matches');assert.deepEqual(sectorIds(ui),[]);
+  assert.equal(readView(session).filters.sector,'qmt-gics4:4');assert.match(ui.get('sector-active-selection').textContent,/细分 4/);
+  data={...data,sectors:data.sectors.filter(sector=>sector.id!=='qmt-gics4:4'),status:{...data.status,completed:2}};
+  await ui.timers[0]();await settle();assert.equal(readView(session).filters.sector,'qmt-gics4:4');
+  assert.doesNotMatch(ui.get('sector-active-selection').textContent,/当前：全部板块/);
+  ui.get('sector-all').click();assert.equal(readView(session).filters.sector,'');assert.equal(ui.get('visible-count').textContent,'153 条');
+});
+
+test('only other catalog IDs select the compatible other level automatically',async()=>{
+  const data=withCandidate();data.candidates[0].sectors=['legacy'];data.candidates[0].point.status='confirmed';
+  data.sectors=[{id:'legacy',name:'旧目录'}];
+  const ui=page(async url=>dispatch(data,url),undefined,false,true);await settle();
+  assert.equal(ui.get('sector-level').value,'other');assert.deepEqual(sectorIds(ui),['legacy']);
+});
+
+test('slow reviewed membership keeps sector loading explicit until the source-specific review response arrives',async()=>{
+  const data=sectorPageCase(),session=sessionFixture();let release;
+  saveView(session,{review:'reviewed'});
+  const ui=page(async url=>url.startsWith('/screening/reviews')?new Promise(resolve=>{release=resolve;}):dispatch(data,url),
+    undefined,false,true,false,session);await settle();
+  assert.deepEqual(sectorIds(ui),[]);assert.match(ui.get('sector-status').textContent+' '+ui.get('sector-empty').textContent,/复核.*读取|读取.*复核|复核.*加载/);
+  assert.doesNotMatch(ui.get('sector-status').textContent,/0 个匹配|0 个板块/);
+  release(response({latest:{'5m-3':{decision:'watch'},'5m-18':{decision:'watch'}},history:[]}));await settle();
+  assert.deepEqual(sectorIds(ui),[industryId(18),industryId(3)]);
+  assert.deepEqual(displayedIds(ui),['5m-3','5m-18'],'board priority must not reorder the candidate queue');
+});
+
+test('sector ordering uses current time and distinct market symbols before retained watch and empty sectors',async()=>{
+  const data=withCandidate(),base=data.candidates[0],id=name=>'qmt-gics3:'+name;
+  data.sectors=['newest','fallback','distinct','duplicates','retained','watch','none'].map((name,index)=>({id:id(name),name,
+    historical_rank:7-index,signal_count:name==='duplicates'?99999:0,symbol_count:9999,member_count:100000}));
+  const row=(identity,sector,code,available,extra={})=>({...base,id:identity,code,sectors:[id(sector)],result_source:data.source,
+    evidence_available:true,selection_available_at:available,point:{...base.point,status:'confirmed',available_at:available},...extra});
+  data.candidates=[row('new','newest','SH.600010',500,{point:{...base.point,status:'confirmed',available_at:50}}),
+    row('fallback','fallback','SH.600011',400,{selection_available_at:undefined}),
+    row('a-same','distinct','SAME',300),row('us-same','distinct','SAME',300,{market:'us'}),
+    ...Array.from({length:20},(_,index)=>row('duplicate-'+index,'duplicates','SH.600012',300)),
+    row('old','retained','SH.600013',99999,{refresh_state:'pending',result_source:'old',evidence_available:false}),
+    row('bad-proof','retained','SH.600013',999999,{evidence_available:false}),
+    row('wrong-source','none','SH.600014',999999,{result_source:'wrong'}),
+    row('closed','none','SH.600015',999999,{stage:'closed'}),
+    row('watch-map','watch','SH.600016',999999,{frequency:'30m'})];
+  const ui=page(async url=>{
+    if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
+    if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:[{market:'a',code:'SH.600016',name:'watch'}]});
+    return dispatch(data,url);
+  },undefined,false,true);await settle();choose(ui,'origin-filter','all');
+  assert.deepEqual(sectorIds(ui),['newest','fallback','distinct','duplicates','retained','watch'].map(id));
+  const distinct=elementText(sectorCard(ui,id('distinct'))),duplicates=elementText(sectorCard(ui,id('duplicates')));
+  assert.match(distinct,/2\s*只/,'cross-market identical codes are two symbols');
+  assert.match(duplicates,/1\s*只/,'many point records from the same symbol count once');
+  assert.doesNotMatch(distinct+' '+duplicates,/9999|99999/,'stale catalog counts cannot override live metrics');
+  assert.match(elementText(sectorCard(ui,id('retained'))),/上次|待更新|旧/);assert.match(elementText(sectorCard(ui,id('watch'))),/关注/);
+  ui.get('include-previous').click();assert.deepEqual(sectorIds(ui),['newest','fallback','distinct','duplicates','watch'].map(id));
+  choose(ui,'origin-filter','screening');assert.deepEqual(sectorIds(ui),['newest','fallback','distinct','duplicates'].map(id));
+  ui.get('sector-matches-only').click();ui.get('sector-next').click();assert.equal(sectorIds(ui).length,1);
+});
+
+test('a replacement source cannot reuse the preceding source review membership for sector priorities',async()=>{
+  let data=sectorPageCase(),release;const session=sessionFixture();saveView(session,{review:'reviewed'});
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/reviews')){
+      const source=new URL(url,'http://local').searchParams.get('source');
+      if(source==='a')return response({latest:{'5m-24':{decision:'watch'}},history:[]});
+      return new Promise(resolve=>{release=resolve;});
+    }
+    return dispatch(data,url);
+  },undefined,false,true,false,session);await settle();
+  assert.deepEqual(sectorIds(ui),[industryId(24)]);
+  data={...data,source:'replacement',status:{...data.status,run_id:'replacement'},
+    candidates:data.candidates.map(row=>({...row,result_source:'replacement'}))};
+  const poll=ui.timers[0]();await settle();assert.deepEqual(sectorIds(ui),[]);
+  assert.match(ui.get('sector-status').textContent+' '+ui.get('sector-empty').textContent,/复核.*读取|读取.*复核|复核.*加载/);
+  release(response({latest:{'5m-2':{decision:'watch'}},history:[]}));await poll;await settle();
+  assert.deepEqual(sectorIds(ui),[industryId(2)]);assert.deepEqual(displayedIds(ui),['5m-2']);
+});
+
+test('saving a review invalidates pending-review sector membership even when the reviews object is reused',async()=>{
+  const data=withCandidate(),base=data.candidates[0],session=sessionFixture(),writes=[];
+  data.sectors=[{id:industryId(0),name:'最新板块'},{id:industryId(1),name:'另一板块'}];
+  data.candidates=[{...base,id:'first',sectors:[industryId(0)],selection_available_at:300,point:{...base.point,status:'confirmed'}},
+    {...base,id:'second',code:'SH.600001',sectors:[industryId(1)],selection_available_at:100,point:{...base.point,status:'confirmed'}}];
+  saveView(session,{review:'pending'});
+  const ui=page(async(url,options)=>{
+    if(url.startsWith('/screening/reviews')&&options?.method==='POST'){
+      const payload=JSON.parse(options.body);writes.push(payload);return response({...payload,saved_at:400});
+    }
+    return dispatch(data,url);
+  },undefined,false,true,false,session);await settle();
+  assert.deepEqual(sectorIds(ui),[industryId(0),industryId(1)]);
+  await ui.get('review-form').listeners.submit({preventDefault(){}});await settle();
+  assert.equal(writes.length,1);assert.equal(writes[0].candidate_id,'first');
+  assert.deepEqual(sectorIds(ui),[industryId(1)]);assert.deepEqual(displayedIds(ui),['second']);
 });

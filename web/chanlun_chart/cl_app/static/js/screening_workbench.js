@@ -210,6 +210,44 @@
     const start=(page-1)*size,end=Math.min(start+size,rows.length);
     return {rows:rows.slice(start,end),page,pages,start,end,total:rows.length};
   }
+  function sectorLevel(sector) {
+    const id=String(sector?.id||'');
+    return id.startsWith('qmt-gics3:')?'industry':id.startsWith('qmt-gics4:')?'subindustry':'other';
+  }
+  function sectorSummary(sectors, rows, filters, reviewed={}, source=null) {
+    const names=Object.fromEntries(sectors.map(sector=>[sector.id,sector.name]));
+    const makeStats=()=>({current:new Set(),buy:new Set(),sell:new Set(),retained:new Set(),watch:new Set(),signals:0,latest:0});
+    const totals=makeStats(),groups=new Map(sectors.map(sector=>[sector.id,makeStats()])),seen=new Set();
+    const timestamp=row=>[row.selection_available_at,row.point?.available_at].find(value=>Number.isFinite(value)&&value>0)||0;
+    const matched=filterRows(rows,{...filters,sector:'',sort:'recent'},reviewed,names,source);
+    for(const row of matched){
+      const kind=row.origin==='watchlist'?'watch':row.refresh_state?'retained':'current';
+      if(kind==='current'&&pointStage(row)!=='confirmed')continue;
+      const identity=row.id||JSON.stringify([row.market,row.code,row.frequency,row.origin,row.refresh_state,
+        row.point?.point_id||row.point?.point_type,row.point?.available_at]);
+      if(seen.has(identity))continue;
+      seen.add(identity);
+      const symbol=JSON.stringify([row.market,row.code]);
+      const add=stats=>{
+        stats[kind].add(symbol);
+        if(kind==='current'){
+          stats.signals++;stats.latest=Math.max(stats.latest,timestamp(row));
+          stats[row.point.point_type.endsWith('buy')?'buy':'sell'].add(symbol);
+        }
+      };
+      add(totals);
+      for(const id of new Set(row.sectors||[]))if(groups.has(id))add(groups.get(id));
+    }
+    const values=stats=>({current_symbols:stats.current.size,current_signals:stats.signals,buy_symbols:stats.buy.size,
+      sell_symbols:stats.sell.size,retained_symbols:stats.retained.size,watch_symbols:stats.watch.size,latest_at:stats.latest});
+    const ranked=sectors.map(sector=>({...sector,level:sectorLevel(sector),...values(groups.get(sector.id))}));
+    const tier=sector=>sector.current_symbols?3:sector.retained_symbols?2:sector.watch_symbols?1:0;
+    ranked.sort((a,b)=>tier(b)-tier(a)||
+      (tier(a)===3?(b.latest_at-a.latest_at||b.current_symbols-a.current_symbols):
+        tier(a)===2?b.retained_symbols-a.retained_symbols:tier(a)===1?b.watch_symbols-a.watch_symbols:0)||
+      String(a.name||'').localeCompare(String(b.name||''),'zh-CN')||String(a.id).localeCompare(String(b.id)));
+    return {sectors:ranked,totals:values(totals)};
+  }
   function defaultFilters(origin='screening') {
     return {query:'',market:'all',origin,review:'all',stage:'all',risk:'all',sector:'',
       point_status:'confirmed',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent',
@@ -262,7 +300,8 @@
     }catch(_){/* A private or unavailable browser store must not block filtering. */}
     const state = {data:null,serial:0,version:'',rows:[],selected:null,watch:[],quotes:new Map(),
       reviews:{latest:{},history:[]},reviewsReadySource:null,drafts:new Map(),filters:savedView.filters,
-      frequency:'5m',sectorExpanded:false,queuePage:1,chartKey:'',chartVisible:typeof window==='undefined'||typeof IntersectionObserver==='undefined',quoteRequests:new Map(),watchSerial:0,
+      frequency:'5m',sectorPage:1,sectorLevel:'industry',sectorMatchesOnly:true,sectorInitialized:false,sectorScope:'',sectorCache:null,
+      queuePage:1,chartKey:'',chartVisible:typeof window==='undefined'||typeof IntersectionObserver==='undefined',quoteRequests:new Map(),watchSerial:0,
       details:new Map(),detailPending:new Set(),detailRetries:new Map(),detailSerial:0,
       selectionRestore:{active:true,source:null,id:null},
       watchGroup:'',preferredWatchGroup:savedView.watch_group,watchGroupsReady:false,watchLoaded:false,watchLoading:false,watchError:'',
@@ -479,24 +518,73 @@
         ...(status.excluded_requested_codes||[]).map(code=>node('li',`${code}：未进入本次股票池，请核对行情源是否支持及 ST / 退市过滤条件。`)));
     }
     function renderSectors() {
-      const query=$('sector-search').value.trim().toLowerCase();
-      const sectors=(state.data?.sectors||[]).filter(s=>s.name.toLowerCase().includes(query));
-      $('sector-list').replaceChildren();
-      $('sector-status').textContent=sectors.length ? `${state.data.sectors.length} 个板块；目录与结构记录日期 ${date(state.data.sector_catalog_at)}。候选数量随本次结果更新，结构强弱为历史记录。` : '没有匹配的板块目录。个股筛选与图表仍可使用。';
-      const all=node('button',`全部板块 · ${state.data?.candidates.length||0} 条`,'sector-card'+(!state.filters.sector?' active':''));
-      all.type='button';all.addEventListener('click',()=>{state.filters.sector='';state.queuePage=1;renderSectors();renderQueue({userAction:true});});$('sector-list').append(all);
-      for (const sector of sectors.slice(0,state.sectorExpanded||query?sectors.length:9)) {
-        const b=node('button',undefined,'sector-card'+(state.filters.sector===sector.id?' active':''));b.type='button';
-        b.append(node('strong',sector.name),node('small',`${sector.symbol_count} 只候选 · ${sector.signal_count} 条线索 / ${sector.member_count} 成员`),
-          node('small',`原强弱名次 ${sector.historical_rank??'—'} · ${ {up:'向上',down:'向下',neutral:'中性'}[sector.historical_regime]||sector.historical_regime||'未知'}`));
-        b.addEventListener('click',()=>{state.filters.sector=sector.id;state.queuePage=1;renderSectors();renderQueue({userAction:true});});$('sector-list').append(b);
+      const catalog=state.data?.sectors||[],query=$('sector-search').value.trim().toLowerCase();
+      const scope=JSON.stringify([state.data?.source,{...state.filters,sector:''}]);
+      if(scope!==state.sectorScope){state.sectorScope=scope;state.sectorPage=1;}
+      const levels=['industry','subindustry','other'],labels={industry:'行业',subindustry:'细分行业',other:'其他目录'};
+      const available=levels.filter(level=>catalog.some(sector=>sectorLevel(sector)===level));
+      if(!state.sectorInitialized&&catalog.length){
+        const selected=catalog.find(sector=>sector.id===state.filters.sector);
+        if(selected)state.sectorLevel=sectorLevel(selected);
+        state.sectorInitialized=true;
       }
-      $('sector-more').textContent=state.sectorExpanded?'收起板块':'展开全部板块';
-      $('selected-sector').textContent=state.filters.sector?(sectorNames()[state.filters.sector]||'所选板块'):'全部板块';
+      if(available.length&&!available.includes(state.sectorLevel))state.sectorLevel=available[0];
+      for(const option of $('sector-level').options)
+        option.hidden=available.length?!available.includes(option.value):option.value==='other';
+      $('sector-level').value=state.sectorLevel;
+      $('sector-matches-only').checked=state.sectorMatchesOnly;
+      const selectedName=sectorNames()[state.filters.sector]||'所选板块（目录暂缺）';
+      $('sector-active-selection').textContent=state.filters.sector?`已选：${selectedName}`:'当前：全部板块';
+      $('selected-sector').textContent=state.filters.sector?selectedName:'全部板块';
+      $('sector-all').classList.toggle('active',!state.filters.sector);
+      $('sector-all').setAttribute('aria-pressed',String(!state.filters.sector));
+      const pending=!state.data||reviewFilterPending()||state.data.status?.results_loading&&!state.data.candidates.length;
+      $('sector-list').replaceChildren();
+      if(pending){
+        $('sector-all').textContent='全部板块';
+        $('sector-status').textContent=reviewFilterPending()?'正在读取复核状态，完成后更新板块优先级。':'正在读取板块及已核验结果…';
+        $('sector-empty').hidden=true;$('sector-page').textContent='读取中';
+        $('sector-prev').disabled=true;$('sector-next').disabled=true;
+        return;
+      }
+      const cached=state.sectorCache;
+      if(!cached||cached.data!==state.data||cached.watch!==state.watch||cached.reviews!==state.reviews.latest||
+        cached.epoch!==state.reviewWriteEpoch||cached.scope!==scope){
+        const rows=[...(state.data.candidates||[]),...(state.filters.origin==='screening'?[]:watchRows())];
+        state.sectorCache={data:state.data,watch:state.watch,reviews:state.reviews.latest,epoch:state.reviewWriteEpoch,scope,
+          result:sectorSummary(catalog,rows,state.filters,state.reviews.latest,state.data.source)};
+      }
+      const stats=state.sectorCache.result;
+      const levelRows=stats.sectors.filter(sector=>sector.level===state.sectorLevel);
+      const matches=sector=>sector.current_symbols||sector.retained_symbols||sector.watch_symbols;
+      const sectors=levelRows.filter(sector=>(!state.sectorMatchesOnly||matches(sector))&&String(sector.name||'').toLowerCase().includes(query));
+      const page=pageRows(sectors,state.sectorPage,6);state.sectorPage=page.page;
+      $('sector-all').textContent=`全部板块 · 本轮 ${stats.totals.current_symbols} 只`;
+      $('sector-status').textContent=`${signalFilterText()} · ${levelRows.filter(matches).length} / ${levelRows.length} 个${labels[state.sectorLevel]}有匹配结果。`+
+        `本轮按最新确认、匹配标的数排序。目录日期 ${date(state.data.sector_catalog_at)}。`+
+        (activeRun(state.data.status?.status)||state.data.status?.results_loading?'选股进行中，优先级随已核验结果更新。':'');
+      for(const sector of page.rows){
+        const b=node('button',undefined,'sector-card'+(state.filters.sector===sector.id?' active':''));
+        b.type='button';b.dataset.sectorId=sector.id;b.setAttribute('aria-pressed',String(state.filters.sector===sector.id));
+        b.append(node('strong',sector.name),node('small',`本轮 ${sector.current_symbols} 只 · ${sector.current_signals} 条提醒`));
+        if(sector.current_symbols)b.append(node('small',`买点 ${sector.buy_symbols} 只 · 卖点 ${sector.sell_symbols} 只`),
+          node('small',sector.latest_at?`最新确认 ${date(sector.latest_at)}`:'确认时间待核对'));
+        if(sector.retained_symbols)b.append(node('small',`上次待更新 ${sector.retained_symbols} 只`));
+        if(sector.watch_symbols)b.append(node('small',`关注图表 ${sector.watch_symbols} 只`));
+        if(!matches(sector))b.append(node('small','当前条件下无匹配结果'));
+        b.addEventListener('click',()=>{state.filters.sector=sector.id;state.queuePage=1;renderQueue({userAction:true});});
+        $('sector-list').append(b);
+      }
+      $('sector-page').textContent=page.total?`${page.page} / ${page.pages} 页 · ${page.start+1}–${page.end} / ${page.total} 个`:'0 个板块';
+      $('sector-prev').disabled=page.page===1;$('sector-next').disabled=page.page===page.pages;
+      $('sector-empty').hidden=!!page.total;
+      $('sector-empty').textContent=!catalog.length?'暂未取得板块目录，个股筛选与图表仍可使用。':query?'没有名称匹配的板块，请调整板块搜索。':
+        '当前条件下没有匹配板块，可调整信号筛选或取消“仅看有匹配结果”。';
     }
     function renderQueue({followSelection=false,userAction=false}={}) {
       if(userAction){cancelSelectionRestore();persistView();}
       renderSignalSelection();
+      renderSectors();
       state.rows=visibleRows();
       const restored=restoreSelectionPage();
       if(followSelection&&state.selected) {
@@ -855,7 +943,7 @@
         state.details.clear();state.detailRetries.clear();state.queuePage=1;state.reviews={latest:{},history:[]};state.reviewsLoadedSource=null;state.reviewsReadySource=null;state.reviewSerial++;
         if(state.selectionRestore.source&&state.selectionRestore.source!==data.source)cancelSelectionRestore();
       }
-      renderSummary();renderSectors();renderQueue({followSelection:true});
+      renderSummary();renderQueue({followSelection:true});
       void refreshQuotes();
     }
     function showRunTransition(status) {
@@ -1022,7 +1110,7 @@
         const quote=node('span',undefined,'watch-price');renderQuote(quote,state.quotes.get(`${row.market}:${row.code}`));
         button.append(title,quote);
         button.addEventListener('click',()=>{resetFilters('all');
-          selectRow(watchRows().find(r=>r.id===`watch:${row.market}:${row.code}`));renderQueue({followSelection:true});renderSectors();mobileView('chart');});return button;
+          selectRow(watchRows().find(r=>r.id===`watch:${row.market}:${row.code}`));renderQueue({followSelection:true});mobileView('chart');});return button;
       }));
     }
     async function refreshWatch({userAction=false}={}) {
@@ -1161,6 +1249,7 @@
     function resetFilters(origin='screening') {
       cancelSelectionRestore();
       state.filters=defaultFilters(origin);state.queuePage=1;
+      state.sectorPage=1;state.sectorLevel='industry';state.sectorMatchesOnly=true;
       $('advanced-filters').open=false;$('include-previous').checked=true;
       $('signal-search').value='';$('sector-search').value='';
       for(const id of ['market-filter','review-filter','stage-filter','risk-filter','lower-status-filter','higher-context-filter','center-order-filter','age-filter','gain-filter'])$(id).value='all';
@@ -1263,12 +1352,21 @@
         state.filters[key]=$(id).value;state.queuePage=1;renderQueue({userAction:true});
       });
     $('signal-search').addEventListener('input',()=>{state.filters.query=$('signal-search').value;state.queuePage=1;renderQueue({userAction:true});});
-    $('sector-search').addEventListener('input',renderSectors);
-    $('sector-more').addEventListener('click',()=>{state.sectorExpanded=!state.sectorExpanded;renderSectors();});
+    $('sector-search').addEventListener('input',()=>{state.sectorPage=1;renderSectors();});
+    $('sector-level').addEventListener('change',()=>{
+      if(['industry','subindustry','other'].includes($('sector-level').value))state.sectorLevel=$('sector-level').value;
+      state.sectorPage=1;renderSectors();
+    });
+    $('sector-matches-only').addEventListener('change',()=>{
+      state.sectorMatchesOnly=$('sector-matches-only').checked;state.sectorPage=1;renderSectors();
+    });
+    $('sector-prev').addEventListener('click',()=>{state.sectorPage--;renderSectors();});
+    $('sector-next').addEventListener('click',()=>{state.sectorPage++;renderSectors();});
+    $('sector-all').addEventListener('click',()=>{state.filters.sector='';state.queuePage=1;renderQueue({userAction:true});});
     $('queue-prev').addEventListener('click',()=>{state.queuePage--;clearSelection();renderQueue({userAction:true});if(phone)$('mobile-workspace-tabs')?.scrollIntoView?.({block:'start'});});
     $('queue-next').addEventListener('click',()=>{state.queuePage++;clearSelection();renderQueue({userAction:true});if(phone)$('mobile-workspace-tabs')?.scrollIntoView?.({block:'start'});});
     function resetView(){
-      resetFilters();renderSectors();renderQueue();
+      resetFilters();renderQueue();
     }
     $('reset').addEventListener('click',resetView);
     $('queue-reset-filters').addEventListener('click',resetView);
@@ -1349,7 +1447,7 @@
       try{
         const item=await api('/screening/reviews',{source,candidate_id,...submitted});
         if(state.drafts.get(key)===submittedDraft)state.drafts.delete(key);
-        if(state.data?.source===source){state.reviews.latest[candidate_id]=item;state.reviews.history.unshift(item);renderSummary();renderQueue();
+        if(state.data?.source===source){state.reviews.latest[candidate_id]=item;state.reviews.history.unshift(item);state.sectorCache=null;renderSummary();renderQueue();
           if(state.selected?.id===candidate_id){renderReview();$('review-message').textContent=state.drafts.has(key)?'已保存提交的版本；后续修改仍为未保存草稿。':'已保存。刷新页面后记录仍会保留。';}}
       }catch(error){if(state.selected?.id===candidate_id)$('review-message').textContent=error.message;}
       finally{state.savingReview=false;$('save-review').disabled=false;}
@@ -1382,5 +1480,5 @@
     const quotes=()=>{void refreshQuotes();setTimeout(quotes,15000);};setTimeout(quotes,15000);
     document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshQuotes();});
   }
-  return {boot,filterRows,periodPointConditions,normalizeSignalFilter,applySignalPreset,setSignalPeriod,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows};
+  return {boot,filterRows,periodPointConditions,normalizeSignalFilter,applySignalPreset,setSignalPeriod,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows,sectorLevel,sectorSummary};
 });

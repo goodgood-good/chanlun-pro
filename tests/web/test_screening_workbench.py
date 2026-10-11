@@ -641,7 +641,7 @@ def test_restored_routes_require_login_and_writes_keep_csrf(fixture_run):
     app.config["LOGIN_DISABLED"] = True
     assert client.post("/screening/reviews", json={}).status_code == 400
     html = client.get("/decision-support/early-screening").get_data(as_text=True)
-    for module in ("板块结构雷达", "买卖点与关注队列", "人工确认清单", "chart-layout"):
+    for module in ("板块筛选", "sector-level", "sector-prev", "sector-next", "买卖点与关注队列", "人工确认清单", "chart-layout"):
         assert module in html
     assert 'id="run-source"' not in html
     assert "结果来源" not in html

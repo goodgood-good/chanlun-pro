@@ -51,7 +51,21 @@
     <p id="third-breakdown" class="muted" role="status"></p>
     <div class="auxiliary-panels">
     <details class="panel holdings"><summary>自选分组 <span id="watch-count" class="muted">正在读取…</span></summary><div class="toolbar"><label>当前分组<select id="watch-group"></select></label><button id="watch-refresh">刷新分组</button><label><input id="auto-quotes" type="checkbox" checked>更新可见标的行情</label><a href="/zixuan_group/a" target="_blank" rel="noopener">管理分组</a></div><p id="watch-market-counts" class="muted"></p><p id="watch-status" class="muted"></p><div id="watch-list" class="watch-list"></div><p id="watch-quote-status" class="muted"></p><p class="muted">这里展示当前人工自选分组，数量按标的所属市场统计。分组成员可直接打开图表；已确认买卖点见下方选股候选。</p></details>
-    <details class="panel sectors"><summary>板块筛选 <span class="muted">按行业查看候选</span></summary><header><div><small>SECTOR RADAR</small><h2>板块结构雷达</h2></div><div class="toolbar"><input id="sector-search" type="search" placeholder="搜索板块" aria-label="搜索板块"><button id="sector-more">展开全部板块</button></div></header><p id="sector-status" class="muted"></p><div id="sector-list" class="sector-list"></div><details><summary>板块口径与结构记录</summary><p>卡片数量统计本次结果中的候选。行业归属来自保留的 QMT GICS 目录；结构方向、强弱与排序带有原快照日期，仅供对照，不作为本次实时板块结论。点击板块筛选候选，再结合对应周期图表确认。</p></details></details>
+    <details class="panel sectors">
+      <summary>板块筛选 <span class="muted">按当前条件查看</span></summary>
+      <header><h2>板块筛选</h2></header>
+      <div class="sector-controls">
+        <input id="sector-search" type="search" placeholder="搜索板块" aria-label="搜索板块">
+        <label class="sector-level-control" for="sector-level">目录层级<select id="sector-level"><option value="industry">行业</option><option value="subindustry">细分行业</option><option value="other" hidden>其他目录</option></select></label>
+        <label class="sector-match-choice" for="sector-matches-only"><input id="sector-matches-only" type="checkbox" checked>仅看有匹配结果</label>
+      </div>
+      <div class="sector-selection-bar"><button id="sector-all" type="button">全部板块</button><p id="sector-active-selection" role="status">当前：全部板块</p></div>
+      <p id="sector-status" class="muted" role="status"></p>
+      <div id="sector-list" class="sector-list"></div>
+      <p id="sector-empty" class="muted" role="status" hidden></p>
+      <nav class="sector-pagination" aria-label="板块分页"><button id="sector-prev" type="button" disabled>上一页</button><span id="sector-page" aria-live="polite">1 / 1 页</span><button id="sector-next" type="button" disabled>下一页</button></nav>
+      <details class="sector-method"><summary>统计与排序说明</summary><p>按当前周期、买卖点等条件统计，不受当前选中板块限制。本轮有效结果优先，按最新确认时间、去重标的数依次排序；上次结果与关注图表单独标注，不计入当前优先级。</p><p>行业、细分行业分层显示。历史强弱不作为当前排序依据；目录日期见上方状态。</p></details>
+    </details>
     </div>
     <section class="filters chart-filters" aria-label="候选筛选">
       <div class="chart-filter-body">
