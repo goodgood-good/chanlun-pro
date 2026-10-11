@@ -4,7 +4,7 @@
 .chart-filters{position:static;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;margin:16px 0}.chart-filters details>.toolbar{margin-top:12px}.chart-filter-body{min-width:0}.chart-filters>.toolbar:last-of-type{margin-bottom:6px}
 .quote-up{color:var(--cp-quote-up,#c62828)}.quote-down{color:var(--cp-quote-down,#087f5b)}.quote-neutral{color:var(--cp-quote-flat,var(--muted))}
 .signal-card .queue-stop{font-weight:600;color:var(--ink)}.exit-reference-note{order:4;font-size:12px;line-height:1.6;color:var(--muted);margin:8px 0}
-/* One visible selection matrix at every screen size. */
+/* One selected period and one set of point types at every screen size. */
 .cp-content-page.cp-screening .chart-filters .chart-filter-body {
   min-width: 0;
   padding: 10px;
@@ -44,24 +44,28 @@
   box-shadow: inset 0 0 0 1px var(--accent);
   font-weight: 700;
 }
-.signal-period-grid { display: grid; gap: 8px; }
-.signal-period-card {
-  display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
-  align-items: stretch;
-  gap: 10px;
-  min-width: 0;
-}
-.signal-period-heading {
+.signal-period-controls {
   display: flex;
   align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.signal-control-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.signal-period-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   gap: 6px;
-  min-width: 0;
+  min-width: 72px;
   min-height: 44px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
   cursor: pointer;
 }
-.signal-period-heading strong { font-size: 13px; }
-.signal-period-choices { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.signal-period-option:has(input:checked) { border-color: var(--accent); background: var(--soft); font-weight: 700; }
+.signal-period-option input { accent-color: var(--accent); }
+.signal-point-choices { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
 .signal-choice {
   display: flex;
   align-items: center;
@@ -77,7 +81,7 @@
   background: var(--panel);
 }
 .signal-choice input,
-.signal-period-heading input,
+.signal-period-option input,
 .signal-previous-choice input {
   flex: 0 0 auto;
   width: 16px;
@@ -98,9 +102,9 @@
   cursor: default;
 }
 .signal-choice:has(input:disabled) span { color: var(--muted); font-weight: 400; }
-.signal-period-heading:has(input:disabled) { color: var(--muted); cursor: default; }
+.signal-period-option:has(input:disabled) { color: var(--muted); border-color: var(--line); background: var(--bg); cursor: default; }
 .signal-choice:focus-within,
-.signal-period-heading:focus-within { outline: 3px solid #71bdad; outline-offset: 2px; }
+.signal-period-option:focus-within { outline: 3px solid #71bdad; outline-offset: 2px; }
 .signal-previous-choice {
   display: flex;
   align-items: center;
@@ -127,17 +131,14 @@
   .signal-filter-tools #signal-search { flex-basis: 100%; max-width: none; }
   .signal-presets { width: 100%; display: grid; grid-template-columns: auto repeat(4, minmax(0, 1fr)); gap: 4px; }
   .signal-presets button { min-width: 0; padding: 6px; }
-  .signal-period-card { grid-template-columns: 52px minmax(0, 1fr); gap: 5px; }
-  .signal-period-heading { gap: 4px; }
-  .signal-period-choices { gap: 4px; }
+  .signal-period-controls { gap: 6px; }
+  .signal-period-option { flex: 1 1 0; min-width: 0; padding: 6px; }
+  .signal-point-choices { gap: 4px; }
   .signal-choice { flex-direction: column; gap: 2px; padding: 4px 1px; font-size: 12px; line-height: 1.25; }
-  .signal-choice input, .signal-period-heading input { width: 14px; height: 14px; }
+  .signal-choice input, .signal-period-option input { width: 14px; height: 14px; }
 }
 @media (max-width: 360px) {
-  .signal-period-card { grid-template-columns: 46px minmax(0, 1fr); gap: 3px; }
-  .signal-period-heading { gap: 3px; }
-  .signal-period-heading strong { font-size: 12px; }
-  .signal-period-choices { gap: 2px; }
+  .signal-point-choices { gap: 2px; }
 }
 
 .active-filter-summary{font-size:12px;line-height:1.5;overflow-wrap:anywhere;color:var(--muted);padding:0;margin:0 0 8px}.active-filter-summary:empty{display:none}#queue-reset-filters{min-height:44px;max-width:100%;margin:4px 0 8px;white-space:normal}.summary-scope{font-size:12px;margin:6px 0}

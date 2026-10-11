@@ -50,25 +50,27 @@ test('empty queue explains loading, idle, incompatible versions and view filters
   assert.match(emptyResultsMessage({status:'completed',source_current:true},3),/过滤条件/);
 });
 test('all-market watchlist stays distinct from confirmed screening signals',()=>{
-  assert.deepEqual(filterRows(rows,filters).map(r=>r.id),['a','c']);
+  assert.deepEqual(filterRows(rows,filters).map(r=>r.id),['a']);
+  assert.deepEqual(filterRows(rows,{...filters,signal_period:'30m'}).map(r=>r.id),['c']);
   assert.deepEqual(filterRows(rows,{...filters,origin:'watchlist',market:'us'}).map(r=>r.id),['b']);
-  assert.deepEqual(filterRows(rows,{...filters,origin:'all',signal_selection:{'5m':['3buy']}}).map(r=>r.id),['a','b']);
-  assert.deepEqual(filterRows(rows,{...filters,origin:'all',signal_selection:{}}).map(r=>r.id),['b']);
+  assert.deepEqual(filterRows(rows,{...filters,origin:'all',signal_points:['3buy']}).map(r=>r.id),['a','b']);
+  assert.deepEqual(filterRows(rows,{...filters,origin:'all',signal_points:[]}).map(r=>r.id),['b']);
 });
 test('sector, six point types, periods and review filters compose',()=>{
   assert.deepEqual(filterRows(rows,{...filters,query:'传媒'}, {}, {media:'传媒行业'}).map(r=>r.id),['a']);
-  assert.equal(filterRows(rows,{...filters,sector:'media',signal_selection:{'5m':['3sell']}}).length,0);
-  assert.deepEqual(filterRows(rows,{...filters,stage:'confirmed',signal_selection:{'30m':['2buy']}}).map(r=>r.id),['c']);
+  assert.equal(filterRows(rows,{...filters,sector:'media',signal_points:['3sell']}).length,0);
+  assert.deepEqual(filterRows(rows,{...filters,stage:'confirmed',signal_period:'30m',signal_points:['2buy']}).map(r=>r.id),['c']);
   assert.deepEqual(filterRows(rows,{...filters,review:'reviewed'},{a:{}}).map(r=>r.id),['a']);
-  assert.deepEqual(filterRows(rows,{...filters,review:'pending',origin:'all'},{a:{}}).map(r=>r.id),['c']);
+  assert.deepEqual(filterRows(rows,{...filters,review:'pending',origin:'all'},{a:{}}),[]);
+  assert.deepEqual(filterRows(rows,{...filters,review:'pending',origin:'all',signal_period:'30m'},{a:{}}).map(r=>r.id),['c']);
 });
 
 test('forming results filter independently from confirmed candidates and watchlists',()=>{
   const waiting={...rows[0],id:'waiting',stage:'approaching',point:{point_type:'3buy',confirmed_at:null}};
   const mixed=[...rows,waiting];
-  assert.deepEqual(filterRows(mixed,{...filters,stage:'forming',signal_selection:{'5m':['3buy']}}).map(r=>r.id),['waiting']);
-  assert.deepEqual(filterRows(mixed,{...filters,stage:'confirmed'}).map(r=>r.id),['a','c']);
-  assert.deepEqual(filterRows(mixed,{...filters,stage:'forming',signal_selection:{'5m':['1buy']}}),[]);
+  assert.deepEqual(filterRows(mixed,{...filters,stage:'forming',signal_points:['3buy']}).map(r=>r.id),['waiting']);
+  assert.deepEqual(filterRows(mixed,{...filters,stage:'confirmed'}).map(r=>r.id),['a']);
+  assert.deepEqual(filterRows(mixed,{...filters,stage:'forming',signal_points:['1buy']}),[]);
 });
 test('operational MACD risk filters only the view and keeps formal point rows',()=>{
   const candidates=[

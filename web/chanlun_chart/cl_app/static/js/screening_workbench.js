@@ -127,31 +127,24 @@
   }
   const POINT_PERIODS = ['1m','5m','30m'];
   const MARKET_NAMES = {a:'A 股',us:'美股',hk:'港股',futures:'国内期货',ny_futures:'纽约期货',fx:'外汇',currency:'数字货币合约',currency_spot:'数字货币现货'};
-  function signalSelection(period='all', preset='all') {
-    const types=Object.keys(POINTS).filter(point=>preset==='all'||preset===point||
-      (preset==='buy'||preset==='sell')&&point.endsWith(preset));
-    return Object.fromEntries(POINT_PERIODS.map(frequency=>[frequency,
-      period==='all'||period===frequency?[...types]:[]]));
+  function normalizeSignalFilter(filters) {
+    const period=POINT_PERIODS.includes(filters?.signal_period)?filters.signal_period:'5m';
+    const points=Array.isArray(filters?.signal_points)?filters.signal_points:Object.keys(POINTS);
+    return {signal_period:period,signal_points:Object.keys(POINTS).filter(point=>points.includes(point))};
   }
   function periodPointConditions(filters) {
-    const selection=filters.signal_selection===undefined?signalSelection():filters.signal_selection;
-    return POINT_PERIODS.flatMap(frequency => {
-      const selected=Array.isArray(selection?.[frequency])?selection[frequency]:[];
-      return Object.keys(POINTS).filter(point=>selected.includes(point)).map(point=>({frequency,point}));
-    });
+    const normalized=normalizeSignalFilter(filters);
+    return normalized.signal_points.map(point=>({frequency:normalized.signal_period,point}));
   }
-  function normalizedSignalSelection(selection) {
-    const conditions=periodPointConditions({signal_selection:selection});
-    return Object.fromEntries(POINT_PERIODS.map(frequency=>[frequency,
-      conditions.filter(c=>c.frequency===frequency).map(c=>c.point)]));
+  function applySignalPreset(filters, preset) {
+    const normalized=normalizeSignalFilter(filters);
+    if(['all','buy','sell','none'].includes(preset))normalized.signal_points=Object.keys(POINTS)
+      .filter(point=>preset==='all'||(preset==='buy'||preset==='sell')&&point.endsWith(preset));
+    return normalized;
   }
-  function applySignalPreset(selection, preset) {
-    return ['all','buy','sell','none'].includes(preset)
-      ?signalSelection('all',preset):normalizedSignalSelection(selection);
-  }
-  function setSignalPeriod(selection, period, checked) {
-    const normalized=normalizedSignalSelection(selection);
-    if(POINT_PERIODS.includes(period)&&typeof checked==='boolean')normalized[period]=checked?Object.keys(POINTS):[];
+  function setSignalPeriod(filters, period) {
+    const normalized=normalizeSignalFilter(filters);
+    if(POINT_PERIODS.includes(period))normalized.signal_period=period;
     return normalized;
   }
   function currentPeriodRow(row, source) {
@@ -220,17 +213,23 @@
   function defaultFilters(origin='screening') {
     return {query:'',market:'all',origin,review:'all',stage:'all',risk:'all',sector:'',
       point_status:'confirmed',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent',
-      signal_selection:signalSelection(),include_previous:true};
+      ...normalizeSignalFilter(),include_previous:true};
   }
   function normalizeViewState(saved) {
     const result={filters:defaultFilters(),watch_group:''};
-    if(!saved||saved.version!==1||!saved.filters||typeof saved.filters!=='object'||Array.isArray(saved.filters))return result;
+    if(!saved||![1,2].includes(saved.version)||!saved.filters||typeof saved.filters!=='object'||Array.isArray(saved.filters))return result;
     const input=saved.filters,filters=result.filters;
     const enums={market:['all',...Object.keys(MARKET_NAMES)],origin:['screening','all','watchlist'],review:['all','pending','reviewed'],
       center_order:['all','first'],age:['all','0','1','3','5'],gain:['all','1','3','5'],sort:['recent','distance']};
     for(const [key,values] of Object.entries(enums))if(values.includes(input[key]))filters[key]=input[key];
-    if(input.signal_selection&&typeof input.signal_selection==='object'&&!Array.isArray(input.signal_selection))
-      filters.signal_selection=normalizedSignalSelection(input.signal_selection);
+    if(saved.version===2)Object.assign(filters,normalizeSignalFilter(input));
+    else if(input.signal_selection&&typeof input.signal_selection==='object'&&!Array.isArray(input.signal_selection)){
+      // Previous views may contain several periods; restore exactly one.
+      const legacy=input.signal_selection;
+      const points=period=>Object.keys(POINTS).filter(point=>Array.isArray(legacy[period])&&legacy[period].includes(point));
+      const period=['5m','30m','1m'].find(value=>points(value).length)||'5m';
+      Object.assign(filters,{signal_period:period,signal_points:points(period)});
+    }
     if(typeof input.include_previous==='boolean')filters.include_previous=input.include_previous;
     for(const [key,limit] of [['query',200],['sector',200]])
       if(typeof input[key]==='string')filters[key]=input[key].trim().slice(0,limit);
@@ -239,8 +238,8 @@
   }
   function hasFilterChanges(filters) {
     const defaults=defaultFilters();
-    return Object.keys(defaults).some(key=>key==='signal_selection'
-      ?JSON.stringify(periodPointConditions(filters))!==JSON.stringify(periodPointConditions(defaults))
+    return Object.keys(defaults).some(key=>key==='signal_points'
+      ?JSON.stringify(normalizeSignalFilter(filters).signal_points)!==JSON.stringify(defaults.signal_points)
       :filters[key]!==defaults[key]);
   }
   function advancedFilterCount(filters) {
@@ -254,10 +253,11 @@
     const phone=!!globalThis.WorkspaceDevice?.isPhone;
     const periodButtons=Array.from(document.querySelectorAll('[data-frequency]'));
     const viewUser=document.querySelector('main')?.dataset.user||'';
-    const viewKey=viewUser?`screening-view:v1:${encodeURIComponent(viewUser)}`:null;
+    const viewKey=viewUser?`screening-view:v2:${encodeURIComponent(viewUser)}`:null;
     let savedView=normalizeViewState(null);
     if(viewKey)try{
-      const raw=sessionStorage.getItem(viewKey);
+      const current=sessionStorage.getItem(viewKey);
+      const raw=current==null?sessionStorage.getItem(`screening-view:v1:${encodeURIComponent(viewUser)}`):current;
       if(raw&&raw.length<=10000)savedView=normalizeViewState(JSON.parse(raw));
     }catch(_){/* A private or unavailable browser store must not block filtering. */}
     const state = {data:null,serial:0,version:'',rows:[],selected:null,watch:[],quotes:new Map(),
@@ -272,8 +272,8 @@
     function persistView() {
       if(!viewKey)return;
       try {
-        const view=normalizeViewState({version:1,filters:state.filters,watch_group:state.watchGroup||state.preferredWatchGroup});
-        sessionStorage.setItem(viewKey,JSON.stringify({version:1,...view}));
+        const view=normalizeViewState({version:2,filters:state.filters,watch_group:state.watchGroup||state.preferredWatchGroup});
+        sessionStorage.setItem(viewKey,JSON.stringify({version:2,...view}));
       }catch(_){/* Filtering remains usable when browser storage is full or disabled. */}
     }
     try {
@@ -1169,12 +1169,8 @@
     }
     function signalFilterText() {
       const conditions=periodPointConditions(state.filters);
-      if(!conditions.length)return '未选择买卖点条件';
-      if(conditions.length===18)return '全部周期 · 全部买卖点';
-      return '满足任一：'+POINT_PERIODS.flatMap(frequency=>{
-        const types=conditions.filter(c=>c.frequency===frequency).map(c=>POINTS[c.point]);
-        return types.length?[`${frequency} ${types.length===6?'全部类型':types.join('、')}`]:[];
-      }).join('；');
+      const points=conditions.map(c=>POINTS[c.point]);
+      return `${state.filters.signal_period} · ${!points.length?'未选择买卖点':points.length===6?'全部买卖点':points.join('、')}`;
     }
     function renderActiveFilters() {
       const f=state.filters,parts=f.origin==='watchlist'?['当前关注组图表']:[signalFilterText(),
@@ -1192,19 +1188,19 @@
     function renderSignalSelection() {
       const conditions=periodPointConditions(state.filters);
       const watchOnly=state.filters.origin==='watchlist';
-      for(const input of document.querySelectorAll('[data-signal-period-all]')){
-        const count=conditions.filter(c=>c.frequency===input.dataset.signalPeriodAll).length;
-        input.checked=count===6;input.indeterminate=count>0&&count<6;input.disabled=watchOnly;
+      for(const input of document.querySelectorAll('[data-signal-period]')){
+        input.checked=input.dataset.signalPeriod===state.filters.signal_period;input.disabled=watchOnly;
       }
       for(const button of document.querySelectorAll('[data-signal-preset]')){
-        const preset=applySignalPreset(state.filters.signal_selection,button.dataset.signalPreset);
-        const active=JSON.stringify(conditions)===JSON.stringify(periodPointConditions({signal_selection:preset}));
+        const preset=applySignalPreset(state.filters,button.dataset.signalPreset);
+        const active=JSON.stringify(conditions)===JSON.stringify(periodPointConditions(preset));
         button.setAttribute('aria-pressed',String(active));
         button.disabled=watchOnly||(button.dataset.signalPreset==='none'&&!conditions.length);
       }
-      for(const input of document.querySelectorAll('[data-signal-frequency][data-signal-point]')) {
-        input.checked=conditions.some(c=>c.frequency===input.dataset.signalFrequency&&c.point===input.dataset.signalPoint);
+      for(const input of document.querySelectorAll('[data-signal-point]')) {
+        input.checked=state.filters.signal_points.includes(input.dataset.signalPoint);
         input.disabled=watchOnly;
+        input.setAttribute('aria-label',`${state.filters.signal_period} ${POINTS[input.dataset.signalPoint]}`);
       }
       $('reset').disabled=!hasFilterChanges(state.filters);
       $('include-previous').disabled=watchOnly;
@@ -1229,23 +1225,24 @@
       $('signal-coverage-message').textContent=coverage;
       $('signal-coverage-message').hidden=!coverage;
     }
-    function applySignalSelection(selection) {
-      if(JSON.stringify(periodPointConditions({signal_selection:selection}))===JSON.stringify(periodPointConditions(state.filters))) {
+    function applySignalFilter(filters) {
+      const normalized=normalizeSignalFilter(filters);
+      if(JSON.stringify(normalized)===JSON.stringify(normalizeSignalFilter(state.filters))) {
         renderSignalSelection();return;
       }
-      state.filters.signal_selection=selection;state.queuePage=1;renderQueue({userAction:true});
+      Object.assign(state.filters,normalized);state.queuePage=1;renderQueue({userAction:true});
     }
-    for(const input of document.querySelectorAll('[data-signal-frequency][data-signal-point]'))input.addEventListener('change',()=>{
-      const frequency=input.dataset.signalFrequency,point=input.dataset.signalPoint;
-      const selected=new Set(state.filters.signal_selection[frequency]);
+    for(const input of document.querySelectorAll('[data-signal-point]'))input.addEventListener('change',()=>{
+      const point=input.dataset.signalPoint;
+      const selected=new Set(state.filters.signal_points);
       if(input.checked)selected.add(point);else selected.delete(point);
-      applySignalSelection({...state.filters.signal_selection,[frequency]:Object.keys(POINTS).filter(p=>selected.has(p))});
+      applySignalFilter({...state.filters,signal_points:Object.keys(POINTS).filter(p=>selected.has(p))});
     });
-    for(const input of document.querySelectorAll('[data-signal-period-all]'))input.addEventListener('change',()=>{
-      applySignalSelection(setSignalPeriod(state.filters.signal_selection,input.dataset.signalPeriodAll,input.checked));
+    for(const input of document.querySelectorAll('[data-signal-period]'))input.addEventListener('change',()=>{
+      if(input.checked)applySignalFilter(setSignalPeriod(state.filters,input.dataset.signalPeriod));
     });
     for(const button of document.querySelectorAll('[data-signal-preset]'))button.addEventListener('click',()=>{
-      applySignalSelection(applySignalPreset(state.filters.signal_selection,button.dataset.signalPreset));
+      applySignalFilter(applySignalPreset(state.filters,button.dataset.signalPreset));
     });
     $('include-previous').addEventListener('change',()=>{
       state.filters.include_previous=$('include-previous').checked;state.queuePage=1;renderQueue({userAction:true});
@@ -1385,5 +1382,5 @@
     const quotes=()=>{void refreshQuotes();setTimeout(quotes,15000);};setTimeout(quotes,15000);
     document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshQuotes();});
   }
-  return {boot,filterRows,periodPointConditions,applySignalPreset,setSignalPeriod,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows};
+  return {boot,filterRows,periodPointConditions,normalizeSignalFilter,applySignalPreset,setSignalPeriod,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows};
 });

@@ -1,226 +1,152 @@
 'use strict';
-// Period selectors are row-level (frequency, point) alternatives, never symbol expansion.
+// Only the selected physical period participates; chosen types are alternatives within it.
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {filterRows,pageRows,periodPointConditions}=require('../screening_workbench.js');
+const SOURCE='current-run',PERIODS=['1m','5m','30m'],POINTS=['1buy','2buy','3buy','1sell','2sell','3sell'];
+const defaults={market:'all',origin:'screening',sector:'',review:'all',stage:'all',risk:'all',point_status:'confirmed',
+  lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent'};
+const pick=(signal_period='5m',signal_points=POINTS)=>({signal_period,signal_points});
+const row=(id,frequency,pointType,extra={})=>({id,market:'a',code:'SH.600088',name:'fixture',frequency,origin:'screening',stage:'confirmed',
+  point:{point_id:id,point_type:pointType,status:'confirmed'},evidence_available:true,...extra});
+const ids=(rows,filters={},source=SOURCE,reviewed={},names={})=>filterRows(rows,{...defaults,...filters},reviewed,names,source).map(r=>r.id);
+const grid=()=>PERIODS.flatMap(f=>POINTS.map(p=>row(f+':'+p,f,p)));
 
-const SOURCE='current-run';
-const POINTS=['1buy','2buy','3buy','1sell','2sell','3sell'];
-const PERIODS=['1m','5m','30m'];
-const allSelection=()=>Object.fromEntries(PERIODS.map(f=>[f,[...POINTS]]));
-const defaults={market:'all',origin:'screening',sector:'',review:'all',stage:'all',
-  risk:'all',point_status:'confirmed',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent'};
-function row(id,frequency,pointType,extra={}) {
-  return {id,market:'a',code:'SH.600088',name:'fixture',frequency,origin:'screening',stage:'confirmed',
-    point:{point_id:id,point_type:pointType,status:'confirmed'},evidence_available:true,...extra};
-}
-const ids=(rows,filters={},source=SOURCE,reviewed={},sectorNames={})=>
-  filterRows(rows,{...defaults,...filters},reviewed,sectorNames,source).map(r=>r.id);
-
-
-test('a selected period returns its matching rows without expanding the whole symbol',()=>{
-  const rows=[row('one','1m','1buy'),row('five','5m','2buy'),row('thirty','30m','3sell')];
-  assert.deepEqual(ids(rows,{signal_selection:{'30m':['3sell']}}),['thirty']);
-  assert.deepEqual(ids(rows,{signal_selection:{'30m':['3buy']}}),[]);
+test('missing new fields default to six types only on 5m',()=>{
+  assert.deepEqual(ids(grid()),POINTS.map(p=>'5m:'+p));
+  assert.deepEqual(periodPointConditions({}),POINTS.map(point=>({frequency:'5m',point})));
+  assert.deepEqual(ids(grid(),pick()),ids(grid()));
 });
 
-test('different period choices are row alternatives across different symbols',()=>{
-  const rows=[row('a','1m','1buy',{code:'SH.600001'}),row('b','5m','2buy',{code:'SH.600002'}),
-    row('c','30m','3buy',{code:'SH.600003'}),row('wrong','30m','1buy',{code:'SH.600004'})];
-  assert.deepEqual(ids(rows,{signal_selection:{'1m':['1buy'],'5m':['2buy'],'30m':['3buy']}}),['a','b','c']);
+test('each selected period and type matches only its own physical row',()=>{
+  for(const period of PERIODS)for(const point of POINTS)
+    assert.deepEqual(ids(grid(),pick(period,[point])),[period+':'+point]);
 });
 
-test('legacy controls cannot suppress or extend canonical row alternatives',()=>{
-  const rows=[row('one','1m','1buy'),row('five','5m','2buy'),row('thirty','30m','3sell')];
-  const signal_selection={'1m':['1buy'],'30m':['3sell']};
-  for(const period_match of ['any','all'])
-    assert.deepEqual(ids(rows,{signal_selection,point:'2buy',frequency:'5m',period_points:{'5m':'2buy'},period_match}),['one','thirty']);
-  assert.deepEqual(ids(rows,{point:'1buy',frequency:'1m',period_points:{'1m':'1buy'}}),['one','five','thirty']);
+test('several types use OR inside one period without adding sibling periods or symbol rows',()=>{
+  const rows=[row('one','1m','1buy'),row('five-buy','5m','1buy'),row('five-sell','5m','3sell'),
+    row('five-other','5m','2buy'),row('thirty','30m','3sell')];
+  assert.deepEqual(ids(rows,pick('5m',['1buy','3sell'])),['five-buy','five-sell']);
+  assert.deepEqual(ids(rows,pick('30m',['1buy','3sell'])),['thirty']);
 });
 
-test('stale quick point and frequency values cannot intersect active period choices',()=>{
-  const rows=[row('one','1m','1buy'),row('thirty','30m','3sell')];
-  assert.deepEqual(ids(rows,{point:'1buy',frequency:'1m',signal_selection:{'30m':['3sell']}}),['thirty']);
-  assert.deepEqual(ids(rows,{point:'3buy',frequency:'5m',signal_selection:{'1m':['1buy'],'30m':['3sell']}}),['one','thirty']);
+test('empty types remain empty rather than defaulting to all or taking legacy conditions',()=>{
+  for(const period of PERIODS){
+    assert.deepEqual(ids(grid(),pick(period,[])),[]);
+    assert.deepEqual(periodPointConditions(pick(period,[])),[]);
+  }
+  assert.deepEqual(ids(grid(),{...pick('5m',[]),signal_selection:{'1m':['1buy']},point:'3buy',frequency:'30m',period_points:{'30m':'3buy'}}),[]);
 });
 
-test('every one of six point types matches only its selected physical period and type',()=>{
-  const rows=PERIODS.flatMap(f=>POINTS.map(p=>row(f+':'+p,f,p)));
-  for(const frequency of PERIODS)for(const point of POINTS)
-    assert.deepEqual(ids(rows,{signal_selection:{[frequency]:[point]}}),[frequency+':'+point]);
+test('all legacy selector fields are ignored by the new canonical filter',()=>{
+  const legacy={signal_selection:{'1m':['1buy']},point:'1buy',frequency:'1m',period_points:{'30m':'3sell'},period_match:'all'};
+  assert.deepEqual(ids(grid(),legacy),POINTS.map(p=>'5m:'+p));
+  assert.deepEqual(ids(grid(),{...legacy,...pick('30m',['3buy','3sell'])}),['30m:3buy','30m:3sell']);
 });
 
-test('buy and sell choices are explicit cells within each physical period',()=>{
-  const rows=PERIODS.flatMap(f=>POINTS.map(p=>row(f+':'+p,f,p)));
-  for(const frequency of PERIODS)
-    assert.deepEqual(ids(rows,{signal_selection:{[frequency]:['3buy','3sell']}}),[frequency+':3buy',frequency+':3sell']);
+test('normalization exposes unique ordered real conditions and rejects virtual types',()=>{
+  const filters=pick('30m',['3sell','1buy','3sell','either','unknown']),before=JSON.stringify(filters);
+  assert.deepEqual(periodPointConditions(filters),[{frequency:'30m',point:'1buy'},{frequency:'30m',point:'3sell'}]);
+  assert.equal(JSON.stringify(filters),before);
+  assert.deepEqual(ids(grid(),pick('30m',['either','unknown'])),[]);
+  assert.deepEqual(ids([row('daily','d','3buy'),row('unknown','5m','unknown')]),[]);
 });
 
-test('empty and absent period rows do not become wildcard branches',()=>{
-  const rows=[row('one','1m','3buy'),row('five','5m','3buy'),row('thirty','30m','3buy')];
-  assert.deepEqual(ids(rows,{signal_selection:{'5m':['3buy']}}),['five']);
-  assert.deepEqual(ids(rows,{signal_selection:{'1m':[],'5m':['3buy'],'30m':[]}}),['five']);
+test('market restrictions do not borrow evidence from matching codes in another market',()=>{
+  const rows=[row('a','5m','3buy'),row('us','5m','3buy',{market:'us'}),row('other-period','30m','3buy')];
+  assert.deepEqual(ids(rows,pick('5m',['3buy'])),['a','us']);
+  assert.deepEqual(ids(rows,{...pick('5m',['3buy']),market:'a'}),['a']);
 });
 
-test('identical codes in another market neither prove nor suppress another row',()=>{
-  const rows=[row('a-wrong','1m','1buy'),row('us-match','30m','3sell',{market:'us'})];
-  assert.deepEqual(ids(rows,{signal_selection:{'30m':['3sell']}}),['us-match']);
-  assert.deepEqual(ids(rows,{market:'a',signal_selection:{'30m':['3sell']}}),[]);
-});
-
-test('separate valid signals in a selected period remain individual candidate rows',()=>{
+test('separate valid signals remain separate rows within the selected period',()=>{
   const rows=[row('a','5m','3buy'),row('b','5m','3buy'),row('c','5m','3sell')];
-  assert.deepEqual(ids(rows,{signal_selection:{'5m':['3buy']}}),['a','b']);
+  assert.deepEqual(ids(rows,pick('5m',['3buy'])),['a','b']);
 });
 
-test('labelled pending and limited history uses the same cells while current missing evidence is excluded',()=>{
-  const rows=[row('good','30m','3sell'),row('pending','30m','3sell',{refresh_state:'pending',result_source:'old'}),
+test('matching retained history remains context and current unavailable evidence is excluded',()=>{
+  const rows=[row('current','30m','3sell'),row('pending','30m','3sell',{refresh_state:'pending',result_source:'old'}),
     row('limited','30m','3sell',{refresh_state:'limited',result_source:'old',evidence_available:false,evidence_chart_available:false}),
-    row('missing','30m','3sell',{evidence_available:false})];
-  const before=JSON.stringify(rows),signal_selection={'30m':['3sell']};
-  assert.deepEqual(ids(rows,{signal_selection}),['good','pending','limited']);
-  assert.deepEqual(ids(rows,{signal_selection,include_previous:true}),['good','pending','limited']);
-  assert.deepEqual(ids(rows,{signal_selection,include_previous:false}),['good']);
+    row('unavailable','30m','3sell',{evidence_available:false}),row('different-period','5m','3sell',{refresh_state:'pending',result_source:'old'})];
+  const before=JSON.stringify(rows),selection=pick('30m',['3sell']);
+  assert.deepEqual(ids(rows,selection),['current','pending','limited']);
+  assert.deepEqual(ids(rows,{...selection,include_previous:true}),['current','pending','limited']);
+  assert.deepEqual(ids(rows,{...selection,include_previous:false}),['current']);
   assert.equal(JSON.stringify(rows),before);
 });
 
-test('invalidated closed and left rows never qualify even through history or all status',()=>{
-  for(const stage of ['invalidated','closed','left']) {
-    const current=row('current','30m','3sell',{stage});
-    const previous={...current,id:'old',refresh_state:'pending',result_source:'old'};
-    const invalidPoint=row('point','30m','3sell');invalidPoint.point.status=stage;
-    assert.deepEqual(ids([current,previous,invalidPoint],{point_status:'all',signal_selection:allSelection()}),[],stage);
+test('all types and a matching type subset have identical lifecycle eligibility',()=>{
+  const rows=[row('good','5m','3buy'),row('pending','5m','3buy',{refresh_state:'pending',result_source:'old'}),
+    row('limited','5m','3buy',{refresh_state:'limited',result_source:'old'}),row('bad','5m','3buy',{evidence_available:false}),
+    row('wrong-source','5m','3buy',{result_source:'old'}),row('closed','5m','3buy',{stage:'closed'})];
+  for(const include_previous of [true,false])for(const signal_points of [POINTS,['3buy']])
+    assert.deepEqual(ids(rows,{...pick('5m',signal_points),include_previous}),include_previous?['good','pending','limited']:['good']);
+});
+
+test('current sources are checked and compact absent evidence fields remain compatible',()=>{
+  const candidate=row('explicit','30m','3sell',{result_source:SOURCE});
+  const filters=pick('30m',['3sell']);
+  assert.deepEqual(ids([candidate],filters),['explicit']);
+  assert.deepEqual(ids([candidate],filters,'other'),[]);assert.deepEqual(ids([candidate],filters,null),[]);
+  const compact=row('compact','30m','3sell');delete compact.point.status;delete compact.evidence_available;
+  assert.deepEqual(ids([compact],filters,null),['compact']);
+});
+
+test('invalidated closed and left records cannot return through history or all-status selection',()=>{
+  for(const status of ['invalidated','closed','left']){
+    const stage=row('stage','30m','3sell',{stage:status}),point=row('point','30m','3sell');point.point.status=status;
+    const previous={...stage,id:'previous',refresh_state:'pending',result_source:'old'};
+    assert.deepEqual(ids([stage,point,previous],{...pick('30m'),point_status:'all'}),[]);
   }
 });
 
-test('nonconfirmed point status cannot match even when its containing row says confirmed',()=>{
-  for(const status of ['invalidated','closed','approaching','formed','observed','unknown']) {
-    const candidate=row(status,'30m','3sell');candidate.point.status=status;
-    assert.deepEqual(ids([candidate],{signal_selection:{'30m':['3sell']}}),[],status);
+test('confirmed forming and entry-pending meanings stay independent of period and type controls',()=>{
+  const confirmed=row('confirmed','5m','3buy'),forming=row('forming','5m','3buy',{stage:'approaching'});forming.point.status='approaching';
+  const entry=row('entry','5m','3buy',{stage:'entry_pending',nested_confirmation:{state:'waiting',frequency:'1m'}});
+  for(const signal_points of [POINTS,['3buy']]){
+    const selection=pick('5m',signal_points);
+    assert.deepEqual(ids([confirmed,forming,entry],selection),['confirmed','entry']);
+    assert.deepEqual(ids([confirmed,forming,entry],{...selection,point_status:'forming'}),['forming']);
+    assert.deepEqual(ids([confirmed,forming,entry],{...selection,point_status:'all'}),['confirmed','forming','entry']);
   }
 });
 
-test('formal confirmed entry-pending point keeps its existing meaning',()=>{
-  const candidate=row('entry','30m','3buy',{stage:'entry_pending',nested_confirmation:{state:'waiting',frequency:'1m'}});
-  assert.deepEqual(ids([candidate],{signal_selection:{'30m':['3buy']}}),['entry']);
-  assert.deepEqual(ids([candidate],{signal_selection:{'30m':['3buy']},point_status:'forming'}),[]);
-  assert.equal(candidate.stage,'entry_pending');
-  assert.equal(candidate.nested_confirmation.state,'waiting');
+test('watchlist context follows origin independently of selected period or empty types',()=>{
+  const watch={id:'watch',market:'us',code:'AAPL',name:'Apple',origin:'watchlist',stage:'monitoring',frequency:'30m',point:{}};
+  const proof=row('proof','5m','3buy');
+  assert.deepEqual(ids([watch,proof],{...pick('1m',[]),origin:'all'}),['watch']);
+  assert.deepEqual(ids([watch,proof],{...pick('5m',['3buy']),origin:'all'}),['watch','proof']);
+  assert.deepEqual(ids([watch,proof],{...pick('5m',['3buy']),origin:'watchlist'}),['watch']);
+  assert.deepEqual(ids([watch],{...pick('1m',[]),origin:'all',market:'a'}),[]);
+  assert.deepEqual(ids([watch],{...pick('1m',[]),origin:'all',query:'apple'}),['watch']);
+  assert.deepEqual(watch.point,{});
 });
 
-test('compatible compact records use the existing confirmed stage fallback',()=>{
-  const candidate=row('compact','30m','3sell');delete candidate.point.status;delete candidate.evidence_available;
-  assert.deepEqual(ids([candidate],{signal_selection:{'30m':['3sell']}}),['compact']);
-});
-
-test('explicit result source must match and cannot be assumed without the current source',()=>{
-  const candidate=row('current','30m','3sell',{result_source:SOURCE});
-  const filters={signal_selection:{'30m':['3sell']}};
-  assert.deepEqual(ids([candidate],filters,SOURCE),['current']);
-  assert.deepEqual(ids([candidate],filters,'other-run'),[]);
-  assert.deepEqual(ids([candidate],filters,null),[]);
-  assert.deepEqual(ids([row('implicit','30m','3sell')],filters,null),['implicit']);
-});
-
-test('watchlist context is independent of signal cells and controlled by origin',()=>{
-  const watch={id:'watch',market:'a',code:'SH.600088',name:'watched',frequency:'30m',origin:'watchlist',stage:'monitoring',point:{}};
-  const proof=row('proof','30m','3sell');
-  for(const signal_selection of [{},{'1m':['1buy']},{'30m':['3sell']}]) {
-    assert.deepEqual(ids([watch,proof],{origin:'watchlist',signal_selection}),['watch']);
-    assert.deepEqual(ids([watch,proof],{origin:'all',signal_selection}),signal_selection['30m']?['watch','proof']:['watch']);
-  }
-  assert.deepEqual(ids([watch,proof],{origin:'screening',signal_selection:{}}),[]);
-  assert.deepEqual(ids([watch],{origin:'all',signal_selection:{},market:'us'}),[]);
-  assert.deepEqual(ids([watch],{origin:'all',signal_selection:{},query:'watched'}),['watch']);
-  assert.deepEqual(ids([watch],{origin:'all',signal_selection:{},query:'missing'}),[]);
-  assert.deepEqual(watch.point,{});assert.equal(watch.origin,'watchlist');
-});
-
-test('nested confirmation and higher context do not manufacture independent period matches',()=>{
+test('nested confirmation and higher context cannot substitute for the selected physical period',()=>{
   const main=row('five','5m','3buy',{nested_confirmation:{frequency:'1m',state:'confirmed',point:{point_type:'3buy',status:'confirmed'}},
     higher_context:{frequency:'30m',category:'up_segment',point_type:'3sell'}});
-  assert.deepEqual(ids([main],{signal_selection:{'1m':['3buy'],'30m':['3sell']}}),[]);
+  assert.deepEqual(ids([main],pick('1m',['3buy'])),[]);
+  assert.deepEqual(ids([main],pick('30m',['3sell'])),[]);
 });
 
-test('independent matching rows do not require equal completed bar cutoffs',()=>{
-  const rows=[row('one','1m','1buy',{source_closed_at:180}),row('thirty','30m','3buy',{source_closed_at:60})];
-  assert.deepEqual(ids(rows,{signal_selection:{'1m':['1buy'],'30m':['3buy']}}),['one','thirty']);
+test('single-period matching precedes pagination across the whole candidate set',()=>{
+  const rows=Array.from({length:121},(_,i)=>row('row'+i,i===120?'30m':'1m',i===120?'3sell':'1buy'));
+  const matches=filterRows(rows,{...defaults,...pick('30m',['3sell'])},{},{},SOURCE);
+  assert.deepEqual(pageRows(matches,1).rows.map(r=>r.id),['row120']);assert.equal(matches.length,1);
 });
 
-test('row matching occurs before pagination and a last-page match reaches the first result page',()=>{
-  const rows=Array.from({length:121},(_,i)=>row('row'+i,i===120?'30m':'1m',i===120?'3sell':'1buy',{code:'SH.'+(600000+i)}));
-  const matched=filterRows(rows,{...defaults,signal_selection:{'30m':['3sell']}},{},{},SOURCE);
-  assert.deepEqual(pageRows(matched,1).rows.map(r=>r.id),['row120']);
-  assert.equal(pageRows(matched,1).total,1);
-});
-
-test('omitted selection means eighteen cells but explicit empty selection means no signals',()=>{
-  const rows=PERIODS.flatMap(f=>POINTS.map(p=>row(f+':'+p,f,p)));
-  assert.deepEqual(ids(rows),rows.map(r=>r.id));
-  assert.deepEqual(ids(rows,{signal_selection:allSelection()}),rows.map(r=>r.id));
-  assert.deepEqual(periodPointConditions({}),PERIODS.flatMap(frequency=>POINTS.map(point=>({frequency,point}))));
-  for(const signal_selection of [{},[],{'1m':[],'5m':[],'30m':[]}]) {
-    assert.deepEqual(ids(rows,{signal_selection}),[]);
-    assert.deepEqual(ids(rows,{signal_selection,point:'3buy',frequency:'5m',period_points:{'5m':'3buy'}}),[]);
-    assert.deepEqual(periodPointConditions({signal_selection}),[]);
-  }
-});
-
-test('advanced market sector review query and age filters still intersect the matching rows',()=>{
+test('advanced refinements remain AND constraints on the selected period and types',()=>{
   const candidate=row('match','30m','3sell',{sectors:['media'],confirmation_age_sessions:3,gain_pct:4});
-  const filters={signal_selection:{'30m':['3sell']}};
-  assert.deepEqual(ids([candidate],filters),['match']);
-  assert.deepEqual(ids([candidate],{...filters,market:'us'}),[]);
-  assert.deepEqual(ids([candidate],{...filters,sector:'other'}),[]);
-  assert.deepEqual(ids([candidate],{...filters,query:'missing'}),[]);
-  assert.deepEqual(ids([candidate],{...filters,review:'reviewed'}),[]);
-  assert.deepEqual(ids([candidate],{...filters,review:'reviewed'},SOURCE,{match:{}}),['match']);
-  assert.deepEqual(ids([candidate],{...filters,age:'1'}),[]);
-  assert.deepEqual(ids([candidate],{...filters,gain:'3'}),[]);
-  assert.deepEqual(ids([candidate],{...filters,query:'media'},SOURCE,{}, {media:'media sector'}),['match']);
+  const selection=pick('30m',['3sell']);assert.deepEqual(ids([candidate],selection),['match']);
+  for(const extra of [{market:'us'},{sector:'other'},{query:'missing'},{review:'reviewed'},{age:'1'},{gain:'3'}])
+    assert.deepEqual(ids([candidate],{...selection,...extra}),[]);
+  assert.deepEqual(ids([candidate],{...selection,review:'reviewed'},SOURCE,{match:{}}),['match']);
+  assert.deepEqual(ids([candidate],{...selection,query:'media'},SOURCE,{}, {media:'media sector'}),['match']);
 });
 
-test('progressive updates retain limited context and remove genuinely withdrawn rows without mutation',()=>{
-  const rows=[row('one','1m','1buy'),row('five','5m','2buy'),row('thirty','30m','3sell')];
-  const filters={signal_selection:{'1m':['1buy'],'5m':['2buy'],'30m':['3sell']}};
-  const before=JSON.stringify(rows),limited=rows.map(r=>r.id==='five'?{...r,refresh_state:'limited',result_source:'old'}:r);
-  assert.deepEqual(ids(rows,filters),['one','five','thirty']);
-  assert.deepEqual(ids(limited,filters),['one','five','thirty']);
-  assert.deepEqual(ids(limited,{...filters,include_previous:false}),['one','thirty']);
-  assert.deepEqual(ids(rows.filter(r=>r.id!=='one'),filters),['five','thirty']);
-  assert.equal(JSON.stringify(rows),before);
-});
-
-test('normalization flattens unique real cells and rejects unknown types periods and non-array values',()=>{
-  const signal_selection={'1m':['1buy','1buy','unknown','either'],'5m':['3sell'],'30m':'3buy','d':['3sell']};
-  const before=JSON.stringify(signal_selection);
-  assert.deepEqual(periodPointConditions({signal_selection}),[{frequency:'1m',point:'1buy'},{frequency:'5m',point:'3sell'}]);
-  assert.equal(JSON.stringify(signal_selection),before);
-  assert.deepEqual(ids([row('daily','d','3buy'),row('unknown','5m','either')]),[]);
-  assert.deepEqual(ids([row('third','5m','3buy')],{signal_selection:{'5m':['either']}}),[]);
-});
-
-
-test('all selected and a matching subset apply identical evidence and history eligibility',()=>{
-  const rows=[row('good','5m','3buy'),row('pending','5m','3buy',{refresh_state:'pending',result_source:'old'}),
-    row('limited','5m','3buy',{refresh_state:'limited',result_source:'old'}),
-    row('unavailable','5m','3buy',{evidence_available:false}),row('wrong-source','5m','3buy',{result_source:'old'}),
-    row('closed','5m','3buy',{stage:'closed'})];
-  for(const include_previous of [true,false]) {
-    const expected=include_previous?['good','pending','limited']:['good'];
-    assert.deepEqual(ids(rows,{include_previous}),expected);
-    assert.deepEqual(ids(rows,{include_previous,signal_selection:allSelection()}),expected);
-    assert.deepEqual(ids(rows,{include_previous,signal_selection:{'5m':['3buy']}}),expected);
-  }
-});
-
-test('confirmed forming and all advanced statuses apply consistently to full and partial cell selection',()=>{
-  const confirmed=row('confirmed','5m','3buy');
-  const forming=row('forming','5m','3buy',{stage:'approaching'});forming.point.status='approaching';
-  for(const signal_selection of [allSelection(),{'5m':['3buy']}]) {
-    assert.deepEqual(ids([confirmed,forming],{signal_selection,point_status:'confirmed'}),['confirmed']);
-    assert.deepEqual(ids([confirmed,forming],{signal_selection,point_status:'forming'}),['forming']);
-    assert.deepEqual(ids([confirmed,forming],{signal_selection,point_status:'all'}),['confirmed','forming']);
-    assert.deepEqual(ids([confirmed,forming],{signal_selection,point_status:'all',stage:'forming'}),['forming']);
-  }
+test('progressive updates retain only matching historical rows until real withdrawal',()=>{
+  const rows=[row('buy','5m','3buy'),row('sell','5m','3sell'),row('other','30m','3buy')],before=JSON.stringify(rows);
+  const selection=pick('5m',['3buy','3sell']),limited=rows.map(r=>r.id==='buy'?{...r,refresh_state:'limited',result_source:'old'}:r);
+  assert.deepEqual(ids(limited,selection),['buy','sell']);
+  assert.deepEqual(ids(limited,{...selection,include_previous:false}),['sell']);
+  assert.deepEqual(ids(rows.filter(r=>r.id!=='buy'),selection),['sell']);assert.equal(JSON.stringify(rows),before);
 });

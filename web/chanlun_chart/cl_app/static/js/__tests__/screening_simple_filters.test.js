@@ -1,103 +1,146 @@
 'use strict';
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {applySignalPreset,setSignalPeriod,filterRows,normalizeViewState,advancedFilterCount}=require('../screening_workbench.js');
+const {normalizeSignalFilter,setSignalPeriod,applySignalPreset,normalizeViewState,filterRows}=require('../screening_workbench.js');
 const PERIODS=['1m','5m','30m'],POINTS=['1buy','2buy','3buy','1sell','2sell','3sell'];
-const BUY=POINTS.filter(point=>point.endsWith('buy')),SELL=POINTS.filter(point=>point.endsWith('sell'));
-const matrix=(periods=PERIODS,points=POINTS)=>Object.fromEntries(PERIODS.map(period=>[period,periods.includes(period)?[...points]:[]]));
+const BUY=POINTS.filter(p=>p.endsWith('buy')),SELL=POINTS.filter(p=>p.endsWith('sell'));
+const selected=(period='5m',points=POINTS)=>({signal_period:period,signal_points:[...points]});
 const frozen=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(frozen);Object.freeze(value);}return value;};
-const filters={market:'all',origin:'screening',point_status:'confirmed',stage:'all',review:'all',sector:'',sort:'recent'};
-const candidate=(id,frequency,point_type,extra={})=>({id,market:'a',code:'SH.600088',frequency,origin:'screening',stage:'confirmed',point:{point_type,status:'confirmed'},evidence_available:true,...extra});
-const matched=(rows,selection,extra={})=>filterRows(rows,{...filters,signal_selection:selection,...extra},{},{},'run').map(row=>row.id);
+const legacy=matrix=>({version:1,filters:{signal_selection:matrix}});
 
-test('four global presets replace all periods regardless of previous shape',()=>{
-  for(const selection of [undefined,{},matrix(),matrix([],[]),{'1m':['1buy'],'5m':[],'30m':['3sell']}])
-    for(const [preset,points] of [['all',POINTS],['buy',BUY],['sell',SELL],['none',[]]])
-      assert.deepEqual(applySignalPreset(frozen(selection),preset),matrix(PERIODS,points),preset);
-});
-test('each preset retains row OR semantics across all physical periods',()=>{
-  const rows=PERIODS.flatMap(period=>POINTS.map(point=>candidate(period+':'+point,period,point)));
-  for(const [preset,points] of [['all',POINTS],['buy',BUY],['sell',SELL],['none',[]]])
-    assert.deepEqual(matched(rows,applySignalPreset({'1m':['1buy']},preset)),rows.filter(row=>points.includes(row.point.point_type)).map(row=>row.id));
-});
-test('period checking changes only its own row for every possible six-cell subset',()=>{
-  for(const period of PERIODS)for(let mask=0;mask<64;mask++){
-    const selection=frozen({'1m':['1buy'],'5m':['2buy','3sell'],'30m':['1sell'],[period]:POINTS.filter((_point,index)=>mask&(1<<index))});
-    for(const checked of [true,false]){
-      const changed=setSignalPeriod(selection,period,checked);assert.deepEqual(changed[period],checked?POINTS:[]);
-      for(const other of PERIODS.filter(value=>value!==period))assert.deepEqual(changed[other],selection[other]);
-    }
+test('normalization defaults to 5m six types and preserves explicit empty types',()=>{
+  for(const input of [undefined,null,{}])assert.deepEqual(normalizeSignalFilter(input),selected());
+  for(const period of PERIODS){
+    assert.deepEqual(normalizeSignalFilter({signal_period:period}),selected(period));
+    assert.deepEqual(normalizeSignalFilter(selected(period,[])),selected(period,[]));
   }
 });
-test('partial choices remain exact after edits to sibling periods',()=>{
-  const selection=frozen({'1m':['1buy'],'5m':[],'30m':['3sell']}),checked=setSignalPeriod(selection,'5m',true);
-  assert.deepEqual(checked,{'1m':['1buy'],'5m':POINTS,'30m':['3sell']});
-  assert.deepEqual(setSignalPeriod(checked,'5m',false),selection);
-  assert.deepEqual(setSignalPeriod(checked,'1m',false),{'1m':[],'5m':POINTS,'30m':['3sell']});
+
+test('normalization orders and deduplicates real types without accepting old selector fields',()=>{
+  const input=frozen({signal_period:'30m',signal_points:['3sell','1buy','3sell','unknown','either'],
+    signal_selection:{'1m':['2buy']},point:'2buy',frequency:'1m',period_points:{'1m':'2buy'}});
+  assert.deepEqual(normalizeSignalFilter(input),selected('30m',['1buy','3sell']));
+  assert.deepEqual(normalizeSignalFilter({signal_selection:{'1m':['2buy']},point:'2buy',frequency:'1m'}),selected());
+  assert.deepEqual(normalizeSignalFilter({signal_period:'d',signal_points:['3buy']}),selected('5m',['3buy']));
+  assert.deepEqual(normalizeSignalFilter({signal_period:'1m',signal_points:['either','invalid']}),selected('1m',[]));
 });
-test('preset then row then cell edits keep one canonical state without preset residue',()=>{
-  const sell=applySignalPreset(undefined,'sell'),limited=setSignalPeriod(setSignalPeriod(sell,'1m',false),'30m',false);
-  const fine={...limited,'30m':['3buy']};assert.deepEqual(fine,{'1m':[],'5m':SELL,'30m':['3buy']});
-  assert.deepEqual(applySignalPreset(frozen(fine),'buy'),matrix(PERIODS,BUY));assert.deepEqual(fine,{'1m':[],'5m':SELL,'30m':['3buy']});
+
+test('non-array point values use all six types while an array with no valid type stays empty',()=>{
+  for(const signal_points of [null,undefined,'3buy',false,0,{}, {length:1,0:'3buy'}])
+    assert.deepEqual(normalizeSignalFilter({signal_period:'30m',signal_points}),selected('30m'));
+  assert.deepEqual(normalizeSignalFilter({signal_period:'30m',signal_points:['unknown']}),selected('30m',[]));
 });
-test('empty rows never become wildcard branches and explicit period checks have bounded scope',()=>{
-  const empty=frozen(matrix([],[]));assert.deepEqual(setSignalPeriod(empty,'5m',true),matrix(['5m']));
-  assert.deepEqual(setSignalPeriod(empty,'5m',false),empty);assert.deepEqual(applySignalPreset(empty,'none'),empty);
-  const rows=[candidate('one','1m','3buy'),candidate('five','5m','3buy'),candidate('thirty','30m','3sell')];
-  assert.deepEqual(matched(rows,empty),[]);assert.deepEqual(matched(rows,setSignalPeriod(empty,'5m',true)),['five']);
-});
-test('absent canonical input defaults to eighteen cells while explicit empty remains empty',()=>{
-  assert.deepEqual(applySignalPreset(undefined,'invalid'),matrix());
-  assert.deepEqual(setSignalPeriod(undefined,'5m',false),matrix(['1m','30m']));
-  for(const empty of [{},[],matrix([],[])]){
-    assert.deepEqual(applySignalPreset(empty,'invalid'),matrix([],[]));assert.deepEqual(setSignalPeriod(empty,'invalid',true),matrix([],[]));
+
+test('changing period preserves each exact type subset including empty',()=>{
+  for(const previous of PERIODS)for(const target of PERIODS)for(let mask=0;mask<64;mask++){
+    const points=POINTS.filter((_p,index)=>mask&(1<<index));
+    const input=frozen(selected(previous,points));
+    assert.deepEqual(setSignalPeriod(input,target),selected(target,points));
+    assert.deepEqual(input,selected(previous,points));
   }
 });
-test('unknown presets and periods normalize without changing valid saved membership',()=>{
-  const selection=frozen({'30m':['3sell','1buy','3sell'],'1m':['2buy'],'5m':'3buy',d:['1buy']});
-  const expected={'1m':['2buy'],'5m':[],'30m':['1buy','3sell']};
-  for(const value of ['custom','unknown','',null,undefined,'1buy','5m'])assert.deepEqual(applySignalPreset(selection,value),expected);
-  for(const period of ['all','unknown','',null,undefined,'d'])for(const checked of [true,false])assert.deepEqual(setSignalPeriod(selection,period,checked),expected);
+
+test('invalid period changes normalize without changing the valid selected period',()=>{
+  const input=frozen({signal_period:'30m',signal_points:['3sell','1buy','3sell']});
+  for(const value of ['all','custom','none','d','',null,undefined,1])
+    assert.deepEqual(setSignalPeriod(input,value),selected('30m',['1buy','3sell']));
+  assert.deepEqual(setSignalPeriod(undefined,'1m'),selected('1m'));
 });
-test('period updates accept only booleans without interpreting strings or numbers',()=>{
-  const selection=frozen({'1m':['1buy'],'5m':['3sell'],'30m':[]});
-  for(const checked of [undefined,null,'true','false','',0,1,[],{}])assert.deepEqual(setSignalPeriod(selection,'5m',checked),selection);
+
+test('four presets replace types only and never change the selected physical period',()=>{
+  for(const period of PERIODS)for(const points of [[],['1buy'],['1buy','3sell'],POINTS])
+    for(const [preset,expected] of [['all',POINTS],['buy',BUY],['sell',SELL],['none',[]]])
+      assert.deepEqual(applySignalPreset(frozen(selected(period,points)),preset),selected(period,expected));
+  assert.deepEqual(applySignalPreset(undefined,'buy'),selected('5m',BUY));
 });
-test('all helper outputs contain independent arrays and never share mutable rows with input',()=>{
-  const selection=matrix(['1m','30m'],BUY),before=JSON.stringify(selection);
-  for(const changed of [applySignalPreset(selection,'buy'),applySignalPreset(selection,'invalid'),setSignalPeriod(selection,'5m',true),setSignalPeriod(selection,'d',false)]){
-    assert.notEqual(changed['1m'],changed['5m']);assert.notEqual(changed['5m'],changed['30m']);
-    for(const period of PERIODS)assert.notEqual(changed[period],selection[period]);
-    const untouched=[...changed['30m']];changed['1m'].push('3sell');assert.deepEqual(changed['30m'],untouched);
-    changed['5m'].push('2sell');assert.equal(JSON.stringify(selection),before);
+
+test('unknown presets normalize without replacing the chosen period or types',()=>{
+  const input=frozen({signal_period:'1m',signal_points:['3sell','1buy','3sell']});
+  for(const value of ['custom','3buy','all-periods','',null,undefined])
+    assert.deepEqual(applySignalPreset(input,value),selected('1m',['1buy','3sell']));
+  assert.deepEqual(applySignalPreset(selected('30m',[]),'unknown'),selected('30m',[]));
+});
+
+test('helpers return independent arrays without mutating frozen inputs',()=>{
+  const input=frozen(selected('1m',['1buy','3sell']));
+  const outputs=[normalizeSignalFilter(input),setSignalPeriod(input,'1m'),setSignalPeriod(input,'30m'),
+    applySignalPreset(input,'unknown'),applySignalPreset(input,'buy')];
+  for(const output of outputs){assert.notEqual(output.signal_points,input.signal_points);output.signal_points.push('2sell');}
+  assert.deepEqual(input,selected('1m',['1buy','3sell']));
+  const one=applySignalPreset(input,'all'),two=applySignalPreset(input,'all');
+  one.signal_points.pop();assert.deepEqual(two,selected('1m'));
+});
+
+test('period changes and type presets keep one canonical selection through empty and fine adjustments',()=>{
+  const initial=frozen(selected('1m',['1buy','3sell']));
+  const period=setSignalPeriod(initial,'30m');assert.deepEqual(period,selected('30m',['1buy','3sell']));
+  const buy=applySignalPreset(period,'buy');assert.deepEqual(buy,selected('30m',BUY));
+  const fine={...buy,signal_points:buy.signal_points.filter(p=>p!=='2buy')};
+  assert.deepEqual(setSignalPeriod(fine,'5m'),selected('5m',['1buy','3buy']));
+  assert.deepEqual(setSignalPeriod(applySignalPreset(fine,'none'),'5m'),selected('5m',[]));
+  assert.deepEqual(applySignalPreset(selected('5m',[]),'sell'),selected('5m',SELL));
+});
+
+test('new version two views restore only new signal fields alongside independent refinements',()=>{
+  const input=frozen({version:2,filters:{signal_period:'30m',signal_points:['3sell','1buy'],
+    signal_selection:{'1m':['2buy']},query:'keep',include_previous:false,review:'reviewed'},watch_group:'saved'});
+  const result=normalizeViewState(input);
+  assert.deepEqual(normalizeSignalFilter(result.filters),selected('30m',['1buy','3sell']));
+  assert.equal(result.filters.query,'keep');assert.equal(result.filters.include_previous,false);
+  assert.equal(result.filters.review,'reviewed');assert.equal(result.watch_group,'saved');
+  assert.equal(Object.hasOwn(result.filters,'signal_selection'),false);
+  assert.deepEqual(normalizeSignalFilter(normalizeViewState({version:2,filters:{signal_selection:{'1m':['2buy']}}}).filters),selected());
+  assert.deepEqual(normalizeSignalFilter(normalizeViewState({version:2,filters:selected('1m',[])}).filters),selected('1m',[]));
+});
+
+test('legacy version one single nonempty row keeps that exact period and types',()=>{
+  for(const period of PERIODS){
+    const matrix=Object.fromEntries(PERIODS.map(p=>[p,p===period?['3sell','1buy','1buy']:[]]));
+    assert.deepEqual(normalizeSignalFilter(normalizeViewState(frozen(legacy(matrix))).filters),selected(period,['1buy','3sell']));
   }
 });
-test('repeating a preset or an identical period assignment is canonically idempotent',()=>{
-  for(const preset of ['all','buy','sell','none']){const once=applySignalPreset(undefined,preset);assert.deepEqual(applySignalPreset(once,preset),once);}
-  for(const period of PERIODS)for(const checked of [true,false]){
-    const once=setSignalPeriod({'1m':['1buy'],'30m':['3sell']},period,checked);assert.deepEqual(setSignalPeriod(once,period,checked),once);
-  }
+
+test('legacy multirow migration prefers 5m then 30m then 1m without taking a union',()=>{
+  const cases=[
+    [{'1m':['1buy'],'5m':['2sell'],'30m':['3buy']},selected('5m',['2sell'])],
+    [{'1m':['1buy'],'30m':['3sell']},selected('30m',['3sell'])],
+    [{'5m':[],'1m':['1buy'],'30m':['3sell']},selected('30m',['3sell'])],
+    [{'1m':['1buy'],'5m':['2buy']},selected('5m',['2buy'])],
+    [{'1m':['1sell']},selected('1m',['1sell'])],
+  ];
+  for(const [matrix,expected] of cases)assert.deepEqual(normalizeSignalFilter(normalizeViewState(frozen(legacy(matrix))).filters),expected);
 });
-test('matrix controls retain current evidence history and watch eligibility without widening identities',()=>{
-  const rows=[candidate('one','1m','3buy'),candidate('five','5m','3buy'),candidate('sell','5m','3sell'),
-    candidate('pending','5m','3buy',{refresh_state:'pending',result_source:'older'}),candidate('limited','5m','3buy',{refresh_state:'limited',result_source:'older',evidence_available:false}),
-    candidate('unverified','5m','3buy',{evidence_available:false}),candidate('wrong-source','5m','3buy',{result_source:'older'}),
-    {id:'watch',origin:'watchlist',market:'a',code:'SH.600088',frequency:'30m',stage:'monitoring',point:{}}];
-  const selection=setSignalPeriod(setSignalPeriod(applySignalPreset(undefined,'buy'),'1m',false),'30m',false);
-  assert.deepEqual(matched(rows,selection),['five','pending','limited']);assert.deepEqual(matched(rows,selection,{include_previous:false}),['five']);
-  assert.deepEqual(matched(rows,selection,{origin:'all'}),['five','pending','limited','watch']);
-  assert.deepEqual(matched(rows,applySignalPreset(selection,'buy')),['one','five','pending','limited']);
-  assert.deepEqual(matched(rows,applySignalPreset(selection,'none'),{origin:'all'}),['watch']);
+
+test('legacy migration chooses a row only after validating its actual point types',()=>{
+  assert.deepEqual(normalizeSignalFilter(normalizeViewState(legacy({
+    '1m':['1buy'],'5m':['either','unknown'],'30m':['3sell']})).filters),selected('30m',['3sell']));
+  assert.deepEqual(normalizeSignalFilter(normalizeViewState(legacy({
+    '1m':['1buy'],'5m':'3buy','30m':[]})).filters),selected('1m',['1buy']));
+  assert.deepEqual(normalizeSignalFilter(normalizeViewState(legacy({
+    '5m':['unknown'],d:['3buy']})).filters),selected('5m',[]));
 });
-test('version one views restore their exact saved matrix without migration',()=>{
-  const saved=frozen({version:1,filters:{signal_selection:{'1m':['1buy'],'30m':['3sell']},query:'keep',include_previous:false},watch_group:'观察'});
-  const normalized=normalizeViewState(saved);assert.deepEqual(normalized.filters.signal_selection,{'1m':['1buy'],'5m':[],'30m':['3sell']});
-  assert.equal(normalized.filters.query,'keep');assert.equal(normalized.filters.include_previous,false);assert.equal(normalized.watch_group,'观察');
+
+test('legacy explicit empty stays empty while absence of a matrix gets the new defaults',()=>{
+  for(const matrix of [{},{'1m':[],'5m':[],'30m':[]}])
+    assert.deepEqual(normalizeSignalFilter(normalizeViewState(legacy(matrix)).filters),selected('5m',[]));
+  assert.deepEqual(normalizeSignalFilter(normalizeViewState({version:1,filters:{}}).filters),selected());
+  assert.deepEqual(normalizeSignalFilter(normalizeViewState(null).filters),selected());
+  assert.deepEqual(normalizeSignalFilter(normalizeViewState({version:999,filters:selected('1m',[])}).filters),selected());
 });
-test('advanced badge counts folded conditions and excludes exposed query and matrix',()=>{
-  const defaults=normalizeViewState(null).filters;assert.equal(advancedFilterCount(defaults),0);
-  assert.equal(advancedFilterCount({...defaults,query:'SH.600000',signal_selection:matrix([],[])}),0);
-  const advanced={market:'a',origin:'all',review:'pending',sector:'tech',center_order:'first',age:'3',gain:'3',sort:'distance',include_previous:false};
-  for(const [key,value] of Object.entries(advanced))assert.equal(advancedFilterCount({...defaults,[key]:value}),1,key);
-  assert.equal(advancedFilterCount({...defaults,...advanced,query:'visible'}),9);
+
+test('new helper results select one period and preserve current historical and watchlist eligibility',()=>{
+  const base={market:'a',code:'SH.600088',origin:'screening',stage:'confirmed',evidence_available:true};
+  const row=(id,frequency,point_type,extra={})=>({...base,id,frequency,point:{point_type,status:'confirmed'},...extra});
+  const rows=[row('one','1m','3buy'),row('five','5m','3buy'),row('sell','5m','3sell'),
+    row('pending','5m','3buy',{refresh_state:'pending',result_source:'old'}),
+    row('limited','5m','3buy',{refresh_state:'limited',result_source:'old',evidence_available:false}),
+    row('bad','5m','3buy',{evidence_available:false}),row('wrong-source','5m','3buy',{result_source:'old'}),
+    {id:'watch',market:'a',code:'SH.600088',origin:'watchlist',stage:'monitoring',frequency:'30m',point:{}}];
+  const filters={market:'all',origin:'screening',point_status:'confirmed',...applySignalPreset(selected('5m'),'buy')};
+  const ids=extra=>filterRows(rows,{...filters,...extra},{},{},'run').map(r=>r.id);
+  assert.deepEqual(ids(),['five','pending','limited']);
+  assert.deepEqual(ids({include_previous:false}),['five']);
+  assert.deepEqual(ids({origin:'all'}),['five','pending','limited','watch']);
+  assert.deepEqual(ids(setSignalPeriod(filters,'1m')),['one']);
+  assert.deepEqual(ids({...applySignalPreset(filters,'none'),origin:'all'}),['watch']);
 });

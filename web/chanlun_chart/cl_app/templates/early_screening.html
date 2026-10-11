@@ -56,54 +56,33 @@
     <section class="filters chart-filters" aria-label="候选筛选">
       <div class="chart-filter-body">
         <div class="signal-filter-header">
-          <div><h2 id="signal-filter-title">筛选结果</h2><p id="signal-selection-help" class="muted">勾选即生效，满足任一条件即可</p></div>
+          <div><h2 id="signal-filter-title">筛选结果</h2><p id="signal-selection-help" class="muted">选择一个周期，勾选需要的买卖点</p></div>
           <button id="reset" type="button">重置筛选</button>
         </div>
         <fieldset id="signal-selection" class="signal-selection" aria-labelledby="signal-filter-title" aria-describedby="signal-selection-help">
+          <div class="signal-period-controls" role="radiogroup" aria-label="筛选周期（单选）">
+            <span class="signal-control-label">周期：</span>
+            <label class="signal-period-option" for="signal-period-1m"><input id="signal-period-1m" type="radio" name="signal-period" data-signal-period="1m" value="1m" /><span>1m</span></label>
+            <label class="signal-period-option" for="signal-period-5m"><input id="signal-period-5m" type="radio" name="signal-period" data-signal-period="5m" value="5m" checked /><span>5m</span></label>
+            <label class="signal-period-option" for="signal-period-30m"><input id="signal-period-30m" type="radio" name="signal-period" data-signal-period="30m" value="30m" /><span>30m</span></label>
+          </div>
           <div class="signal-filter-tools">
             <input id="signal-search" type="search" placeholder="搜索名称、代码、市场或板块" aria-label="搜索候选">
-            <div class="signal-presets" role="group" aria-label="批量选择所有周期">
-              <span class="signal-presets-label">全周期：</span>
-              <button id="signal-preset-all" type="button" data-signal-preset="all" title="将所有周期替换为全部买卖点">全部</button>
-              <button id="signal-preset-buy" type="button" data-signal-preset="buy" title="将所有周期替换为全部买点">买点</button>
-              <button id="signal-preset-sell" type="button" data-signal-preset="sell" title="将所有周期替换为全部卖点">卖点</button>
-              <button id="signal-clear" type="button" data-signal-preset="none" title="清空所有周期的买卖点勾选">清空</button>
+            <div class="signal-presets" role="group" aria-label="批量选择当前周期的买卖点">
+              <span class="signal-presets-label">买卖点：</span>
+              <button id="signal-preset-all" type="button" data-signal-preset="all" title="将当前周期替换为全部买卖点">全部</button>
+              <button id="signal-preset-buy" type="button" data-signal-preset="buy" title="将当前周期替换为全部买点">买点</button>
+              <button id="signal-preset-sell" type="button" data-signal-preset="sell" title="将当前周期替换为全部卖点">卖点</button>
+              <button id="signal-clear" type="button" data-signal-preset="none" title="清空当前周期的买卖点勾选">清空</button>
             </div>
           </div>
-          <div class="signal-period-grid">
-            <div class="signal-period-card" role="group" aria-labelledby="signal-period-label-1m">
-              <label class="signal-period-heading" for="signal-all-1m" title="全选或清除 1m 这一行"><input id="signal-all-1m" type="checkbox" data-signal-period-all="1m" aria-label="全选或清除 1m 这一行" checked /><strong id="signal-period-label-1m">1m</strong></label>
-              <div class="signal-period-choices">
-                <label class="signal-choice" for="signal-1m-1buy"><input id="signal-1m-1buy" type="checkbox" data-signal-frequency="1m" data-signal-point="1buy" aria-label="1m 一买" checked /><span>一买</span></label>
-                <label class="signal-choice" for="signal-1m-2buy"><input id="signal-1m-2buy" type="checkbox" data-signal-frequency="1m" data-signal-point="2buy" aria-label="1m 二买" checked /><span>二买</span></label>
-                <label class="signal-choice" for="signal-1m-3buy"><input id="signal-1m-3buy" type="checkbox" data-signal-frequency="1m" data-signal-point="3buy" aria-label="1m 三买" checked /><span>三买</span></label>
-                <label class="signal-choice" for="signal-1m-1sell"><input id="signal-1m-1sell" type="checkbox" data-signal-frequency="1m" data-signal-point="1sell" aria-label="1m 一卖" checked /><span>一卖</span></label>
-                <label class="signal-choice" for="signal-1m-2sell"><input id="signal-1m-2sell" type="checkbox" data-signal-frequency="1m" data-signal-point="2sell" aria-label="1m 二卖" checked /><span>二卖</span></label>
-                <label class="signal-choice" for="signal-1m-3sell"><input id="signal-1m-3sell" type="checkbox" data-signal-frequency="1m" data-signal-point="3sell" aria-label="1m 三卖" checked /><span>三卖</span></label>
-              </div>
-            </div>
-            <div class="signal-period-card" role="group" aria-labelledby="signal-period-label-5m">
-              <label class="signal-period-heading" for="signal-all-5m" title="全选或清除 5m 这一行"><input id="signal-all-5m" type="checkbox" data-signal-period-all="5m" aria-label="全选或清除 5m 这一行" checked /><strong id="signal-period-label-5m">5m</strong></label>
-              <div class="signal-period-choices">
-                <label class="signal-choice" for="signal-5m-1buy"><input id="signal-5m-1buy" type="checkbox" data-signal-frequency="5m" data-signal-point="1buy" aria-label="5m 一买" checked /><span>一买</span></label>
-                <label class="signal-choice" for="signal-5m-2buy"><input id="signal-5m-2buy" type="checkbox" data-signal-frequency="5m" data-signal-point="2buy" aria-label="5m 二买" checked /><span>二买</span></label>
-                <label class="signal-choice" for="signal-5m-3buy"><input id="signal-5m-3buy" type="checkbox" data-signal-frequency="5m" data-signal-point="3buy" aria-label="5m 三买" checked /><span>三买</span></label>
-                <label class="signal-choice" for="signal-5m-1sell"><input id="signal-5m-1sell" type="checkbox" data-signal-frequency="5m" data-signal-point="1sell" aria-label="5m 一卖" checked /><span>一卖</span></label>
-                <label class="signal-choice" for="signal-5m-2sell"><input id="signal-5m-2sell" type="checkbox" data-signal-frequency="5m" data-signal-point="2sell" aria-label="5m 二卖" checked /><span>二卖</span></label>
-                <label class="signal-choice" for="signal-5m-3sell"><input id="signal-5m-3sell" type="checkbox" data-signal-frequency="5m" data-signal-point="3sell" aria-label="5m 三卖" checked /><span>三卖</span></label>
-              </div>
-            </div>
-            <div class="signal-period-card" role="group" aria-labelledby="signal-period-label-30m">
-              <label class="signal-period-heading" for="signal-all-30m" title="全选或清除 30m 这一行"><input id="signal-all-30m" type="checkbox" data-signal-period-all="30m" aria-label="全选或清除 30m 这一行" checked /><strong id="signal-period-label-30m">30m</strong></label>
-              <div class="signal-period-choices">
-                <label class="signal-choice" for="signal-30m-1buy"><input id="signal-30m-1buy" type="checkbox" data-signal-frequency="30m" data-signal-point="1buy" aria-label="30m 一买" checked /><span>一买</span></label>
-                <label class="signal-choice" for="signal-30m-2buy"><input id="signal-30m-2buy" type="checkbox" data-signal-frequency="30m" data-signal-point="2buy" aria-label="30m 二买" checked /><span>二买</span></label>
-                <label class="signal-choice" for="signal-30m-3buy"><input id="signal-30m-3buy" type="checkbox" data-signal-frequency="30m" data-signal-point="3buy" aria-label="30m 三买" checked /><span>三买</span></label>
-                <label class="signal-choice" for="signal-30m-1sell"><input id="signal-30m-1sell" type="checkbox" data-signal-frequency="30m" data-signal-point="1sell" aria-label="30m 一卖" checked /><span>一卖</span></label>
-                <label class="signal-choice" for="signal-30m-2sell"><input id="signal-30m-2sell" type="checkbox" data-signal-frequency="30m" data-signal-point="2sell" aria-label="30m 二卖" checked /><span>二卖</span></label>
-                <label class="signal-choice" for="signal-30m-3sell"><input id="signal-30m-3sell" type="checkbox" data-signal-frequency="30m" data-signal-point="3sell" aria-label="30m 三卖" checked /><span>三卖</span></label>
-              </div>
-            </div>
+          <div class="signal-point-choices" role="group" aria-label="当前周期的买卖点（可多选）">
+            <label class="signal-choice" for="signal-point-1buy"><input id="signal-point-1buy" type="checkbox" data-signal-point="1buy" aria-label="一买" checked /><span>一买</span></label>
+            <label class="signal-choice" for="signal-point-2buy"><input id="signal-point-2buy" type="checkbox" data-signal-point="2buy" aria-label="二买" checked /><span>二买</span></label>
+            <label class="signal-choice" for="signal-point-3buy"><input id="signal-point-3buy" type="checkbox" data-signal-point="3buy" aria-label="三买" checked /><span>三买</span></label>
+            <label class="signal-choice" for="signal-point-1sell"><input id="signal-point-1sell" type="checkbox" data-signal-point="1sell" aria-label="一卖" checked /><span>一卖</span></label>
+            <label class="signal-choice" for="signal-point-2sell"><input id="signal-point-2sell" type="checkbox" data-signal-point="2sell" aria-label="二卖" checked /><span>二卖</span></label>
+            <label class="signal-choice" for="signal-point-3sell"><input id="signal-point-3sell" type="checkbox" data-signal-point="3sell" aria-label="三卖" checked /><span>三卖</span></label>
           </div>
           <p id="signal-selection-summary" class="signal-selection-summary" role="status" hidden></p>
           <p id="signal-coverage-message" class="muted" role="status"></p>
