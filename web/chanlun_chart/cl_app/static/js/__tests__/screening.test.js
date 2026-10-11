@@ -65,15 +65,12 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
     if(element.id)elements.set(element.id,element);
     return element;
   });
-  const buttonsFor=(name,key)=>[...template.matchAll(/<button\b[^>]*>[\s\S]*?<\/button>/g)]
-    .filter(match=>attribute(match[0],name)).map(match=>{
-      const element=new Element();element.dataset[key]=attribute(match[0],name);
-      element.textContent=match[0].replace(/<[^>]*>/g,'');return element;
-    });
-  const presetButtons=buttonsFor('data-signal-preset','signalPreset');
-  const periodAll=buttonsFor('data-signal-period-all','signalPeriodAll');
-  const periodClear=buttonsFor('data-signal-period-clear','signalPeriodClear');
-  get('signal-preset-period').value='all';
+  get('signal-period-filter').value='all';get('signal-type-filter').value='all';
+  get('signal-custom-details').open=false;
+  for(const id of ['signal-period-custom','signal-type-custom']) {
+    const tag=template.match(new RegExp('<option\\b[^>]*id=["\']'+id+'["\'][^>]*>'))?.[0]||'';
+    get(id).disabled=/\bdisabled\b/.test(tag);get(id).hidden=/\bhidden\b/.test(tag);
+  }
   get('include-previous').type='checkbox';get('include-previous').checked=true;
   const periods = ['1m','5m','30m','d'].map(frequency => {
     const element = new Element(); element.dataset.frequency = frequency; return element;
@@ -98,7 +95,7 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
         if(s==='[data-frequency]')return periods;
         if(s.includes('[data-signal-')) {
           const attributes=[...s.matchAll(/\[data-([\w-]+)(?:=["']([^"']*)["'])?\]/g)];
-          return [...signalCells,...presetButtons,...periodAll,...periodClear].filter(element=>attributes.every(([,key,value])=>{
+          return signalCells.filter(element=>attributes.every(([,key,value])=>{
             const property=key.replace(/-([a-z])/g,(_match,letter)=>letter.toUpperCase());
             return element.dataset[property]!==undefined&&(value===undefined||element.dataset[property]===value);
           })&&(!s.includes(':checked')||element.checked));
@@ -112,7 +109,7 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
     setTimeout:(fn,delay) => {timerDelays.push(delay);return timers.push(fn);}, clearTimeout:id=>{timers[id-1]=()=>{};},
   };
   vm.runInNewContext(source,sandbox);
-  return {get, timers, timerDelays, exports, advance:ms=>{clock.now+=ms;}, periods, signalCells,presetButtons,periodAll,periodClear,body, documentEvents,
+  return {get, timers, timerDelays, exports, advance:ms=>{clock.now+=ms;}, periods, signalCells,body, documentEvents,
     setHidden:value=>{sandbox.document.hidden=value;for(const fn of documentEvents.visibilitychange||[])fn();}};
 }
 const response = (value, status=200) => ({ok:status>=200&&status<300, status, redirected:false, json:async () => value});
@@ -129,10 +126,7 @@ function setSignal(ui,frequency,point,checked=true){
   assert.ok(cell,`missing actual template checkbox ${frequency}/${point}`);
   cell.checked=checked;cell.listeners.change({target:cell});
 }
-function preset(ui,type){
-  const button=ui.presetButtons.find(item=>item.dataset.signalPreset===type);
-  assert.ok(button,`missing actual template preset ${type}`);button.click();
-}
+function selectType(ui,type){choose(ui,'signal-type-filter',type);}
 
 test('a missing quote becomes an explicit reference while other symbols stay current',async()=>{
   const latest=withCandidate(),stocks=[{market:'a',code:'SH.600000'},{market:'a',code:'SH.600001'}];
@@ -621,70 +615,89 @@ function crossPeriodCandidates() {
   return data;
 }
 
-test('presets and individual cells edit one selection through a complete read-only journey',async()=>{
+for(const phone of [false,true])test('simple controls are immediate and custom choices stay collapsed until requested '+(phone?'phone':'desktop'),async()=>{
   const latest=crossPeriodCandidates(),calls=[];
-  const ui=page(async(url,options)=>{calls.push({url,method:options?.method||'GET'});return dispatch(latest,url);},undefined,false,true);
+  const ui=page(async(url,options)=>{calls.push({url,method:options?.method||'GET'});return dispatch(latest,url);},undefined,false,true,phone);
   await settle();
-  assert.equal(ui.signalCells.length,18);
-  assert.deepEqual(selectedSignals(ui),allSignalSelection());
+  assert.equal(ui.signalCells.length,18);assert.deepEqual(selectedSignals(ui),allSignalSelection());
+  assert.equal(ui.get('signal-custom-details').open,false);
+  assert.match(template,/<section\b[^>]*class="[^"]*chart-filters/);
+  const customTag=template.match(/<details\b[^>]*id="signal-custom-details"[^>]*>/)[0];
+  assert.doesNotMatch(customTag,/\bopen\b/);
+  assert.ok(template.indexOf('高级筛选与当前规则')<template.indexOf('id="include-previous"'));
   assert.equal(ui.get('include-previous').checked,true);
-  choose(ui,'signal-preset-period','1m');
-  assert.deepEqual(displayedIds(ui),['a1','a5','a30','b1','b30'],'editing the next preset scope does not filter');
-  preset(ui,'1buy');
-  assert.deepEqual(selectedSignals(ui),{'1m':['1buy'],'5m':[],'30m':[]});
-  assert.deepEqual(displayedIds(ui),['a1','b1']);
+  choose(ui,'signal-period-filter','1m');
+  assert.deepEqual(displayedIds(ui),['a1','b1'],'period changes take effect without another apply action');
+  selectType(ui,'1buy');assert.deepEqual(selectedSignals(ui),{'1m':['1buy'],'5m':[],'30m':[]});
+  const beforeOpen=selectedSignals(ui);ui.get('signal-custom-details').open=true;
+  assert.deepEqual(selectedSignals(ui),beforeOpen);
   setSignal(ui,'5m','3sell');setSignal(ui,'30m','3buy');
   assert.deepEqual(displayedIds(ui),['a1','a5','a30','b1','b30']);
   assert.deepEqual(selectedSignals(ui),{'1m':['1buy'],'5m':['3sell'],'30m':['3buy']});
-  setSignal(ui,'5m','3sell',false);
-  assert.deepEqual(displayedIds(ui),['a1','a30','b1','b30']);
-  const beforeScope=selectedSignals(ui);
-  choose(ui,'signal-preset-period','5m');
-  assert.deepEqual(selectedSignals(ui),beforeScope);
-  preset(ui,'3sell');
-  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':['3sell'],'30m':[]});
+  assert.equal(ui.get('signal-period-filter').value,'all');assert.equal(ui.get('signal-type-filter').value,'custom');
+  ui.get('signal-custom-details').open=false;
+  assert.deepEqual(selectedSignals(ui),{'1m':['1buy'],'5m':['3sell'],'30m':['3buy']});
+  choose(ui,'signal-period-filter','5m');
+  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':['1buy','3buy','3sell'],'30m':[]},'changing period retains the union of chosen point types');
+  assert.deepEqual(displayedIds(ui),['a5']);
+  selectType(ui,'3sell');assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':['3sell'],'30m':[]});
   assert.deepEqual(displayedIds(ui),['a5']);
   ui.get('signal-select-all').click();
-  assert.equal(ui.get('signal-preset-period').value,'all');
   assert.deepEqual(selectedSignals(ui),allSignalSelection());
-  ui.get('signal-clear').click();
+  assert.equal(ui.get('signal-period-filter').value,'all');assert.equal(ui.get('signal-type-filter').value,'all');
+  ui.get('signal-clear').click();assert.deepEqual(displayedIds(ui),[]);
   assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':[],'30m':[]});
-  assert.deepEqual(displayedIds(ui),[]);
   ui.get('include-previous').click();ui.get('reset').click();
-  assert.deepEqual(selectedSignals(ui),allSignalSelection());
-  assert.equal(ui.get('include-previous').checked,true);
-  assert.equal(ui.get('signal-preset-period').value,'all');
+  assert.deepEqual(selectedSignals(ui),allSignalSelection());assert.equal(ui.get('include-previous').checked,true);
   assert.deepEqual(displayedIds(ui),['a1','a5','a30','b1','b30']);
   assert.ok(calls.every(call=>call.method==='GET'),'display changes never launch scans or mutate server state');
-  for(const old of ['frequency-filter','period-point-1m','period-point-5m','period-point-30m','period-point-match'])
-    assert.equal(templateIds.has(old),false,`retired filter ${old} must not remain as hidden state`);
+  assert.doesNotMatch(template,/data-signal-preset=|data-signal-period-all=|data-signal-period-clear=/);
+  for(const id of ['signal-preset-period','frequency-filter','period-point-1m','period-point-5m','period-point-30m','period-point-match'])
+    assert.equal(templateIds.has(id),false,`retired control ${id} must not remain`);
 });
 
-test('every preset replaces the matrix with exactly its selected scope and point family',async()=>{
+test('every simple period and type pair writes exactly that rectangle of canonical cells',async()=>{
   const latest=crossPeriodCandidates(),ui=page(async url=>dispatch(latest,url));await settle();
-  assert.deepEqual(ui.presetButtons.map(button=>button.dataset.signalPreset),['all','buy','sell',...SIGNAL_POINTS]);
   for(const scope of ['all',...SIGNAL_PERIODS])for(const type of ['all','buy','sell',...SIGNAL_POINTS]){
-    choose(ui,'signal-preset-period',scope);preset(ui,type);
+    ui.get('signal-select-all').click();choose(ui,'signal-period-filter',scope);selectType(ui,type);
     const points=type==='all'?SIGNAL_POINTS:type==='buy'||type==='sell'?SIGNAL_POINTS.filter(point=>point.endsWith(type)):[type];
     const expected=Object.fromEntries(SIGNAL_PERIODS.map(period=>[period,scope==='all'||scope===period?[...points]:[]]));
     assert.deepEqual(selectedSignals(ui),expected,`${scope}/${type}`);
-    assert.deepEqual(ui.presetButtons.filter(button=>button.attributes['aria-pressed']==='true').map(button=>button.dataset.signalPreset),[type]);
+    assert.equal(ui.get('signal-period-filter').value,scope);assert.equal(ui.get('signal-type-filter').value,type);
     assert.deepEqual(displayedIds(ui),latest.candidates.filter(row=>expected[row.frequency].includes(row.point.point_type)).map(row=>row.id));
   }
 });
 
-test('per-period all and clear keep other periods and support several types in one period',async()=>{
-  const latest=crossPeriodCandidates(),ui=page(async url=>dispatch(latest,url));await settle();
-  ui.get('signal-clear').click();
-  ui.periodAll.find(button=>button.dataset.signalPeriodAll==='1m').click();
-  setSignal(ui,'5m','3sell');setSignal(ui,'5m','1buy');
-  assert.deepEqual(selectedSignals(ui),{'1m':SIGNAL_POINTS,'5m':['1buy','3sell'],'30m':[]});
-  assert.deepEqual(displayedIds(ui),['a1','a5','b1']);
-  ui.periodClear.find(button=>button.dataset.signalPeriodClear==='1m').click();
-  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':['1buy','3sell'],'30m':[]});
-  assert.deepEqual(displayedIds(ui),['a5']);
-  setSignal(ui,'5m','3sell',false);
-  assert.deepEqual(displayedIds(ui),[],'a selected type does not qualify another type on its symbol');
+test('custom pairs project honestly and simple edits preserve their other dimension',async()=>{
+  const ui=page(async url=>dispatch(crossPeriodCandidates(),url));await settle();
+  ui.get('signal-clear').click();setSignal(ui,'5m','1buy');setSignal(ui,'30m','3sell');
+  assert.equal(ui.get('signal-period-filter').value,'custom');assert.equal(ui.get('signal-type-filter').value,'custom');
+  assert.equal(ui.get('signal-period-custom').disabled,true);assert.equal(ui.get('signal-type-custom').disabled,true);
+  assert.match(ui.get('signal-period-custom').textContent,/5m.*30m/);
+  assert.match(ui.get('signal-type-custom').textContent,/组合/);
+  choose(ui,'signal-period-filter','1m');
+  assert.deepEqual(selectedSignals(ui),{'1m':['1buy','3sell'],'5m':[],'30m':[]});
+  assert.deepEqual(displayedIds(ui),['a1','b1']);
+  ui.get('signal-clear').click();setSignal(ui,'5m','1buy');setSignal(ui,'30m','3sell');
+  selectType(ui,'3buy');
+  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':['3buy'],'30m':['3buy']});
+  assert.equal(ui.get('signal-period-filter').value,'custom');assert.equal(ui.get('signal-type-filter').value,'3buy');
+  assert.deepEqual(displayedIds(ui),['a30','b30']);
+  setSignal(ui,'5m','1buy');
+  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':['1buy','3buy'],'30m':['3buy']});
+  const before=selectedSignals(ui);
+  for(const id of ['signal-period-filter','signal-type-filter'])for(const invalid of ['custom','unknown',''])choose(ui,id,invalid);
+  assert.deepEqual(selectedSignals(ui),before,'invalid and read-only custom options cannot rewrite the matrix');
+});
+
+test('empty selection has deliberate simple-control fallbacks instead of a hidden wildcard',async()=>{
+  const ui=page(async url=>dispatch(crossPeriodCandidates(),url));await settle();
+  ui.get('signal-clear').click();assert.deepEqual(displayedIds(ui),[]);
+  choose(ui,'signal-period-filter','5m');
+  assert.deepEqual(selectedSignals(ui),{'1m':[],'5m':SIGNAL_POINTS,'30m':[]});assert.deepEqual(displayedIds(ui),['a5']);
+  ui.get('signal-clear').click();selectType(ui,'3buy');
+  assert.deepEqual(selectedSignals(ui),{'1m':['3buy'],'5m':['3buy'],'30m':['3buy']});
+  assert.deepEqual(displayedIds(ui),['a30','b30']);
 });
 
 test('current, retained and watchlist rows retain independent visibility and count labels',async()=>{
@@ -722,12 +735,12 @@ test('watch-only disables signal controls without discarding their canonical sta
     return dispatch(latest,url);
   },undefined,false,true);await settle();
   ui.get('signal-clear').click();setSignal(ui,'5m','3sell');ui.get('include-previous').click();
-  choose(ui,'signal-preset-period','30m');choose(ui,'origin-filter','watchlist');
+  choose(ui,'origin-filter','watchlist');
   const before=selectedSignals(ui);
   assert.deepEqual(displayedIds(ui),['watch:us:AAPL.US']);
-  assert.ok([...ui.signalCells,...ui.presetButtons,...ui.periodAll,...ui.periodClear].every(control=>control.disabled));
-  for(const id of ['signal-select-all','signal-clear','signal-preset-period','include-previous'])assert.equal(ui.get(id).disabled,true);
-  preset(ui,'all');ui.get('signal-clear').click();
+  assert.ok(ui.signalCells.every(control=>control.disabled));
+  for(const id of ['signal-select-all','signal-clear','signal-period-filter','signal-type-filter','include-previous'])assert.equal(ui.get(id).disabled,true);
+  ui.get('signal-select-all').click();ui.get('signal-clear').click();
   assert.deepEqual(selectedSignals(ui),before,'disabled bulk commands must not mutate saved choices');
   choose(ui,'origin-filter','all');
   assert.deepEqual(selectedSignals(ui),before);assert.equal(ui.get('include-previous').checked,false);
@@ -735,7 +748,7 @@ test('watch-only disables signal controls without discarding their canonical sta
   assert.deepEqual(displayedIds(ui),['a5','watch:us:AAPL.US']);
   ui.get('watch-list').children[0].click();await settle();
   assert.deepEqual(selectedSignals(ui),allSignalSelection());
-  assert.equal(ui.get('include-previous').checked,true);assert.equal(ui.get('signal-preset-period').value,'all');
+  assert.equal(ui.get('include-previous').checked,true);assert.equal(ui.get('signal-period-filter').value,'all');assert.equal(ui.get('signal-type-filter').value,'all');
   assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
 });
 
@@ -763,21 +776,20 @@ test('the always-visible summary describes selected pairs and advanced filters',
   assert.doesNotMatch(summary(),/SH\.600000|科技|首中枢|3%|待复核|靠近拐点/);
 });
 
-for(const action of ['preset','cell','period-all','period-clear','select-all','include-previous','reset','sector','all-sectors'])
+for(const action of ['period','type','cell','select-all','include-previous','reset','sector','all-sectors'])
 test(`${action} returns the queue to page one and selects a card on that page`,async()=>{
   const latest=withCandidate(),base=latest.candidates[0];
   latest.status.settings={...latest.status.settings,frequencies:['1m','5m','30m']};
   latest.candidates=Array.from({length:121},(_,index)=>({...base,id:String(index),name:'Stock '+index,sectors:['technology']}));
   latest.sectors=[{id:'technology',name:'科技',symbol_count:121,signal_count:121,member_count:121}];
   const ui=page(async url=>dispatch(latest,url));await settle();
-  if(action==='period-all'||action==='select-all')setSignal(ui,'1m','1buy',false);
+  if(action==='select-all')setSignal(ui,'1m','1buy',false);
   ui.get('queue-next').click();ui.get('queue-next').click();await settle();
   assert.match(ui.get('queue-page').textContent,/3 \/ 3/);
   assert.match(ui.get('selected-title').textContent,/Stock 100/);
-  if(action==='preset')preset(ui,'3buy');
+  if(action==='period')choose(ui,'signal-period-filter','5m');
+  else if(action==='type')selectType(ui,'3buy');
   else if(action==='cell')setSignal(ui,'1m','1buy',false);
-  else if(action==='period-all')ui.periodAll.find(button=>button.dataset.signalPeriodAll==='1m').click();
-  else if(action==='period-clear')ui.periodClear.find(button=>button.dataset.signalPeriodClear==='1m').click();
   else if(action==='select-all')ui.get('signal-select-all').click();
   else if(action==='include-previous')ui.get('include-previous').click();
   else if(action==='reset')ui.get('reset').click();
@@ -791,17 +803,19 @@ test(`${action} returns the queue to page one and selects a card on that page`,a
   assert.match(ui.get('selected-title').textContent,new RegExp(`Stock ${active[0].dataset.id} ·`));
 });
 
-test('editing only the next preset scope preserves the current selection, page and chart',async()=>{
+test('reselecting the same participating periods does not expand a custom matrix or reset the page',async()=>{
   const latest=withCandidate(),row=latest.candidates[0];
   latest.candidates=Array.from({length:121},(_,index)=>({...row,id:String(index),name:'Stock '+index}));
   const ui=page(async url=>dispatch(latest,url));await settle();
+  ui.get('signal-clear').click();setSignal(ui,'1m','1buy');setSignal(ui,'5m','3buy');setSignal(ui,'30m','3sell');
   ui.get('queue-next').click();ui.get('queue-next').click();await settle();
   const chart=ui.get('chart-frame').src,selected=ui.get('selected-title').textContent,checks=selectedSignals(ui);
-  choose(ui,'signal-preset-period','30m');
-  assert.deepEqual(selectedSignals(ui),checks);
-  assert.match(ui.get('queue-page').textContent,/3 \/ 3/);
-  assert.equal(ui.get('selected-title').textContent,selected);
-  assert.equal(ui.get('chart-frame').src,chart);
+  assert.equal(ui.get('signal-period-filter').value,'all');assert.equal(ui.get('signal-type-filter').value,'custom');
+  choose(ui,'signal-period-filter','all');
+  assert.deepEqual(selectedSignals(ui),checks);assert.match(ui.get('queue-page').textContent,/3 \/ 3/);
+  assert.equal(ui.get('selected-title').textContent,selected);assert.equal(ui.get('chart-frame').src,chart);
+  ui.get('signal-custom-details').open=true;ui.get('signal-custom-details').open=false;
+  assert.deepEqual(selectedSignals(ui),checks);assert.match(ui.get('queue-page').textContent,/3 \/ 3/);
 });
 
 test('uncomputed choices identify absent coverage while retained rows are separately opt-in context',async()=>{
@@ -819,7 +833,7 @@ test('uncomputed choices identify absent coverage while retained rows are separa
   ui.get('include-previous').click();assert.deepEqual(displayedIds(ui),[]);
 });
 
-test('coverage checks each selected type independently and changing preset scope does not alter coverage',async()=>{
+test('coverage follows the actual selected union when the simple period or type changes',async()=>{
   const latest=crossPeriodCandidates(),calls=[];
   latest.status.settings.frequencies=['30m'];latest.status.settings.point_types=['3buy'];
   latest.candidates=latest.candidates.filter(row=>row.frequency==='30m');
@@ -828,10 +842,12 @@ test('coverage checks each selected type independently and changing preset scope
   assert.deepEqual(displayedIds(ui),['a30','b30']);
   const coverage=ui.get('signal-coverage-message').textContent;
   assert.match(coverage,/30m 三卖/);assert.doesNotMatch(coverage,/30m 三买/);
-  choose(ui,'signal-preset-period','1m');
-  assert.equal(ui.get('signal-coverage-message').textContent,coverage);
-  assert.deepEqual(displayedIds(ui),['a30','b30']);
-  preset(ui,'3buy');assert.deepEqual(displayedIds(ui),[]);
+  choose(ui,'signal-period-filter','1m');
+  assert.deepEqual(selectedSignals(ui),{'1m':['3buy','3sell'],'5m':[],'30m':[]});
+  assert.deepEqual(displayedIds(ui),[]);
+  assert.match(ui.get('signal-coverage-message').textContent,/1m/);
+  assert.doesNotMatch(ui.get('signal-coverage-message').textContent,/30m/);
+  selectType(ui,'3buy');
   assert.match(ui.get('signal-coverage-message').textContent,/1m 三买/);
   assert.match(ui.get('signal-selection-summary').textContent,/三买/);
   assert.ok(calls.every(call=>call.method==='GET'));
@@ -842,7 +858,7 @@ test('export freezes the canonical matrix and history choice while subsequent co
   const ui=page(async url=>url==='/screening/workbench?compact=0'?new Promise(resolve=>{release=resolve;}):dispatch(latest,url));await settle();
   ui.get('signal-clear').click();setSignal(ui,'30m','3buy');
   const exportJob=ui.get('export').listeners.click();await settle();
-  setSignal(ui,'5m','3sell');preset(ui,'1buy');ui.get('include-previous').click();
+  setSignal(ui,'5m','3sell');choose(ui,'signal-period-filter','all');selectType(ui,'1buy');ui.get('include-previous').click();
   release(response({...latest,compact:false}));await exportJob;
   const exported=JSON.parse(await ui.exports[0].text());
   assert.deepEqual(exported.filters.signal_selection,{'1m':[],'5m':[],'30m':['3buy']});
@@ -978,7 +994,7 @@ test('current-run statistics exclude both pending and limited retained third-cla
   assert.match(ui.get('signal-breakdown').textContent,/2 条上次结果/);
   const stats=template.match(/<section class="summary"[\s\S]*?<\/section>/)[0];
   assert.match(stats,/本轮/);
-  preset(ui,'1buy');
+  selectType(ui,'1buy');
   assert.equal(ui.get('signal-list').children.length,0);
   assert.equal(ui.get('signal-count').textContent,1,'display filters do not rewrite whole-run statistics');
   assert.match(ui.get('third-breakdown').textContent,/三类买卖点提醒 1 条/);
