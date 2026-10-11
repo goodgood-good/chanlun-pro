@@ -55,23 +55,24 @@
     </div>
     <section class="filters chart-filters" aria-label="候选筛选">
       <div class="chart-filter-body">
-        <fieldset id="signal-selection" class="signal-selection" aria-describedby="signal-selection-summary">
-          <legend>信号筛选</legend>
-          <div class="signal-simple-controls">
-            <label for="signal-period-filter">周期<select id="signal-period-filter"><option value="all">全部周期</option><option value="1m">1m</option><option value="5m">5m</option><option value="30m">30m</option><option id="signal-period-custom" value="custom" disabled hidden>自定义周期</option></select></label>
-            <label for="signal-type-filter">买卖点<select id="signal-type-filter"><option value="all">全部买卖点</option><option value="buy">买点</option><option value="sell">卖点</option><option value="1buy">一买</option><option value="2buy">二买</option><option value="3buy">三买</option><option value="1sell">一卖</option><option value="2sell">二卖</option><option value="3sell">三卖</option><option id="signal-type-custom" value="custom" disabled hidden>分周期组合</option></select></label>
-            <button id="reset" type="button">重置筛选</button>
+        <div class="signal-filter-header">
+          <div><h2 id="signal-filter-title">筛选结果</h2><p id="signal-selection-help" class="muted">勾选即生效，满足任一条件即可</p></div>
+          <button id="reset" type="button">重置筛选</button>
+        </div>
+        <fieldset id="signal-selection" class="signal-selection" aria-labelledby="signal-filter-title" aria-describedby="signal-selection-help">
+          <div class="signal-filter-tools">
+            <input id="signal-search" type="search" placeholder="搜索名称、代码、市场或板块" aria-label="搜索候选">
+            <div class="signal-presets" role="group" aria-label="批量选择所有周期">
+              <span class="signal-presets-label">全周期：</span>
+              <button id="signal-preset-all" type="button" data-signal-preset="all" title="将所有周期替换为全部买卖点">全部</button>
+              <button id="signal-preset-buy" type="button" data-signal-preset="buy" title="将所有周期替换为全部买点">买点</button>
+              <button id="signal-preset-sell" type="button" data-signal-preset="sell" title="将所有周期替换为全部卖点">卖点</button>
+              <button id="signal-clear" type="button" data-signal-preset="none" title="清空所有周期的买卖点勾选">清空</button>
+            </div>
           </div>
-          <p id="signal-selection-summary" class="signal-selection-summary" role="status">全部周期 · 全部买卖点</p>
-          <p id="signal-coverage-message" class="muted" role="status"></p>
-          <details id="signal-custom-details" class="signal-custom-details">
-            <summary>按周期分别选择</summary>
-            <p id="signal-selection-help" class="muted">每个周期可多选，满足任一条件即可。</p>
           <div class="signal-period-grid">
             <div class="signal-period-card" role="group" aria-labelledby="signal-period-label-1m">
-              <div class="signal-period-heading">
-                <strong id="signal-period-label-1m">1m</strong>
-              </div>
+              <label class="signal-period-heading" for="signal-all-1m" title="全选或清除 1m 这一行"><input id="signal-all-1m" type="checkbox" data-signal-period-all="1m" aria-label="全选或清除 1m 这一行" checked /><strong id="signal-period-label-1m">1m</strong></label>
               <div class="signal-period-choices">
                 <label class="signal-choice" for="signal-1m-1buy"><input id="signal-1m-1buy" type="checkbox" data-signal-frequency="1m" data-signal-point="1buy" aria-label="1m 一买" checked /><span>一买</span></label>
                 <label class="signal-choice" for="signal-1m-2buy"><input id="signal-1m-2buy" type="checkbox" data-signal-frequency="1m" data-signal-point="2buy" aria-label="1m 二买" checked /><span>二买</span></label>
@@ -82,9 +83,7 @@
               </div>
             </div>
             <div class="signal-period-card" role="group" aria-labelledby="signal-period-label-5m">
-              <div class="signal-period-heading">
-                <strong id="signal-period-label-5m">5m</strong>
-              </div>
+              <label class="signal-period-heading" for="signal-all-5m" title="全选或清除 5m 这一行"><input id="signal-all-5m" type="checkbox" data-signal-period-all="5m" aria-label="全选或清除 5m 这一行" checked /><strong id="signal-period-label-5m">5m</strong></label>
               <div class="signal-period-choices">
                 <label class="signal-choice" for="signal-5m-1buy"><input id="signal-5m-1buy" type="checkbox" data-signal-frequency="5m" data-signal-point="1buy" aria-label="5m 一买" checked /><span>一买</span></label>
                 <label class="signal-choice" for="signal-5m-2buy"><input id="signal-5m-2buy" type="checkbox" data-signal-frequency="5m" data-signal-point="2buy" aria-label="5m 二买" checked /><span>二买</span></label>
@@ -95,9 +94,7 @@
               </div>
             </div>
             <div class="signal-period-card" role="group" aria-labelledby="signal-period-label-30m">
-              <div class="signal-period-heading">
-                <strong id="signal-period-label-30m">30m</strong>
-              </div>
+              <label class="signal-period-heading" for="signal-all-30m" title="全选或清除 30m 这一行"><input id="signal-all-30m" type="checkbox" data-signal-period-all="30m" aria-label="全选或清除 30m 这一行" checked /><strong id="signal-period-label-30m">30m</strong></label>
               <div class="signal-period-choices">
                 <label class="signal-choice" for="signal-30m-1buy"><input id="signal-30m-1buy" type="checkbox" data-signal-frequency="30m" data-signal-point="1buy" aria-label="30m 一买" checked /><span>一买</span></label>
                 <label class="signal-choice" for="signal-30m-2buy"><input id="signal-30m-2buy" type="checkbox" data-signal-frequency="30m" data-signal-point="2buy" aria-label="30m 二买" checked /><span>二买</span></label>
@@ -108,10 +105,10 @@
               </div>
             </div>
           </div>
-            <div class="signal-custom-actions"><button id="signal-clear" type="button">取消全部</button></div>
-          </details>
+          <p id="signal-selection-summary" class="signal-selection-summary" role="status" hidden></p>
+          <p id="signal-coverage-message" class="muted" role="status"></p>
         </fieldset>
-      <details id="advanced-filters" class="signal-advanced-details"><summary id="advanced-filter-summary">更多条件</summary><label class="signal-previous-choice" for="include-previous"><input id="include-previous" type="checkbox" checked />保留上次待更新结果</label><p class="muted">旧结果仅供核对，不计入本轮命中；关注标的仅供开图，不作为信号。</p><div class="toolbar"><label hidden>信号状态<select id="point-status-filter"><option value="confirmed" selected>已确认</option></select></label><label hidden>低周期确认<select id="lower-status-filter"><option value="all">全部</option></select></label><label hidden>30m 背景<select id="higher-context-filter"><option value="all">全部（不限制）</option></select></label><label hidden>筛选组合<select id="stage-filter"><option value="all">全部状态</option></select></label><label hidden>MACD基础避险<select id="risk-filter"><option value="all">全部</option></select></label><span id="stage-counts" class="muted"></span><span id="selected-sector" class="muted">全部板块</span></div><p id="higher-context-status" class="muted" role="status" hidden></p><div class="toolbar"><input id="signal-search" type="search" placeholder="搜索名称、代码、市场或板块" aria-label="搜索候选"><label>市场<select id="market-filter"><option value="all">全部市场</option><option value="a">A 股</option><option value="us">美股</option><option value="hk">港股</option></select></label><label>来源<select id="origin-filter"><option value="screening">选股提醒</option><option value="all">提醒 + 当前关注组</option><option value="watchlist">当前关注组</option></select></label><label>三类点中枢<select id="center-order-filter"><option value="all">当前选股规则</option><option value="first">仅首中枢（三卖也适用）</option></select></label><label>距本轮截止<select id="age-filter"><option value="all">不限</option><option value="0">本轮交易日</option><option value="1">不超过 1 个交易日</option><option value="3">不超过 3 个交易日</option><option value="5">不超过 5 个交易日</option></select></label><label>本轮收盘距拐点<select id="gain-filter"><option value="all">不限</option><option value="1">不超过 1%</option><option value="3">不超过 3%</option><option value="5">不超过 5%</option></select></label><label>排序<select id="sort-filter"><option value="recent">信号最近</option><option value="distance">本轮收盘靠近拐点</option></select></label><label>复核<select id="review-filter"><option value="all">全部状态</option><option value="pending">待复核</option><option value="reviewed">已复核</option></select></label></div><p>这些条件与周期、买卖点同时生效。时效、距拐点百分比与排序仅影响结果显示，不改变买卖点的成立条件；选股结果只代表标出的行情截止时刻。</p></details>
+      <details id="advanced-filters" class="signal-advanced-details"><summary id="advanced-filter-summary">更多条件</summary><label class="signal-previous-choice" for="include-previous"><input id="include-previous" type="checkbox" checked />保留上次待更新结果</label><p class="muted">旧结果仅供核对，不计入本轮命中；关注标的仅供开图，不作为信号。</p><div class="toolbar"><label hidden>信号状态<select id="point-status-filter"><option value="confirmed" selected>已确认</option></select></label><label hidden>低周期确认<select id="lower-status-filter"><option value="all">全部</option></select></label><label hidden>30m 背景<select id="higher-context-filter"><option value="all">全部（不限制）</option></select></label><label hidden>筛选组合<select id="stage-filter"><option value="all">全部状态</option></select></label><label hidden>MACD基础避险<select id="risk-filter"><option value="all">全部</option></select></label><span id="stage-counts" class="muted"></span><span id="selected-sector" class="muted">全部板块</span></div><p id="higher-context-status" class="muted" role="status" hidden></p><div class="toolbar"><label>市场<select id="market-filter"><option value="all">全部市场</option><option value="a">A 股</option><option value="us">美股</option><option value="hk">港股</option></select></label><label>来源<select id="origin-filter"><option value="screening">选股提醒</option><option value="all">提醒 + 当前关注组</option><option value="watchlist">当前关注组</option></select></label><label>三类点中枢<select id="center-order-filter"><option value="all">当前选股规则</option><option value="first">仅首中枢（三卖也适用）</option></select></label><label>距本轮截止<select id="age-filter"><option value="all">不限</option><option value="0">本轮交易日</option><option value="1">不超过 1 个交易日</option><option value="3">不超过 3 个交易日</option><option value="5">不超过 5 个交易日</option></select></label><label>本轮收盘距拐点<select id="gain-filter"><option value="all">不限</option><option value="1">不超过 1%</option><option value="3">不超过 3%</option><option value="5">不超过 5%</option></select></label><label>排序<select id="sort-filter"><option value="recent">信号最近</option><option value="distance">本轮收盘靠近拐点</option></select></label><label>复核<select id="review-filter"><option value="all">全部状态</option><option value="pending">待复核</option><option value="reviewed">已复核</option></select></label></div><p>这些条件与周期、买卖点同时生效。时效、距拐点百分比与排序仅影响结果显示，不改变买卖点的成立条件；选股结果只代表标出的行情截止时刻。</p></details>
       </div>
     </section>
     <nav id="mobile-workspace-tabs" class="mobile-workspace-tabs" aria-label="选股视图" role="tablist"><button id="mobile-list-tab" type="button" role="tab" aria-selected="true" aria-controls="candidate-panel">候选列表</button><button id="mobile-chart-tab" type="button" role="tab" aria-selected="false" aria-controls="analysis">标的图表</button></nav>

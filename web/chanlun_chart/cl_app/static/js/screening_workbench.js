@@ -145,34 +145,14 @@
     return Object.fromEntries(POINT_PERIODS.map(frequency=>[frequency,
       conditions.filter(c=>c.frequency===frequency).map(c=>c.point)]));
   }
-  function projectSignalSelection(selection) {
-    const normalized=normalizedSignalSelection(selection);
-    const periods=POINT_PERIODS.filter(frequency=>normalized[frequency].length);
-    const points=Object.keys(POINTS).filter(point=>periods.some(frequency=>normalized[frequency].includes(point)));
-    const period=periods.length===3?'all':periods.length===1?periods[0]:'custom';
-    let point='custom';
-    if(periods.length&&periods.every(frequency=>normalized[frequency].join(',')===points.join(','))) {
-      point=['all','buy','sell',...Object.keys(POINTS)].find(value=>
-        signalSelection('1m',value)['1m'].join(',')===points.join(','))||'custom';
-    }
-    return {period,point,periods,points,empty:!periods.length};
+  function applySignalPreset(selection, preset) {
+    return ['all','buy','sell','none'].includes(preset)
+      ?signalSelection('all',preset):normalizedSignalSelection(selection);
   }
-  function changeSignalPeriod(selection, value) {
-    const normalized=normalizedSignalSelection(selection),projected=projectSignalSelection(normalized);
-    if(value!=='all'&&!POINT_PERIODS.includes(value))return normalized;
-    const periods=value==='all'?POINT_PERIODS:[value];
-    // Re-selecting the same range must not expand a per-period custom choice.
-    if(periods.join(',')===projected.periods.join(','))return normalized;
-    const points=projected.points.length?projected.points:Object.keys(POINTS);
-    return Object.fromEntries(POINT_PERIODS.map(frequency=>[frequency,periods.includes(frequency)?[...points]:[]]));
-  }
-  function changeSignalType(selection, value) {
+  function setSignalPeriod(selection, period, checked) {
     const normalized=normalizedSignalSelection(selection);
-    if(!['all','buy','sell',...Object.keys(POINTS)].includes(value))return normalized;
-    const projected=projectSignalSelection(normalized);
-    const periods=projected.periods.length?projected.periods:POINT_PERIODS;
-    const points=signalSelection('1m',value)['1m'];
-    return Object.fromEntries(POINT_PERIODS.map(frequency=>[frequency,periods.includes(frequency)?[...points]:[]]));
+    if(POINT_PERIODS.includes(period)&&typeof checked==='boolean')normalized[period]=checked?Object.keys(POINTS):[];
+    return normalized;
   }
   function currentPeriodRow(row, source) {
     return !row.refresh_state && (!row.result_source || row.result_source===source);
@@ -265,7 +245,7 @@
   }
   function advancedFilterCount(filters) {
     const defaults=defaultFilters();
-    return ['market','origin','query','sector','review','center_order','age','gain','sort','include_previous']
+    return ['market','origin','sector','review','center_order','age','gain','sort','include_previous']
       .filter(key=>filters[key]!==defaults[key]).length;
   }
   function boot() {
@@ -562,7 +542,7 @@
       $('queue-reset-filters').hidden=!!state.rows.length||!hasFilterChanges(state.filters);
       $('export').disabled=state.exportPending||reviewFilterPending();
       $('queue-empty').textContent=reviewFilterPending()?'正在读取复核状态，完成后自动显示筛选结果。':state.filters.origin!=='watchlist'&&!periodPointConditions(state.filters).length
-        ?'尚未选择买卖点条件。请选择周期或买卖点，或展开“按周期分别选择”。'
+        ?'尚未选择买卖点。勾选任意一格，或点击“全部”查看所有买卖点。'
         :emptyResultsMessage(state.data?.status,state.data?.candidates?.length||0);
       if (state.selected && !page.rows.some(r=>r.id===state.selected.id)) {
         clearSelection();
@@ -1181,7 +1161,7 @@
     function resetFilters(origin='screening') {
       cancelSelectionRestore();
       state.filters=defaultFilters(origin);state.queuePage=1;
-      $('signal-custom-details').open=false;$('advanced-filters').open=false;$('include-previous').checked=true;
+      $('advanced-filters').open=false;$('include-previous').checked=true;
       $('signal-search').value='';$('sector-search').value='';
       for(const id of ['market-filter','review-filter','stage-filter','risk-filter','lower-status-filter','higher-context-filter','center-order-filter','age-filter','gain-filter'])$(id).value='all';
       $('point-status-filter').value='confirmed';$('sort-filter').value='recent';$('origin-filter').value=origin;
@@ -1212,25 +1192,25 @@
     function renderSignalSelection() {
       const conditions=periodPointConditions(state.filters);
       const watchOnly=state.filters.origin==='watchlist';
-      const projection=projectSignalSelection(state.filters.signal_selection);
-      $('signal-period-custom').hidden=projection.period!=='custom';
-      $('signal-period-custom').textContent=projection.empty?'未选择':projection.periods.join('、');
-      $('signal-type-custom').hidden=projection.point!=='custom';
-      $('signal-type-custom').textContent=projection.empty?'未选择':'自定义组合';
-      $('signal-period-filter').value=projection.period;
-      $('signal-type-filter').value=projection.point;
-      $('signal-period-filter').disabled=watchOnly;
-      $('signal-type-filter').disabled=watchOnly;
+      for(const input of document.querySelectorAll('[data-signal-period-all]')){
+        const count=conditions.filter(c=>c.frequency===input.dataset.signalPeriodAll).length;
+        input.checked=count===6;input.indeterminate=count>0&&count<6;input.disabled=watchOnly;
+      }
+      for(const button of document.querySelectorAll('[data-signal-preset]')){
+        const preset=applySignalPreset(state.filters.signal_selection,button.dataset.signalPreset);
+        const active=JSON.stringify(conditions)===JSON.stringify(periodPointConditions({signal_selection:preset}));
+        button.setAttribute('aria-pressed',String(active));
+        button.disabled=watchOnly||(button.dataset.signalPreset==='none'&&!conditions.length);
+      }
       for(const input of document.querySelectorAll('[data-signal-frequency][data-signal-point]')) {
         input.checked=conditions.some(c=>c.frequency===input.dataset.signalFrequency&&c.point===input.dataset.signalPoint);
         input.disabled=watchOnly;
       }
       $('reset').disabled=!hasFilterChanges(state.filters);
-      $('signal-clear').disabled=watchOnly||!conditions.length;
       $('include-previous').disabled=watchOnly;
       $('include-previous').checked=state.filters.include_previous;
-      $('signal-selection-summary').textContent=watchOnly?'当前展示关注组图表。':signalFilterText();
-      $('signal-selection-summary').hidden=!watchOnly&&projection.period!=='custom'&&projection.point!=='custom';
+      $('signal-selection-summary').textContent=watchOnly?'当前展示关注组图表，买卖点条件暂不参与筛选。':conditions.length?signalFilterText():'尚未选择买卖点。勾选任意一格，或点击“全部”。';
+      $('signal-selection-summary').hidden=!watchOnly&&conditions.length>0;
       const advanced=advancedFilterCount(state.filters);
       $('advanced-filter-summary').textContent=advanced?`更多条件 · ${advanced}`:'更多条件';
       const settings=state.data?.status?.settings;
@@ -1261,13 +1241,12 @@
       if(input.checked)selected.add(point);else selected.delete(point);
       applySignalSelection({...state.filters.signal_selection,[frequency]:Object.keys(POINTS).filter(p=>selected.has(p))});
     });
-    $('signal-period-filter').addEventListener('change',()=>{
-      applySignalSelection(changeSignalPeriod(state.filters.signal_selection,$('signal-period-filter').value));
+    for(const input of document.querySelectorAll('[data-signal-period-all]'))input.addEventListener('change',()=>{
+      applySignalSelection(setSignalPeriod(state.filters.signal_selection,input.dataset.signalPeriodAll,input.checked));
     });
-    $('signal-type-filter').addEventListener('change',()=>{
-      applySignalSelection(changeSignalType(state.filters.signal_selection,$('signal-type-filter').value));
+    for(const button of document.querySelectorAll('[data-signal-preset]'))button.addEventListener('click',()=>{
+      applySignalSelection(applySignalPreset(state.filters.signal_selection,button.dataset.signalPreset));
     });
-    $('signal-clear').addEventListener('click',()=>applySignalSelection(signalSelection('none')));
     $('include-previous').addEventListener('change',()=>{
       state.filters.include_previous=$('include-previous').checked;state.queuePage=1;renderQueue({userAction:true});
     });
@@ -1406,5 +1385,5 @@
     const quotes=()=>{void refreshQuotes();setTimeout(quotes,15000);};setTimeout(quotes,15000);
     document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshQuotes();});
   }
-  return {boot,filterRows,periodPointConditions,projectSignalSelection,changeSignalPeriod,changeSignalType,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows};
+  return {boot,filterRows,periodPointConditions,applySignalPreset,setSignalPeriod,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows};
 });
