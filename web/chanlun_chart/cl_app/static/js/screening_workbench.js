@@ -212,7 +212,8 @@
     const state = {data:null,serial:0,version:'',rows:[],selected:null,watch:[],quotes:new Map(),
       reviews:{latest:{},history:[]},drafts:new Map(),filters:defaultFilters(),
       frequency:'5m',sectorExpanded:false,queuePage:1,chartKey:'',chartVisible:typeof window==='undefined'||typeof IntersectionObserver==='undefined',quoteRequests:new Map(),watchSerial:0,
-      details:new Map(),detailPending:new Set(),detailSerial:0,
+      details:new Map(),detailPending:new Set(),detailRetries:new Map(),detailSerial:0,
+      selectionRestore:{active:true,source:null,id:null},
       watchGroup:'',watchLoaded:false,watchLoading:false,watchError:'',
       mutationPending:false,refreshPending:false,settingsInitialized:false,settingsEdited:false,
       reviewsLoadedSource:null,reviewSerial:0,reviewWriteEpoch:0,savingReview:false,
@@ -277,9 +278,15 @@
         const response = await fetch(url,{credentials:'same-origin',cache:'no-store',headers,
           ...(body!==undefined ? {method:'POST',body:form?new URLSearchParams(body):JSON.stringify(body)} : {}),signal:AbortSignal.timeout(20000)});
         if (response.redirected || response.status===401) throw new Error('登录已失效，请在行情页登录后刷新。');
-        const value=await response.json();
+        let value;
+        try { value=await response.json(); }
+        catch (error) {
+          if(response.ok)throw error;
+          const failure=new Error(`请求失败（HTTP ${response.status}），请稍后重试。`);
+          failure.status=response.status;throw failure;
+        }
         if (!response.ok || value.ok===false) {
-          const error=new Error(value.error?.message || value.error || value.msg || '读取失败，请重试。');
+          const error=new Error(value.error?.message || value.error || value.msg || value.errmsg || '读取失败，请重试。');
           error.retryAfterSeconds=value.error?.retry_after_seconds??value.retry_after_seconds;
           error.status=response.status;
           throw error;
@@ -314,6 +321,20 @@
     function sectorNames() {return Object.fromEntries((state.data?.sectors||[]).map(s=>[s.id,s.name]));}
     function selectionKey(){return `screening-selection:${document.querySelector('main').dataset.user}:${state.data?.source}`;}
     function previousSelection(){try{return sessionStorage.getItem(selectionKey());}catch(_){return null;}}
+    function cancelSelectionRestore(){state.selectionRestore.active=false;}
+    function restoreSelectionPage(){
+      const restore=state.selectionRestore,source=state.data?.source;
+      if(!restore.active||state.selected||!source||source==='idle')return null;
+      if(!restore.source){restore.source=source;restore.id=previousSelection();}
+      if(restore.source!==source||!restore.id){cancelSelectionRestore();return null;}
+      const index=state.rows.findIndex(row=>row.id===restore.id);
+      if(index>=0){state.queuePage=Math.floor(index/state.queuePageSize)+1;cancelSelectionRestore();return restore.id;}
+      const status=state.data.status||{};
+      if(restore.id.startsWith('watch:')&&state.filters.origin==='screening'
+        ||[...(state.data.candidates||[]),...watchRows()].some(row=>row.id===restore.id)
+        ||!status.results_loading&&!status.previous_results_loading&&!activeRun(status.status))cancelSelectionRestore();
+      return null;
+    }
     function watchRows() {
       const names=sectorNames();
       return state.watch.map(row=>({...row,id:`watch:${row.market}:${row.code}`,frequency:state.frequency,point:{},stage:'monitoring',origin:'watchlist',
@@ -399,20 +420,22 @@
       $('sector-list').replaceChildren();
       $('sector-status').textContent=sectors.length ? `${state.data.sectors.length} 个板块；目录与结构记录日期 ${date(state.data.sector_catalog_at)}。候选数量随本次结果更新，结构强弱为历史记录。` : '没有匹配的板块目录。个股筛选与图表仍可使用。';
       const all=node('button',`全部板块 · ${state.data?.candidates.length||0} 条`,'sector-card'+(!state.filters.sector?' active':''));
-      all.type='button';all.addEventListener('click',()=>{state.filters.sector='';state.queuePage=1;renderSectors();renderQueue();});$('sector-list').append(all);
+      all.type='button';all.addEventListener('click',()=>{state.filters.sector='';state.queuePage=1;renderSectors();renderQueue({userAction:true});});$('sector-list').append(all);
       for (const sector of sectors.slice(0,state.sectorExpanded||query?sectors.length:9)) {
         const b=node('button',undefined,'sector-card'+(state.filters.sector===sector.id?' active':''));b.type='button';
         b.append(node('strong',sector.name),node('small',`${sector.symbol_count} 只候选 · ${sector.signal_count} 条线索 / ${sector.member_count} 成员`),
           node('small',`原强弱名次 ${sector.historical_rank??'—'} · ${ {up:'向上',down:'向下',neutral:'中性'}[sector.historical_regime]||sector.historical_regime||'未知'}`));
-        b.addEventListener('click',()=>{state.filters.sector=sector.id;state.queuePage=1;renderSectors();renderQueue();});$('sector-list').append(b);
+        b.addEventListener('click',()=>{state.filters.sector=sector.id;state.queuePage=1;renderSectors();renderQueue({userAction:true});});$('sector-list').append(b);
       }
       $('sector-more').textContent=state.sectorExpanded?'收起板块':'展开全部板块';
       $('selected-sector').textContent=sectorNames()[state.filters.sector]||'全部板块';
     }
-    function renderQueue({followSelection=false}={}) {
+    function renderQueue({followSelection=false,userAction=false}={}) {
+      if(userAction)cancelSelectionRestore();
       syncPoints();
       renderPeriodPointFilters();
       state.rows=visibleRows();
+      const restored=restoreSelectionPage();
       if(followSelection&&state.selected) {
         const index=state.rows.findIndex(row=>row.id===state.selected.id);
         if(index>=0)state.queuePage=Math.floor(index/state.queuePageSize)+1;
@@ -446,20 +469,30 @@
         if(row.origin!=='watchlist')b.append(node('small',higherContextText(row.higher_context),'queue-context'));
         if(row.latest_recheck_closed_at)b.append(node('small',`复核行情截止 ${date(row.latest_recheck_closed_at)}`,'queue-freshness'));
         if(row.refresh_state)b.append(node('small',row.refresh_state==='limited'?'本轮数据受限 · 保留上次结果':'上次结果 · 待本轮更新','queue-refresh badge'));
-        b.addEventListener('click',()=>{selectRow(row);renderQueue();mobileView('chart');});$('signal-list').append(b);
+        b.addEventListener('click',()=>{selectRow(row,{manual:true});renderQueue();mobileView('chart');});$('signal-list').append(b);
       }
       $('queue-empty').hidden=!!state.rows.length;
       $('queue-empty').textContent=emptyResultsMessage(state.data?.status,state.data?.candidates?.length||0);
       if (state.selected && !page.rows.some(r=>r.id===state.selected.id)) {
         clearSelection();
       }
-      if (!state.selected && page.rows.length) selectRow(page.rows.find(r=>r.id===previousSelection())||page.rows[0]);
+      if (!state.selected && page.rows.length && !(state.selectionRestore.active&&state.selectionRestore.id))
+        selectRow(page.rows.find(r=>r.id===restored)||page.rows[0]);
       else if(state.selected)selectRow(state.rows.find(r=>r.id===state.selected.id));
       for(const card of $('signal-list').querySelectorAll('.signal-card'))card.classList.toggle('active',card.dataset.id===state.selected?.id);
     }
     function list(id, values) {$(id).replaceChildren(...values.map(v=>node('li',v)));}
     function candidateDetailKey(row) {
       return [state.data?.source,row.refresh_state,row.candidate_evidence_version??state.data?.status.evidence_version,state.data?.status.result_reader_revision,row.selection_check_version,row.id].join(':');
+    }
+    function retrySelectedDetail(){
+      const selected=state.selected;
+      if(document.hidden||state.mutationPending||!selected||selected.origin==='watchlist'||selected.refresh_state||selected.detail_loaded!==false)return;
+      const current=state.data?.candidates.find(row=>row.id===selected.id);
+      if(!current||candidateDetailKey(current)!==candidateDetailKey(selected))return;
+      const key=candidateDetailKey(current),retry=state.detailRetries.get(key);
+      if(state.detailPending.has(key)||retry&&(retry.terminal||Date.now()<retry.nextAt))return;
+      selectRow(current);
     }
     function selectPreviousRow(row) {
       const changed=state.selected?.id!==row.id;
@@ -480,13 +513,16 @@
       $('raw-evidence').textContent=JSON.stringify(row,null,2);
       renderReview();renderChart();
     }
-    function selectRow(row) {
+    function selectRow(row,{manual=false}={}) {
+      if(manual){cancelSelectionRestore();state.detailRetries.delete(candidateDetailKey(row));}
+      if(state.data?.source)try{sessionStorage.setItem(selectionKey(),row.id);}catch(_){/* Selection storage is optional. */}
       if(row.refresh_state){selectPreviousRow(row);return;}
       const detailKey=candidateDetailKey(row);
       if(row.detail_loaded===false&&row.origin!=='watchlist'){
         const cached=state.details.get(detailKey);
         if(cached)row={...cached,...row,point:cached.point,nested_confirmation:cached.nested_confirmation,detail_loaded:true};
         else{
+          const retry=state.detailRetries.get(detailKey);
           const changed=state.selected?.id!==row.id;
           state.selected=row;
           if(changed){state.frequency=row.frequency||'5m';$('chart-source').value='live';}
@@ -504,25 +540,39 @@
           $('raw-evidence').textContent='';
           if(changed)renderReview();
           $('review-fields').disabled=true;
-          $('candidate-detail-state').textContent='正在读取所选候选的详细证据…';
+          $('candidate-detail-state').textContent=retry?.message||'正在读取所选候选的详细证据…';
           for(const card of $('signal-list').querySelectorAll('.signal-card'))card.classList.toggle('active',card.dataset.id===row.id);
-          if(!state.detailPending.has(detailKey)){
+          if(!state.detailPending.has(detailKey)&&(!retry||!retry.terminal&&Date.now()>=retry.nextAt)){
+            $('candidate-detail-state').textContent='正在读取所选候选的详细证据…';
             ++state.detailSerial;const source=state.data.source;
             state.detailPending.add(detailKey);
             void api('/screening/candidate?'+new URLSearchParams({source,id:row.id})).then(data=>{
-              if(data.source!==source||data.candidate?.id!==row.id)throw new Error('候选详情与选中项不一致，请刷新结果。');
+              if(data.source!==source||data.candidate?.id!==row.id){const error=new Error('候选详情与选中项不一致，请刷新结果。');error.noAutoRetry=true;throw error;}
               const current=state.data?.candidates.find(candidate=>candidate.id===row.id);
               if(source!==state.data?.source||!current||detailKey!==candidateDetailKey(current))return;
               const sameEvidence=current.candidate_evidence_version!==undefined
                 ?data.candidate.candidate_evidence_version===current.candidate_evidence_version
                 :data.evidence_version===state.data.status.evidence_version;
-              if(!sameEvidence||data.result_reader_revision!==state.data.status.result_reader_revision||data.candidate.selection_check_version!==current.selection_check_version)
-                throw new Error('候选依据已更新，等待列表刷新后重新读取。');
+              if(!sameEvidence||data.result_reader_revision!==state.data.status.result_reader_revision||data.candidate.selection_check_version!==current.selection_check_version){
+                const error=new Error('候选依据已更新，等待列表刷新后重新读取。');error.noAutoRetry=true;throw error;
+              }
               data.candidate={...current,...data.candidate};
+              state.detailRetries.delete(detailKey);
               state.details.set(detailKey,data.candidate);
               if(state.details.size>100)state.details.delete(state.details.keys().next().value);
               if(state.selected?.id===row.id)selectRow(data.candidate);
-            }).catch(error=>{if(source===state.data?.source&&state.selected?.id===row.id&&detailKey===candidateDetailKey(state.selected))$('candidate-detail-state').textContent=error.message;})
+            }).catch(error=>{
+              const current=state.data?.candidates.find(candidate=>candidate.id===row.id);
+              if(source!==state.data?.source||!current||detailKey!==candidateDetailKey(current))return;
+              const failures=(state.detailRetries.get(detailKey)?.failures||0)+1;
+              const terminal=!!error.noAutoRetry||[401,403,404,409,410].includes(error.status);
+              const delay=[2000,5000,15000,30000][Math.min(failures-1,3)];
+              const serverDelay=Number.isFinite(Number(error.retryAfterSeconds))?Math.min(300000,Math.max(0,Number(error.retryAfterSeconds))*1000):0;
+              const message=error.message+(terminal?'（请刷新结果或重新选择；不会自动重复请求。）':'（稍后自动重试，也可点击候选重试。）');
+              state.detailRetries.set(detailKey,{failures,terminal,nextAt:Date.now()+Math.max(delay,serverDelay),message});
+              if(state.detailRetries.size>100)state.detailRetries.delete(state.detailRetries.keys().next().value);
+              if(state.selected?.id===row.id&&detailKey===candidateDetailKey(state.selected))$('candidate-detail-state').textContent=message;
+            })
               .finally(()=>state.detailPending.delete(detailKey));
           }
           renderChart();
@@ -533,7 +583,6 @@
       $('review-fields').disabled=row.origin==='watchlist';
       const changed=state.selected?.id!==row.id;
       state.selected=row;
-      try{sessionStorage.setItem(selectionKey(),row.id);}catch(_){/* Session persistence is optional. */}
       for(const card of $('signal-list').querySelectorAll('.signal-card'))card.classList.toggle('active',card.dataset.id===row.id);
       if(changed){state.frequency=row.frequency||'5m';$('chart-source').value='live';}
       const p=row.point||{};
@@ -731,7 +780,8 @@
       state.data=data;
       if(changed){
         if(state.selected?.origin!=='watchlist'&&!data.candidates.some(row=>row.id===state.selected?.id))clearSelection();
-        state.details.clear();state.queuePage=1;state.reviews={latest:{},history:[]};state.reviewsLoadedSource=null;state.reviewSerial++;state.filters.sector='';
+        state.details.clear();state.detailRetries.clear();state.queuePage=1;state.reviews={latest:{},history:[]};state.reviewsLoadedSource=null;state.reviewSerial++;state.filters.sector='';
+        if(state.selectionRestore.source&&state.selectionRestore.source!==data.source)cancelSelectionRestore();
       }
       renderSummary();renderSectors();renderQueue({followSelection:true});
       void refreshQuotes();
@@ -875,7 +925,7 @@
           message(error.message);
         }
       }
-      finally{state.refreshPending=false;}
+      finally{state.refreshPending=false;retrySelectedDetail();}
     }
     function renderWatch() {
       const marketNames={a:'A 股',us:'美股',hk:'港股',futures:'国内期货',ny_futures:'纽约期货',fx:'外汇',currency:'数字货币合约',currency_spot:'数字货币现货'};
@@ -1034,6 +1084,7 @@
       for(const frequency of POINT_PERIODS)$('period-point-'+frequency).value='all';
     }
     function resetFilters(origin='screening') {
+      cancelSelectionRestore();
       state.filters=defaultFilters(origin);state.queuePage=1;
       $('signal-search').value='';$('sector-search').value='';
       for(const id of ['market-filter','frequency-filter','review-filter','stage-filter','risk-filter','lower-status-filter','higher-context-filter','center-order-filter','age-filter','gain-filter'])$(id).value='all';
@@ -1078,9 +1129,9 @@
     for(const frequency of POINT_PERIODS)$('period-point-'+frequency).addEventListener('change',()=>{
       state.filters.period_points[frequency]=$('period-point-'+frequency).value;
       state.filters.point='all';state.filters.frequency='all';$('frequency-filter').value='all';
-      state.queuePage=1;renderQueue();
+      state.queuePage=1;renderQueue({userAction:true});
     });
-    $('period-point-clear').addEventListener('click',()=>{resetPeriodPointFilters();state.queuePage=1;renderQueue();});
+    $('period-point-clear').addEventListener('click',()=>{resetPeriodPointFilters();state.queuePage=1;renderQueue({userAction:true});});
     $('scope').addEventListener('change',updateScope);
     $('screen-strategy').addEventListener('change',updateScreenMode);
     $('screen-frequency').addEventListener('change',updateScreenMode);
@@ -1089,7 +1140,7 @@
     $('screen-form').addEventListener('submit',event=>{event.preventDefault();return changeRun('start');});
     $('cancel').addEventListener('click',()=>changeRun('cancel'));
     document.querySelectorAll('[data-point]').forEach(b=>b.addEventListener('click',()=>{
-      resetPeriodPointFilters();state.filters.point=b.dataset.point;state.queuePage=1;renderQueue();
+      resetPeriodPointFilters();state.filters.point=b.dataset.point;state.queuePage=1;renderQueue({userAction:true});
     }));
     let chartObserver=null;
     function activateChart(){state.chartVisible=true;if(chartObserver){chartObserver.disconnect();chartObserver=null;}}
@@ -1098,17 +1149,20 @@
       ['point-status-filter','point_status'],['lower-status-filter','lower_status'],['higher-context-filter','higher'],['center-order-filter','center_order'],['age-filter','age'],['gain-filter','gain'],['sort-filter','sort']])
       $(id).addEventListener('change',()=>{
         if(key==='frequency')resetPeriodPointFilters();
-        state.filters[key]=$(id).value;state.queuePage=1;renderQueue();
+        state.filters[key]=$(id).value;state.queuePage=1;renderQueue({userAction:true});
       });
-    $('signal-search').addEventListener('input',()=>{state.filters.query=$('signal-search').value;state.queuePage=1;renderQueue();});
+    $('signal-search').addEventListener('input',()=>{state.filters.query=$('signal-search').value;state.queuePage=1;renderQueue({userAction:true});});
     $('sector-search').addEventListener('input',renderSectors);
     $('sector-more').addEventListener('click',()=>{state.sectorExpanded=!state.sectorExpanded;renderSectors();});
-    $('queue-prev').addEventListener('click',()=>{state.queuePage--;clearSelection();renderQueue();if(phone)$('mobile-workspace-tabs')?.scrollIntoView?.({block:'start'});});
-    $('queue-next').addEventListener('click',()=>{state.queuePage++;clearSelection();renderQueue();if(phone)$('mobile-workspace-tabs')?.scrollIntoView?.({block:'start'});});
+    $('queue-prev').addEventListener('click',()=>{state.queuePage--;clearSelection();renderQueue({userAction:true});if(phone)$('mobile-workspace-tabs')?.scrollIntoView?.({block:'start'});});
+    $('queue-next').addEventListener('click',()=>{state.queuePage++;clearSelection();renderQueue({userAction:true});if(phone)$('mobile-workspace-tabs')?.scrollIntoView?.({block:'start'});});
     $('reset').addEventListener('click',()=>{
       resetFilters();renderSectors();renderQueue();
     });
-    $('refresh').addEventListener('click',()=>{void refresh(true);void refreshQuotes();});
+    $('refresh').addEventListener('click',()=>{
+      if(state.selected)state.detailRetries.delete(candidateDetailKey(state.selected));
+      void refresh(true);void refreshQuotes();
+    });
     $('watch-group').addEventListener('change',()=>void refreshWatch());$('watch-refresh').addEventListener('click',()=>void refreshWatch());
     $('auto-quotes').addEventListener('change',()=>void refreshQuotes());
     $('chart-layout').addEventListener('change',()=>{activateChart();renderChart();});$('chart-reload').addEventListener('click',()=>{activateChart();renderChart(true);});

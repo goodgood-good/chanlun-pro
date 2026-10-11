@@ -15,4 +15,7 @@ def test_index_exposes_csrf_protected_logout_command():
     assert 'action="/logout"' in source
     assert 'name="csrf_token"' in source
     assert 'id: "logout"' in source
-    assert 'document.getElementById("logout-form").submit()' in source
+    # Preserve the submit event so the shared layer can refresh an old token.
+    assert 'document.getElementById("logout-form")' in source
+    assert 'logoutForm.requestSubmit()' in source
+    assert 'refreshCsrfToken().then(function () { logoutForm.submit(); })' in source

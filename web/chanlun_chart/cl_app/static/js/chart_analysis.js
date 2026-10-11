@@ -101,6 +101,19 @@
     if (registry) registry.activeManagerId = managerId;
     return manager;
   }
+  function selectedIdentity() {
+    const manager = currentManager();
+    if (!manager) return null;
+    let identity;
+    try { identity = manager.getCurrentChartIdentity?.() || manager.widget?.symbolInterval?.(); } catch (_) { return null; }
+    const symbol = String(identity?.symbol || '');
+    const separator = symbol.indexOf(':');
+    if (separator < 1 || separator === symbol.length - 1) return null;
+    const market = symbol.slice(0, separator).toLowerCase();
+    if (!['a','hk','us','fx','futures','ny_futures','currency','currency_spot'].includes(market)) return null;
+    return Object.freeze({managerId: managerKey(manager), market,
+      code: symbol.slice(separator + 1), interval: String(identity.interval || '')});
+  }
   function syncChartTarget(manager) {
     const select = root.document?.getElementById('ca-chart-target');
     if (!select) return;
@@ -262,5 +275,5 @@
     if (root.document.readyState === 'loading') root.document.addEventListener('DOMContentLoaded', init, {once: true});
     else init();
   }
-  return {formatPrice, formatResolution, summarizeChartData, segmentStatusText, layerIsVisible, setLayerVisibility, refresh, init};
+  return {formatPrice, formatResolution, summarizeChartData, segmentStatusText, layerIsVisible, setLayerVisibility, selectedIdentity, refresh, init};
 });

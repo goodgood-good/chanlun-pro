@@ -791,6 +791,7 @@
   <script src="{{ url_for('static', filename='js/charts.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_line_states.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/chart_analysis.js') }}?asset={{ static_asset_token }}"></script>
+  <script src="{{ url_for('static', filename='js/chart_navigation.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/macd_stats.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/zixuan.js') }}?asset={{ static_asset_token }}"></script>
   <script src="{{ url_for('static', filename='js/bkgn.js') }}?asset={{ static_asset_token }}"></script>
@@ -1486,7 +1487,9 @@
                 '<div><i class="layui-icon layui-icon-logout"></i> <span>退出登录</span></div>',
               id: "logout",
             },
-          ].filter(function (item) { return !window.WorkspaceDevice?.isPhone || item.id !== 7; }),
+          ].filter(function (item) {
+            return item.id !== 7 || (!window.WorkspaceDevice?.isPhone && !window.ChartNavigation.isManagedLayout(window));
+          }),
           click: function (item) {
             var workspacePages = {
               workspace_trading: "/",
@@ -1503,22 +1506,30 @@
                 location.assign(destination);
               }
             } else if (item.id === "logout") {
-              document.getElementById("logout-form").submit();
+              var logoutForm = document.getElementById("logout-form");
+              if (typeof logoutForm.requestSubmit === 'function') logoutForm.requestSubmit();
+              else window.AppRequest.refreshCsrfToken().then(function () { logoutForm.submit(); })
+                .catch(function () { layer.msg('退出请求未完成，请稍后重试'); });
             } else if (item.id === "collapse_menu") {
               // 由 ChartMenuResize 模块挂载到 window 上的接口（在底部 IIFE 中暴露）
               if (window.ChartMenuResize && typeof window.ChartMenuResize.collapse === 'function') {
                 window.ChartMenuResize.collapse();
               }
             } else if (item.id === 1) {
+              var selectedIdentity = window.ChartAnalysis?.selectedIdentity();
+              if (!selectedIdentity) {
+                layer.msg("所选图表尚未就绪，请稍后打开显示设置");
+                return;
+              }
               layer.open({
                 type: 2,
                 title: "结构显示设置",
                 area: ["1100px", "90vh"],
                 content:
                   "/get_cl_config/" +
-                  Utils.get_market() +
+                  encodeURIComponent(selectedIdentity.market) +
                   "/" +
-                  Utils.get_code().replace("/", "__"),
+                  encodeURIComponent(selectedIdentity.code.replace(/\//g, "__")),
                 anim: 1,
                 fixed: true,
                 shadeClose: true,
@@ -1534,11 +1545,18 @@
                 shadeClose: true,
               });
             } else if (["single", "horizontal-2", "horizontal-7-3", "vertical-2", "three", "four"].indexOf(item.id) !== -1) {
-              Utils.set_local_data("chart_layout_type", item.id);
-              if (window.AccountPreferences && typeof window.AccountPreferences.reloadAfterSave === "function") {
-                window.AccountPreferences.reloadAfterSave();
+              if (window.ChartNavigation.isManagedLayout(window)) {
+                layer.msg('请使用外层工作台的“布局”控件切换图表布局');
+                return;
+              }
+              var layout = window.WorkspaceDevice?.layout(item.id) || item.id;
+              var layoutTarget = window.ChartNavigation.layoutUrl(window, layout);
+              if (!layoutTarget) return;
+              Utils.set_local_data("chart_layout_type", layout);
+              if (window.AccountPreferences && typeof window.AccountPreferences.navigateAfterSave === "function") {
+                window.AccountPreferences.navigateAfterSave(layoutTarget, false);
               } else {
-                location.reload();
+                location.assign(layoutTarget);
               }
             } else if (item.id === 8) {
               let theme = Utils.get_local_data("theme");

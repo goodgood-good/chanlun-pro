@@ -76,3 +76,15 @@ test('an invalid or removed target value cannot move the sidebar away from its l
   assert.equal(ui.get('ca-chart-target').value,'second-instance');
   assert.match(ui.get('ca-current-symbol').textContent,/SZ\.000001/);
 });
+
+test('settings identity is captured from the selected instance and never guessed for an unqualified symbol',()=>{
+  const ui=page();ui.choose('second-instance');
+  const captured=ui.sandbox.ChartAnalysis.selectedIdentity();
+  assert.equal(captured.market,'a');assert.equal(captured.code,'SZ.000001');
+  assert.equal(captured.interval,'30');assert.equal(Object.isFrozen(captured),true);
+  ui.second.identity={symbol:'US:AAPL.US',interval:'5'};
+  assert.equal(captured.code,'SZ.000001');
+  assert.equal(ui.sandbox.ChartAnalysis.selectedIdentity().market,'us');
+  ui.second.identity={symbol:'AAPL.US',interval:'5'};
+  assert.equal(ui.sandbox.ChartAnalysis.selectedIdentity(),null);
+});

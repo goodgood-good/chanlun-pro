@@ -32,7 +32,7 @@ class Element {
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0]||null; }
 }
-function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=false) {
+function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=false, sessionStorage=null) {
   const elements = new Map();
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   for (const [id, value] of Object.entries({scope:'all_a', codes:'', recent:'5', anchor:'20', workers:'12', 'max-gain':'10','chart-layout':'single',
@@ -75,7 +75,7 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
       },
     },
     fetch, URL:PageURL, URLSearchParams, Date:PageDate, Blob, AbortSignal, location:{origin:'http://local'},
-    AccountPreferences:preferences,WorkspaceDevice:{isPhone:phone},
+    AccountPreferences:preferences,WorkspaceDevice:{isPhone:phone},...(sessionStorage?{sessionStorage}:{}),
     setTimeout:(fn,delay) => {timerDelays.push(delay);return timers.push(fn);}, clearTimeout:id=>{timers[id-1]=()=>{};},
   };
   vm.runInNewContext(source,sandbox);
@@ -1665,4 +1665,185 @@ test('editing a review while its previous version is saving preserves the newer 
   assert.match(ui.get('review-message').textContent,/未保存草稿/);
   await ui.get('refresh').listeners.click();await settle();
   assert.equal(ui.get('review-notes').value,'new observation during save');
+});
+
+function compactDetailCase(){
+  const data=withCandidate();data.compact=true;
+  data.status={...data.status,evidence_version:'evidence',result_reader_revision:'reader',live_recheck_version:'live'};
+  data.candidates[0]={...data.candidates[0],detail_loaded:false,candidate_evidence_version:'proof'};
+  return data;
+}
+const detailResult=data=>({source:data.source,evidence_version:data.status.evidence_version,
+  result_reader_revision:data.status.result_reader_revision,candidate:{...data.candidates[0],detail_loaded:true}});
+function sessionFixture(){
+  const values=new Map();
+  return {values,getItem:key=>values.get(key)||null,setItem:(key,value)=>values.set(key,String(value))};
+}
+function pagedCandidates(){
+  const data=withCandidate(),base=data.candidates[0];
+  data.candidates=Array.from({length:120},(_,i)=>({...base,id:'n'+i,name:'n'+i,code:'SH.'+(600000+i),
+    point:{...base.point,point_id:'p'+i,status:'confirmed'}}));
+  return data;
+}
+
+test('temporary compact detail failure retries after backoff on unchanged status and restores review',async()=>{
+  const data=compactDetailCase();let online=false,reads=0;
+  const calls=[];
+  const ui=page(async(url,options)=>{
+    calls.push({url,method:options?.method});
+    if(url.startsWith('/screening/candidate?')){reads++;return online?response(detailResult(data)):response({error:'temporary offline'},503);}
+    return dispatch(data,url);
+  },undefined,false,true);await settle();
+  assert.equal(reads,1);assert.equal(ui.get('review-fields').disabled,true);
+  assert.match(ui.get('candidate-detail-state').textContent,/temporary offline.*自动重试/);
+  online=true;ui.advance(1999);await ui.timers[0]();await settle();
+  assert.equal(reads,1,'unchanged polling respects the retry deadline');
+  ui.advance(1);await ui.timers[0]();await settle();
+  assert.equal(reads,2);assert.equal(ui.get('review-fields').disabled,false);
+  assert.equal(ui.get('candidate-detail-state').textContent,'');
+  assert.equal(calls.filter(r=>r.method==='POST').length,0);
+});
+
+test('consecutive detail errors increase backoff and ordinary rerenders cannot bypass it',async()=>{
+  const data=compactDetailCase();let reads=0;
+  const ui=page(async url=>url.startsWith('/screening/candidate?')?(reads++,response({error:'unavailable'},503)):dispatch(data,url));await settle();
+  ui.advance(2000);await ui.timers[0]();await settle();assert.equal(reads,2);
+  ui.advance(4999);ui.get('signal-search').value='fixture';ui.get('signal-search').listeners.input();await settle();
+  await ui.timers[0]();await settle();assert.equal(reads,2);
+  ui.advance(1);await ui.timers[0]();await settle();assert.equal(reads,3);
+  ui.advance(14999);await ui.timers[0]();await settle();assert.equal(reads,3);
+  ui.advance(1);await ui.timers[0]();await settle();assert.equal(reads,4);
+});
+
+test('a terminal missing detail never loops automatically but explicit selection can retry',async()=>{
+  const data=compactDetailCase();let missing=true,reads=0;
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/candidate?')){reads++;return missing?response({error:'candidate missing'},404):response(detailResult(data));}
+    return dispatch(data,url);
+  });await settle();
+  for(let i=0;i<3;i++){ui.advance(60000);await ui.timers[0]();await settle();}
+  assert.equal(reads,1);assert.match(ui.get('candidate-detail-state').textContent,/不会自动重复请求/);
+  missing=false;ui.get('signal-list').children[0].listeners.click();await settle();
+  assert.equal(reads,2);assert.equal(ui.get('review-fields').disabled,false);
+});
+
+test('a new candidate evidence identity is not held behind an old terminal detail error',async()=>{
+  let data=compactDetailCase(),reads=0;
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/candidate?'))return ++reads===1?response({error:'candidate missing'},404):response(detailResult(data));
+    return dispatch(data,url);
+  });await settle();
+  data={...data,status:{...data.status,evidence_version:'new-evidence'},
+    candidates:[{...data.candidates[0],candidate_evidence_version:'new-proof'}]};
+  await ui.timers[0]();await settle();
+  assert.equal(reads,2);assert.equal(ui.get('review-fields').disabled,false);
+});
+
+test('same-key detail retry remains singular while pending and hidden pages do not retry',async()=>{
+  const data=compactDetailCase();let reads=0,release;
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/candidate?'))return ++reads===1?response({error:'offline'},503):new Promise(resolve=>{release=resolve;});
+    return dispatch(data,url);
+  });await settle();
+  ui.advance(60000);ui.setHidden(true);await ui.timers[0]();await settle();assert.equal(reads,1);
+  ui.setHidden(false);await ui.timers[0]();await settle();assert.equal(reads,2);
+  ui.advance(60000);await ui.timers[0]();await settle();assert.equal(reads,2);
+  ui.get('signal-list').children[0].listeners.click();await settle();assert.equal(reads,2);
+  release(response(detailResult(data)));await settle();assert.equal(ui.get('review-fields').disabled,false);
+});
+
+test('a late old-source detail error cannot poison the new selection retry state',async()=>{
+  let data=compactDetailCase(),release;
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/candidate?')) {
+      if(new URL(url,'http://local').searchParams.get('source')==='a')return new Promise(resolve=>{release=resolve;});
+      return response(detailResult(data));
+    }
+    return dispatch(data,url);
+  });await settle();
+  data={...data,source:'next',status:{...data.status,run_id:'next'},candidates:[{...data.candidates[0],id:'next-point',name:'next'}]};
+  await ui.timers[0]();await settle();
+  assert.match(ui.get('selected-title').textContent,/next/);assert.equal(ui.get('review-fields').disabled,false);
+  release(response({error:'late old error'},503));await settle();
+  assert.equal(ui.get('candidate-detail-state').textContent,'');assert.equal(ui.get('review-fields').disabled,false);
+});
+
+for(const phone of [false,true])test('same-run reload restores a saved later-page candidate then respects active filtering '+(phone?'phone':'desktop'),async()=>{
+  const data=pagedCandidates(),session=sessionFixture();
+  const first=page(async url=>dispatch(data,url),undefined,false,true,phone,session);await settle();
+  first.get('queue-next').click();first.get('queue-next').click();await settle();
+  const saved=phone?'n50':'n100';
+  assert.equal(session.getItem('screening-selection:tester:a'),saved);
+  const ui=page(async url=>dispatch(data,url),undefined,false,true,phone,session);await settle();
+  assert.match(ui.get('queue-page').textContent,/^3 \/ /);
+  assert.ok(ui.get('selected-title').textContent.startsWith(saved+' ·'));
+  assert.equal(ui.get('signal-list').children.find(card=>card.classList.contains('active')).dataset.id,saved);
+  ui.get('queue-prev').click();await settle();assert.match(ui.get('queue-page').textContent,/^2 \/ /);
+  ui.get('signal-search').value='SH.600000';ui.get('signal-search').listeners.input();await settle();
+  assert.match(ui.get('queue-page').textContent,/^1 \/ 1/);assert.match(ui.get('selected-title').textContent,/^n0 ·/);
+  ui.get('reset').click();await settle();assert.match(ui.get('queue-page').textContent,/^1 \/ /);
+  assert.match(ui.get('selected-title').textContent,/^n0 ·/);
+});
+
+test('late committed prefixes can restore the saved candidate without overwriting its identity early',async()=>{
+  const all=pagedCandidates(),session=sessionFixture();session.setItem('screening-selection:tester:a','n100');
+  let data={...all,candidates:all.candidates.slice(0,20),status:{...all.status,status:'running',results_loading:true,results_available:true,completed:20}};
+  const ui=page(async url=>dispatch(data,url),undefined,false,true,false,session);await settle();
+  assert.equal(session.getItem('screening-selection:tester:a'),'n100');
+  data=all;await ui.timers[0]();await settle();
+  assert.match(ui.get('queue-page').textContent,/^3 \/ 3/);assert.match(ui.get('selected-title').textContent,/^n100 ·/);
+});
+
+test('a user filter during prefix loading cancels deferred selection restoration',async()=>{
+  const all=pagedCandidates(),session=sessionFixture();session.setItem('screening-selection:tester:a','n100');
+  let data={...all,candidates:all.candidates.slice(0,20),status:{...all.status,status:'running',results_loading:true,results_available:true,completed:20}};
+  const ui=page(async url=>dispatch(data,url),undefined,false,true,false,session);await settle();
+  ui.get('signal-search').value='SH.600000';ui.get('signal-search').listeners.input();await settle();
+  assert.match(ui.get('selected-title').textContent,/^n0 ·/);
+  data=all;await ui.timers[0]();await settle();
+  assert.match(ui.get('queue-page').textContent,/^1 \/ 1/);assert.match(ui.get('selected-title').textContent,/^n0 ·/);
+});
+
+test('expired saved IDs and another run never redirect a new page to an unrelated later row',async()=>{
+  const data=pagedCandidates(),session=sessionFixture();session.setItem('screening-selection:tester:a','missing');
+  session.setItem('screening-selection:tester:other','n100');
+  const ui=page(async url=>dispatch(data,url),undefined,false,true,false,session);await settle();
+  assert.match(ui.get('queue-page').textContent,/^1 \/ 3/);assert.match(ui.get('selected-title').textContent,/^n0 ·/);
+});
+
+test('HTML 404 detail response stops automatic retries and explicit refresh can recover',async()=>{
+  const data=compactDetailCase();let missing=true,reads=0;
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/candidate?')) {
+      reads++;
+      return missing?{ok:false,status:404,redirected:false,json:async()=>{throw SyntaxError('HTML error page');}}:response(detailResult(data));
+    }
+    return dispatch(data,url);
+  });await settle();
+  assert.match(ui.get('candidate-detail-state').textContent,/不会自动重复请求/);
+  for(let i=0;i<3;i++){ui.advance(60000);await ui.timers[0]();await settle();}
+  assert.equal(reads,1);
+  missing=false;ui.get('refresh').click();await settle();
+  assert.equal(reads,2);assert.equal(ui.get('review-fields').disabled,false);
+});
+
+test('manual selection is saved even while its compact detail is unavailable',async()=>{
+  const data=compactDetailCase(),session=sessionFixture();
+  data.candidates.push({...data.candidates[0],id:'second',name:'Second'});
+  const ui=page(async url=>url.startsWith('/screening/candidate?')?response({error:'offline'},503):dispatch(data,url),
+    undefined,false,true,false,session);await settle();
+  ui.get('signal-list').children[1].click();await settle();
+  assert.equal(session.getItem('screening-selection:tester:a'),'second');
+  const restored=page(async url=>url.startsWith('/screening/candidate?')?response({error:'offline'},503):dispatch(data,url),
+    undefined,false,true,false,session);await settle();
+  assert.match(restored.get('selected-title').textContent,/Second/);
+  assert.equal(restored.get('review-fields').disabled,true);
+});
+
+test('a saved watchlist selection excluded by default scope cannot block a running candidate prefix',async()=>{
+  const all=pagedCandidates(),session=sessionFixture();session.setItem('screening-selection:tester:a','watch:us:TSLA.US');
+  const data={...all,candidates:all.candidates.slice(0,20),status:{...all.status,status:'running',results_loading:true,results_available:true,completed:20}};
+  const ui=page(async url=>dispatch(data,url),undefined,false,true,false,session);await settle();
+  assert.match(ui.get('selected-title').textContent,/^n0 ·/);
+  assert.equal(session.getItem('screening-selection:tester:a'),'n0');
 });

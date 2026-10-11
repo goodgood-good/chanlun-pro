@@ -314,7 +314,12 @@ def create_app(test_config=None):
                 "code": "csrf_failed",
                 "errmsg": "CSRF token is missing or expired.",
             }, 400
-        return render_template("login.html", emsg=error.description), 400
+        return render_template(
+            "login.html",
+            emsg=error.description,
+            login_username=normalize_login_username(request.form.get("username") or ""),
+            login_next=_login_destination(request.form.get("next") or request.args.get("next")),
+        ), 400
 
     from .services.account_preferences import (
         InvalidAccountPreferences,
