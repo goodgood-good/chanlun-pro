@@ -74,13 +74,12 @@ def test_unfinished_comparison_needs_momentum_and_turn_evidence_and_reaches_read
     assert {c["alert"]["comparison_form"] for c in selected} == {"entry_departure", "center_oscillation"}
 
 
-@pytest.mark.parametrize("fault", ["area", "momentum", "new_extreme", "no_turn", "locked"])
+@pytest.mark.parametrize("fault", ["area", "momentum", "new_extreme", "locked"])
 def test_small_partial_area_alone_cannot_trigger_and_later_strength_can_refute(fault):
     values, center, strength, frame, hist = sample()
     if fault == "area": strength = Areas({u.unit_id: 20. for u in values})
     elif fault == "momentum": hist[-1] = 7.
     elif fault == "new_extreme": frame.loc[40, "high"] = 126.
-    elif fault == "no_turn": frame.loc[36, "high"] = 125.
     elif fault == "locked": values = (*values[:-1], replace(values[-1], locked=True, confirmed_at=values[-1].available_at))
     assert not build((values, center, strength, frame, hist))
 
@@ -106,24 +105,23 @@ def test_a_completed_tail_confirms_the_same_hypothesis_without_projecting_a_fake
     assert {p["hypothesis_id"] for p in previews} <= {c["hypothesis_id"] for c in confirmed}
 
 
-@pytest.mark.parametrize('fault,reason',[('momentum','MOMENTUM_RECOVERED'),('price','PRICE_EXTREME_BROKEN'),('turn','LOCAL_TURN_CHANGED')])
+@pytest.mark.parametrize('fault,reason',[('momentum','MOMENTUM_RECOVERED'),('price','PRICE_EXTREME_BROKEN')])
 def test_negative_checks_explain_the_current_failed_gate_without_altering_alert_rules(fault,reason):
     values,center,strength,frame,hist=sample()
     if fault=='momentum':hist[-1]=7.
     elif fault=='price':frame.loc[40,'high']=126.
-    else:frame.loc[36,'high']=125.
     checks={}
     result=build_native_consolidation_previews(values,(center,),strength,frame,hist,as_of=frame.date.iloc[-1],diagnostics=checks)
     assert not result and checks['reason_code']==reason
     assert checks['source_closed_at']==int(frame.date.iloc[-1].timestamp())
 
 
-@pytest.mark.parametrize("fault", ["future", "turn", "momentum", "basis", "source", "ratio", "confirmed"])
+@pytest.mark.parametrize("fault", ["future", "momentum", "recovered", "basis", "source", "ratio", "confirmed"])
 def test_frozen_preview_rejects_forged_or_future_evidence(fault):
     parts = sample(); alerts = build(parts); source = snapshot(parts, alerts)
     alert = deepcopy(alerts[0])
     if fault == "future": alert["momentum_times"][-1] = source["source_closed_at"] + 1
-    elif fault == "turn": alert["turn_prices"][1] = min(alert["turn_prices"])
+    elif fault == "recovered": alert["momentum_latest"] = alert['momentum_values'][-1]+1
     elif fault == "momentum": alert["momentum_values"].reverse()
     elif fault == "basis": alert["price_basis_revision"] = "different"
     elif fault == "source": alert["source_unit_ids"].pop(0)

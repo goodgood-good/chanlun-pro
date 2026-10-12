@@ -18,6 +18,8 @@ def rendered(tag, periods):
 
 
 def box_at(tmp_path, clock, event, images):
+    if event.get('signal_type') == 'consolidation_divergence':
+        event = {**event, 'inline_chart':True}  # Exercise legacy combined receipts.
     transport = ImageTransport()
     box = DingTalkOutbox(tmp_path / 'outbox.sqlite', transport=transport,
                         now=lambda: clock[0], charts=True, signal_validator=lambda rows: (rows, []))

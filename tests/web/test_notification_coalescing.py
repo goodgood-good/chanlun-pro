@@ -93,7 +93,7 @@ def test_holding_risk_and_inline_consolidation_bypass_ordinary_packet_joining(tm
     box.charts = Mock()
     values = [notice('ordinary'), notice('holding', holding=True),
               notice('risk', signal_type='holding_risk', point_type='risk_stop', stage='triggered'),
-              notice('warning', signal_type='consolidation_divergence', point_type='consolidation_up', stage='warning')]
+              notice('warning', signal_type='consolidation_divergence', point_type='consolidation_up', stage='warning', inline_chart=True)]
     for value in values:
         box.signal_events([value], since=0)
     rows = packets(box)
@@ -338,7 +338,7 @@ def test_waiting_without_an_http_request_does_not_idle_before_another_ready_noti
     waiting = notice('waiting', holding=True)
     if blocked_by == 'inline_image':
         box.charts = Mock()
-        waiting.update(signal_type='consolidation_divergence', point_type='consolidation_up', stage='warning')
+        waiting.update(signal_type='consolidation_divergence', point_type='consolidation_up', stage='warning', inline_chart=True)
     box.signal_events([waiting], since=0)
     box.signal_events([notice('ready')], since=0)
     assert capture_next_wait(box) <= .1

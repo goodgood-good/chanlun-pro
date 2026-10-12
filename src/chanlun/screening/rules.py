@@ -1174,6 +1174,7 @@ def native_consolidation_source_valid(snapshot, alert):
 
 def _native_consolidation_warning_source_valid(snapshot, alert):
     from chanlun.core.strict_structure.native_consolidation_preview import PREVIEW_RULE, hypothesis_id
+    from chanlun.core.strict_structure.preview_momentum import contraction_source_valid
     try:
         units = snapshot["screening_segments"]
         by_id = {u["unit_id"]: u for u in units}
@@ -1192,7 +1193,7 @@ def _native_consolidation_warning_source_valid(snapshot, alert):
         tail = by_id[c_ids[-1]]
         chain = units[position[a_ids[0]]:position[c_ids[-1]] + 1]
         if (tail is not units[-1] or tail["locked"] or tail["confirmed_at"] is not None
-                or tail["available_at"] > known or not tail["start_time"] < tail["end_time"] < known
+                or tail["available_at"] > known or not tail["start_time"] < tail["end_time"] <= known
                 or position[a_ids[-1]] >= position[c_ids[0]]
                 or [u["unit_id"] for u in chain] != alert["source_unit_ids"]
                 or any(not _causally_locked_role(u, known) for u in chain[:-1])
@@ -1229,8 +1230,21 @@ def _native_consolidation_warning_source_valid(snapshot, alert):
             return False
         a, c = alert["macd_area_a"], alert["macd_area_c"]
         times, momentum = alert["momentum_times"], alert["momentum_values"]
-        turns, prices = alert["turn_times"], alert["turn_prices"]
+        turns, prices = alert.get("turn_times",[]), alert.get("turn_prices",[])
         start = by_id[c_ids[0]]["start_time"]
+        early = alert.get('preview_trigger') == 'macd_first_contraction'
+        if early:
+            timing_valid = contraction_source_valid(alert,tail['start_time'],known)
+        elif alert.get('preview_trigger') is None:
+            timing_valid = (len(times) == len(momentum) == len(turns) == len(prices) == 3
+                and all(type(t) is int for t in (*times,*turns))
+                and start <= times[0] < times[1] < times[2] <= known
+                and momentum[0] > momentum[1] > momentum[2] >= 0
+                and turns[0] < turns[1] == alert['anchor_at'] < turns[2] <= known
+                and (prices[1] > max(prices[0],prices[2]) if tail['direction']=='up'
+                     else prices[1] < min(prices[0],prices[2])))
+        else:
+            timing_valid = False
         identity = hypothesis_id(center["center_id"], form, a_ids, start, tail["direction"], snapshot["price_basis_revision"])
         return (
             alert["alert_id"] == alert["hypothesis_id"] == identity
@@ -1242,13 +1256,7 @@ def _native_consolidation_warning_source_valid(snapshot, alert):
             and all(type(v) in (int, float) and math.isfinite(v) for v in (a, c, *momentum, *prices))
             and 0 < 2 * c < a and alert["estimated_area_c"] == 2 * c and alert["estimate_factor"] == 2
             and alert["macd_area_ratio"] == c / a
-            and len(times) == len(momentum) == len(turns) == len(prices) == 3
-            and all(type(t) is int for t in (*times, *turns))
-            and start <= times[0] < times[1] < times[2] <= known
-            and momentum[0] > momentum[1] > momentum[2] >= 0
-            and turns[0] < turns[1] == alert["anchor_at"] < turns[2] <= known
-            and (prices[1] > max(prices[0], prices[2]) if tail["direction"] == "up"
-                 else prices[1] < min(prices[0], prices[2]))
+            and timing_valid
         )
     except (KeyError, TypeError, ValueError, IndexError, StopIteration):
         return False

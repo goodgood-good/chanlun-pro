@@ -34,6 +34,7 @@ ROW_FIELDS = {
     "external_notifications",
     "notification_suppressed_reason",
     "notification_expires_at",
+    'preview_trigger','estimated_area_c','estimate_factor',
     "change",
     "anchor_price",
     "signal_type",

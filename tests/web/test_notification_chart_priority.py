@@ -15,6 +15,7 @@ from tests.test_holding_consolidation_pipeline import holding_run as holding_run
 
 def inline_event(identity, stamp=1000, frequency='5m'):
     return {**image_event(stamp=stamp, identity=identity), 'frequency': frequency,
+            'inline_chart':True,  # Recovery of a legacy combined notification.
             'signal_type': 'consolidation_divergence', 'point_type': 'consolidation_up',
             'stage': 'warning', 'point_status': 'warning'}
 

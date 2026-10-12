@@ -2,8 +2,9 @@
 
 Local author text: D:/缠论/chanlun_lesson_corpus/L024_*:310-319 (provisional
 MACD area), L020_*:427-454 (first return), L021_*:247-262 (second point),
-L061_*:97-121 (hypothesis/refutation). The closed-bar local turn and the
-conditional completion of one real unfinished segment are engineering gates.
+L061_*:97-121 (hypothesis/refutation). A first closed MACD contraction or a
+local price turn can initiate the conditional unfinished-segment preview.
+These are engineering triggers, not confirmed price/structure reversals.
 They never make the actual segment, center or point confirmed.
 """
 from copy import deepcopy
@@ -15,17 +16,18 @@ from .identity import stable_structure_id
 from .models import CenterState
 from .native_center_signals import build_native_center_signals
 from .strength import _comparison_leg, MacdStrengthUnavailable
+from .preview_momentum import contraction_witness, contraction_source_valid
 
 PREVIEW_RULE = 'native_point_unconfirmed_v1'
 PREVIEW_AUDIT = ('cold_rebuild', 'closed_bar_replay')
 
 
-def preview_codes(point):
+def preview_codes(point, trigger='closed_local_turn'):
     names = {'completed_third_class_departure':'forming_third_class_departure',
              'native_macd_histogram_area_decay':'provisional_macd_area_margin',
              'first_complete_retest_held':'first_unfinished_retest_held',
              'first_complete_return_held_core':'first_unfinished_return_holds_core'}
-    return [names.get(code,code) for code in point['evidence_codes']] + ['closed_local_turn','conditional_point_preview']
+    return [names.get(code,code) for code in point['evidence_codes']] + [trigger,'conditional_point_preview']
 
 
 def is_point_preview(point):
@@ -53,14 +55,22 @@ def build_point_previews(units, centers, strength, bars, histogram, *, as_of, se
     if any(not math.isfinite(hist) for _, hist in closed):
         return []
     pivot = next((i for i, (bar, _) in enumerate(closed) if bar.date == tail.market_end), None)
-    if pivot is None or pivot < 1 or pivot + 1 >= len(closed):
+    if pivot is None:
         return []
-    left, middle, right = [bar for bar, _ in closed[pivot-1:pivot+2]]
     up = tail.direction == 'up'
     price = lambda bar: getattr(bar, 'high' if up else 'low') if hasattr(bar, 'high') else getattr(bar, 'h' if up else 'l')
-    if not (price(middle) > max(price(left), price(right)) if up else price(middle) < min(price(left), price(right))):
-        return []
+    middle = closed[pivot][0]
     if any((price(bar) > price(middle) if up else price(bar) < price(middle)) for bar, _ in closed[pivot+1:]):
+        return []
+    turn = {}
+    if 0 < pivot < len(closed)-1:
+        left, _, right = [bar for bar, _ in closed[pivot-1:pivot+2]]
+        if price(middle) > max(price(left),price(right)) if up else price(middle) < min(price(left),price(right)):
+            turn = {'turn_times':[int(bar.date.timestamp()) for bar in (left,middle,right)],
+                    'turn_prices':[float(price(bar)) for bar in (left,middle,right)]}
+    contraction, _ = contraction_witness([bar for bar,_ in closed], [hist for _,hist in closed],
+                                        tail.direction, tail.market_start)
+    if not turn and not contraction:
         return []
     projected_tail = replace(tail, locked=True, forming=False, confirmed_at=as_of, available_at=as_of)
     projected_units = (*values[:tail_index], projected_tail, *values[tail_index+1:])
@@ -87,34 +97,35 @@ def build_point_previews(units, centers, strength, bars, histogram, *, as_of, se
         center = originals.get(point['center_id'])
         if center is None or point.get('view_id') != center.view_id:
             continue
-        witness = {'turn_times':[int(bar.date.timestamp()) for bar in (left,middle,right)],
-                   'turn_prices':[float(price(bar)) for bar in (left,middle,right)]}
+        trigger = 'macd_first_contraction' if contraction else 'closed_local_turn'
+        witness = {**turn, **(contraction or {}), 'preview_trigger':trigger}
         if point['point_type'].startswith('1'):
-            sign = 1 if up else -1
-            momentum = [max(0., sign*hist) for _,hist in closed]
-            weakening = next((i for i in range(len(momentum)-1,max(1,pivot),-1)
-                              if momentum[i-2]>momentum[i-1]>momentum[i]), None)
-            if weakening is None or any(value>momentum[weakening] for value in momentum[weakening+1:]):
+            if not contraction:
                 continue
             try:
                 divergence = point['divergence']
                 a = _comparison_leg(tuple(by_id[key] for key in divergence['compare_leg_unit_ids']))
                 c = _comparison_leg(tuple(by_id[key] for key in divergence['signal_leg_unit_ids']))
                 area_a, area_c = (strength.snapshot(leg.measurement_unit).histogram_area for leg in (a,c))
-                factor = 2 if tail.forming else 1
+                factor = 2 if tail.forming or not turn else 1
+                if factor == 2:
+                    # The still-running leg includes every closed same-direction
+                    # column observed after its current price extreme as well.
+                    sign = 1 if up else -1
+                    area_c += sum(max(0., sign*hist) for bar,hist in closed if bar.date > c.measurement_unit.market_end)
                 if not area_a or not area_c or not 0 < factor*area_c < area_a:
                     continue
             except (KeyError, ValueError, TypeError, MacdStrengthUnavailable):
                 continue
             witness.update(macd_area_a=area_a, macd_area_c=area_c, estimate_factor=factor,
-                           momentum_values=momentum[weakening-2:weakening+1])
+                           estimated_area_c=factor*area_c)
         hypothesis = point['preview_key']
         output.append({**point, 'point_id':stable_structure_id(PREVIEW_RULE, hypothesis),
             'render_kind':'point_approaching', 'status':'approaching', 'strict_status':'approaching',
             'rule_basis':PREVIEW_RULE, 'member_basis':'native_unlocked_segment',
             'formal_point_issued':False, 'tradable':False, 'confirmed_at':None,
             'available_at':int(as_of.timestamp()), 'missing_conditions':['unfinished_segment_lock'],
-            'evidence_codes':preview_codes(point),
+            'evidence_codes':preview_codes(point, trigger),
             'terminal_start_at':int(tail.market_start.timestamp()), 'terminal_end_at':int(tail.market_end.timestamp()),
             'preview_witness':witness,
             'preview_projection':{'point':point, 'center':serialize_center(projected[point['center_id']])}})
@@ -151,7 +162,9 @@ def preview_source_valid(snapshot, point, centers, units):
                    'render_id','points','anchor_price','invalidation_price','center_zd_price','center_zg_price','evidence_codes'}
         if any(point.get(key) != value for key,value in formal.items() if key not in changed):
             return False
-        if point.get('evidence_codes') != preview_codes(formal):
+        witness=point['preview_witness']
+        trigger=witness.get('preview_trigger','closed_local_turn')
+        if trigger not in {'closed_local_turn','macd_first_contraction'} or point.get('evidence_codes') != preview_codes(formal,trigger):
             return False
         expected_key = stable_structure_id('native-point-lifecycle-v1', point['price_basis_revision'],
             point['point_type'],point['center_id'],tail['start_time'],
@@ -160,19 +173,25 @@ def preview_source_valid(snapshot, point, centers, units):
             return False
         if formal.get('confirmed_at') != cutoff or formal.get('status') != 'confirmed' or formal.get('formal_point_issued') is not True:
             return False
-        witness=point['preview_witness']
-        times, prices=witness['turn_times'],witness['turn_prices']
-        if (len(times)!=3 or len(prices)!=3 or not times[0]<times[1]<times[2]<=cutoff
-                or times[1]!=tail['end_time'] or not all(math.isfinite(value) for value in prices)
-                or not (prices[1]>max(prices[0],prices[2]) if tail['direction']=='up' else prices[1]<min(prices[0],prices[2]))):
+        times,prices=witness.get('turn_times',[]),witness.get('turn_prices',[])
+        turn_valid = (len(times)==len(prices)==3 and times[0]<times[1]<times[2]<=cutoff
+                      and times[1]==tail['end_time'] and all(math.isfinite(value) for value in prices)
+                      and (prices[1]>max(prices[0],prices[2]) if tail['direction']=='up' else prices[1]<min(prices[0],prices[2])))
+        if trigger == 'macd_first_contraction':
+            if not contraction_source_valid(witness,tail['start_time'],cutoff):
+                return False
+        elif not turn_valid:
+            return False
+        if times and not turn_valid:
             return False
         if point['point_type'].startswith('1'):
             a,c=witness['macd_area_a'],witness['macd_area_c']
             momentum=witness['momentum_values']
-            factor = 2 if tail.get('forming') else 1
+            factor = 2 if tail.get('forming') or not turn_valid else 1
             if (witness.get('estimate_factor') != factor
                     or not all(math.isfinite(value) for value in (a,c,*momentum)) or not 0<factor*c<a
-                    or len(momentum)!=3 or not momentum[0]>momentum[1]>momentum[2]>=0):
+                    or (trigger == 'closed_local_turn' and (len(momentum)!=3 or not momentum[0]>momentum[1]>momentum[2]>=0))
+                    or (trigger == 'macd_first_contraction' and witness.get('estimated_area_c') != factor*c)):
                 return False
         virtual = deepcopy(snapshot)
         virtual_units = [*units[:index],{**tail,'locked':True,'forming':False,'confirmed_at':cutoff,'available_at':cutoff},*units[index+1:]]

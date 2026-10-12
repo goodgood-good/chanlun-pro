@@ -19,7 +19,7 @@ REASONS = {
     "PRICE_EXTREME_BROKEN": "价格突破了原候选极值，原局部转折不再成立",
     "LOCAL_TURN_PENDING": "当前端点尚未形成已收盘行情支持的局部转折",
     "LOCAL_TURN_CHANGED": "端点附近价格结构变化，局部转折条件已不成立",
-    "MOMENTUM_CONTRACTION_LOST": "同向MACD柱不再满足连续两次收缩条件",
+    "MOMENTUM_CONTRACTION_LOST": "同向MACD柱未保持收缩条件",
     "MOMENTUM_RECOVERED": "同向MACD柱在收缩后重新扩大",
     "AREA_MARGIN_LOST": "当前面积对比已不满足提前预警门槛",
     "OPEN_SEGMENT_CHANGED": "原未完成段的状态或划分已更新",
@@ -127,12 +127,17 @@ def signal_status_lines(row):
     label = STAGES.get(status, status) if status is not None else ("已确认" if row["stage"] == "confirmed" else "筛选条件待齐")
     lines = [f"{row['frequency']} {POINTS.get(row['point_type'], row['point_type'])} · {label}"]
     if row.get('signal_type') == 'native_point_preview':
+        if row.get('stage') != 'invalidated' and row.get('preview_trigger') == 'macd_first_contraction':
+            lines.append('预判依据：MACD 同向柱开始缩短，当前结构条件满足。')
+        a, c, factor = number(row.get('macd_area_a')), number(row.get('macd_area_c')), number(row.get('estimate_factor'))
+        if row.get('stage') != 'invalidated' and a and c is not None and factor:
+            lines.append(f'MACD 已出现面积 C/A：{c/a:.1%}；按×{factor:g}估算：{factor*c/a:.1%}')
         if row.get('stage') == 'invalidated':
             lines.append('失效原因：'+row.get('invalidation_reason','原未确认条件已不成立'))
         else:
             lines += ['等待：末段线段确认', '当前为未确认预警，后续走势可能使其失效。']
             if row.get('preview_repriced'):
-                lines.append('上次预警的价格极值已被突破，当前局部转折重新满足预警条件。')
+                lines.append('上次预警的参考价格已被突破，当前重新满足未确认预警条件。')
     if row.get("signal_type") == "consolidation_divergence":
         direction = "向上" if row["point_type"] == "consolidation_up" else "向下"
         lines = [f"{row['frequency']} {direction}盘整背驰 · {label} · 持仓标的"]
@@ -147,7 +152,14 @@ def signal_status_lines(row):
         if ratio is not None and row.get("stage") != "invalidated":
             lines.append(f"MACD 同向柱面积比 C/A：{ratio:.1%}")
         if row.get("stage") == "warning":
-            lines += ["依据：面积偏弱、动能连续收缩及局部价格转折", "线段尚未完成，预警可被后续走势推翻。"]
+            if row.get('preview_trigger') == 'macd_first_contraction':
+                a, c = number(row.get('macd_area_a')), number(row.get('macd_area_c'))
+                if a and c is not None:
+                    lines.append(f'按当前面积×2估算，2C/A：{2*c/a:.1%}')
+                lines.append('预判依据：MACD 同向柱开始缩短，估算面积仍弱于参考段。')
+            else:
+                lines.append('依据：面积偏弱、动能连续收缩及局部价格转折')
+            lines.append('线段尚未完成，预警可被后续走势推翻。')
         elif row.get("stage") == "invalidated":
             lines.append("原预警已撤销，不代表新的买卖点。")
     lower = row.get("lower_confirmation_state")

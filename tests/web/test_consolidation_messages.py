@@ -1,4 +1,4 @@
-"""Consolidation messages are one frozen card, including withdrawal evidence."""
+"""Legacy combined cards remain recoverable; new alerts send text first."""
 
 from copy import deepcopy
 import json
@@ -10,7 +10,7 @@ from tests.web.test_notification_charts import ImageTransport, PNG
 from tests.web.test_notification_content import warning
 
 
-def alert(stage="warning", cycle=0, stamp=1000):
+def alert(stage="warning", cycle=0, stamp=1000, *, inline=True):
     return {
         **warning(),
         "stage": stage,
@@ -22,6 +22,7 @@ def alert(stage="warning", cycle=0, stamp=1000):
         "available_at": stamp,
         "lifecycle_cycle": cycle,
         "warning_reactivated": cycle > 0,
+        "inline_chart":inline,
         "evidence": {"status": "complete"},
         "evidence_run_id": "a" * 32,
         "invalidation_reason": "同向MACD柱在收缩后重新扩大",
@@ -85,10 +86,11 @@ def test_each_consolidation_stage_delivers_one_card_with_text_and_png(
 def test_snapshot_is_not_replaced_when_current_signal_has_newer_candles(combined):
     box, transport, clock, rendered = combined
     box.signal_validator = lambda rows: (
-        [{**e, "source_closed_at": 2000, "evidence_run_id": "b" * 32} for e in rows],
+        [{**e, "source_closed_at": clock[0], "evidence_run_id": "b" * 32} for e in rows],
         [],
     )
     box.signal_events([alert()], since=0)
+    clock[0] = 1001
     box.charts.process_one()
     box.deliver_one()
     with box._connect() as db:

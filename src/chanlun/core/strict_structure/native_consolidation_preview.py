@@ -2,8 +2,8 @@
 
 Local sources: D:/缠论/chanlun_lesson_corpus/L061_*:97-121 (hypothesis and
 refutation), L024_*:310-319 (conditional area estimate), 334-379 (inside /
-departure comparisons). The two shrinking closed bars and three-candle local
-turn below are engineering gates, not an author's exact fractal definition.
+departure comparisons). The first shrinking closed MACD column is an
+engineering trigger; neither a price turn nor a segment lock is required.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from chanlun.core.strict_structure.models import CenterRelation, CenterState
 from chanlun.core.strict_structure.center_relation import classify_center_relation
 from chanlun.core.strict_structure.native_center_signals import _center_sources_known
 from chanlun.core.strict_structure.strength import center_entry_comparison_leg, _comparison_leg
+from .preview_momentum import contraction_witness
 
 PREVIEW_RULE = "native_consolidation_early_v1"
 PREVIEW_AUDIT = ("cold_rebuild", "closed_bar_replay")
@@ -31,7 +32,7 @@ def _connected(values):
 
 
 def build_native_consolidation_previews(units, centers, strength, frame, histogram, *, as_of, diagnostics=None):
-    """Require a real unlocked tail, weak area, closed momentum and a local turn."""
+    """Compare a real unfinished leg as soon as closed MACD starts contracting."""
     values = tuple(units)
     diagnostics = diagnostics if diagnostics is not None else {}
     diagnostics.update(schema="native-preview-checks-v1", source_closed_at=int(as_of.timestamp()),
@@ -57,14 +58,10 @@ def build_native_consolidation_previews(units, centers, strength, frame, histogr
         raise ValueError("preview MACD and closed bars must share the exact cutoff")
     positions = {date: i for i, date in enumerate(dates)}
     pivot = positions.get(tail.market_end)
-    if pivot is None or pivot < 1 or pivot + 1 >= len(bars):
-        return reject("LOCAL_TURN_PENDING")
-    left, middle, right = bars[pivot - 1:pivot + 2]
+    if pivot is None:
+        return reject("COMPARISON_UNAVAILABLE")
+    middle = bars[pivot]
     up = tail.direction == "up"
-    turn = (middle.high > max(left.high, right.high) if up
-            else middle.low < min(left.low, right.low))
-    if not turn:
-        return reject("LOCAL_TURN_CHANGED")
     # A later price extreme invalidates this specific endpoint hypothesis.
     if (any(bar.high > middle.high for bar in bars[pivot + 1:]) if up
             else any(bar.low < middle.low for bar in bars[pivot + 1:])):
@@ -74,15 +71,11 @@ def build_native_consolidation_previews(units, centers, strength, frame, histogr
     sign = 1 if up else -1
     momentum = [max(0.0, sign * value) for value in hist]
     start = positions.get(tail.market_start)
-    if start is None or len(bars) - start < 4:
+    if start is None or len(bars) - start < 2:
         return reject("COMPARISON_UNAVAILABLE")
-    weakening = next((i for i in range(len(hist) - 1, max(start + 1, pivot), -1)
-                      if momentum[i - 2] > momentum[i - 1] > momentum[i]), None)
-    if weakening is None:
-        return reject("MOMENTUM_CONTRACTION_LOST", latest_momentum=momentum[-3:])
-    if any(momentum[i] > momentum[weakening] for i in range(weakening + 1, len(hist))):
-        return reject("MOMENTUM_RECOVERED", contracted_momentum=momentum[weakening],
-                      latest_momentum=momentum[-1])
+    contraction, reason = contraction_witness(bars,hist,tail.direction,tail.market_start)
+    if contraction is None:
+        return reject(reason, latest_momentum=momentum[-2:])
     by_id = {unit.unit_id: unit for unit in values}
     index = {unit.unit_id: i for i, unit in enumerate(values)}
     visible = tuple(c for c in centers if c.available_at <= as_of)
@@ -140,7 +133,6 @@ def build_native_consolidation_previews(units, centers, strength, frame, histogr
             # Conservative provisional estimate; never equate this with a final area.
             if not area_a or not 0 < 2 * area_c < area_a:
                 continue
-            witness = bars[weakening - 2:weakening + 1]
             output.append({
                 "alert_id": identity, "hypothesis_id": identity,
                 "signal_type": "consolidation_divergence", "status": "warning",
@@ -161,10 +153,7 @@ def build_native_consolidation_previews(units, centers, strength, frame, histogr
                 "available_at": int(as_of.timestamp()), "measurement_end_at": int(as_of.timestamp()),
                 "macd_area_a": area_a, "macd_area_c": area_c, "macd_area_ratio": area_c / area_a,
                 "estimated_area_c": 2 * area_c, "estimate_factor": 2,
-                "momentum_times": [int(bar.date.timestamp()) for bar in witness],
-                "momentum_values": momentum[weakening - 2:weakening + 1],
-                "turn_times": [int(bar.date.timestamp()) for bar in (left, middle, right)],
-                "turn_prices": [float(bar.high if up else bar.low) for bar in (left, middle, right)],
+                "preview_trigger":"macd_first_contraction", **contraction,
                 "price_extreme_confirmed": False,
             })
     return output

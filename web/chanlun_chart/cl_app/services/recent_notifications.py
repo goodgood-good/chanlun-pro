@@ -20,6 +20,7 @@ STATUSES = {"sent": "已发送", "pending": "待发送", "failed": "发送失败
 KINDS = {"signal": "买卖点", "consolidation": "盘整背驰", "risk": "持仓风控", "screening": "选股摘要", "chart": "通知图表"}
 EVENT_FIELDS = frozenset({
     'preview_repriced','preview_key','confirmed_preview_id',
+    'preview_trigger','estimated_area_c','estimate_factor',
     "id", "market", "code", "name", "frequency", "point_type", "signal_type", "stage", "point_status",
     "recorded_at", "available_at", "point_confirmed_at", "source_closed_at", "anchor_at", "anchor_price",
     "selection_available_at", "first_detected_at", "first_warned_at", "state_changed_at", "holding",

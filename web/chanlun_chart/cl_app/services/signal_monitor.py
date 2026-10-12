@@ -242,6 +242,7 @@ def _signal(row):
     from chanlun.core.strict_structure.native_point_preview import is_point_preview
     nested = row.get("nested_confirmation") or {}
     following = row.get("confirmation_segment") or {}
+    witness = point.get('preview_witness') or {}
     identity = json.dumps([row.get("market", "a"), row["code"], row["frequency"], point["point_id"]])
     return {
         "id": hashlib.sha256(identity.encode()).hexdigest(),
@@ -250,6 +251,8 @@ def _signal(row):
         "point_id": point["point_id"],
         **({'preview_key':point['preview_key']} if point.get('preview_key') else {}),
         **({'signal_type':'native_point_preview','formal_point_issued':False} if is_point_preview(point) else {}),
+        **({key:witness.get(key) for key in ('preview_trigger','estimate_factor','estimated_area_c',
+                                            'macd_area_a','macd_area_c')} if is_point_preview(point) else {}),
         'price_basis_revision': point.get('price_basis_revision'),
         'confirmation_delay_bars': row.get('confirmation_delay_bars'),
         "evidence_scope": point.get("evidence_scope"),
@@ -301,7 +304,10 @@ def _consolidation_signal(row):
         "macd_area_ratio": alert["macd_area_ratio"], "core_position": alert["core_position"],
         "comparison_form": alert["comparison_form"], "holding": True,
         "estimated_area_c": alert.get("estimated_area_c"),
-        "preview_conditions": "累计面积的两倍仍小于参考段；已收盘MACD连续两次收缩；局部价格转折" if status == "warning" else None,
+        "estimate_factor": alert.get('estimate_factor'), "preview_trigger":alert.get('preview_trigger'),
+        "preview_conditions": ("当前同向柱开始缩短；累计面积×2仍小于参考段；结构尚未完成"
+            if alert.get('preview_trigger') == 'macd_first_contraction' else
+            "累计面积的两倍仍小于参考段；已收盘MACD连续两次收缩；局部价格转折") if status == "warning" else None,
     }
 
 
@@ -3224,9 +3230,11 @@ class SignalMonitor:
                     notification_authorized &= item["available_at"] >= notification_since
                     recovery_cutoff = (previous or {}).get('warning_recovery_cutoff')
                     if item['stage'] == 'warning':
-                        if (previous and previous.get('stage') in {'invalidated','left'}
-                                or recovery_cutoff is not None and identity in state['unverified_signals']):
-                            recovery_cutoff = item['source_closed_at']
+                        if previous and previous.get('stage') in {'invalidated','left'}:
+                            # The first newer, fully checked candle may restore
+                            # a warning. Do not wait one extra 5m/30m candle.
+                            recovery_cutoff = (previous_signals.get(identity, {}).get('source_closed_at')
+                                               or previous.get('last_source_closed_at') or item['source_closed_at'])
                         item['warning_recovery_cutoff'] = recovery_cutoff
                         item['warning_recovery_pending'] = (recovery_cutoff is not None
                                                             and item['source_closed_at'] <= recovery_cutoff)
@@ -3282,6 +3290,7 @@ class SignalMonitor:
                 known[identity] = {"stage": item["stage"], "notification_state": notification_state, "updated_at": stamp,
                                    "lifecycle_cycle": item.get("lifecycle_cycle", 0),
                                    "notification_authorized": notification_authorized,
+                                   "last_source_closed_at":item.get('source_closed_at'),
                                    "warning_recovery_cutoff": item.get('warning_recovery_cutoff'),
                                    **{k: item.get(k) for k in ("first_detected_at", "first_warned_at", "state_changed_at")}}
             pending_point_previews = set()
@@ -3352,6 +3361,7 @@ class SignalMonitor:
                                 changed_events.append(event)
                             known[identity] = {"stage": "invalidated", "notification_state": signal_status_key(item),
                                                "updated_at": stamp, "lifecycle_cycle": item.get("lifecycle_cycle", 0),
+                                               "last_source_closed_at":cutoff,
                                                **{k: item.get(k) for k in ("first_detected_at", "first_warned_at", "state_changed_at")}}
                             signals[identity] = item
                         elif stamp - previous.get("invalidated_at", 0) < 1800:

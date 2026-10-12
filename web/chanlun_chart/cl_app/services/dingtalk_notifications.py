@@ -418,7 +418,10 @@ class DingTalkOutbox:
             groups = []
             for pair in fresh:
                 event = pair[1]
-                if (self.charts is not None and event.get('signal_type') == 'consolidation_divergence'
+                # Preserve already queued legacy combined messages. New
+                # warnings send their text immediately and attach charts next.
+                if (self.charts is not None and event.get('inline_chart')
+                        and event.get('signal_type') == 'consolidation_divergence'
                         and event.get('stage') in {'warning','confirmed','invalidated'}):
                     event = {**event,'inline_chart':True}
                     inline_events.append(event)

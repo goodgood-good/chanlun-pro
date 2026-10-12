@@ -362,7 +362,7 @@ class NotificationCharts:
                     continue
                 if (not (event.get("stage") in {"warning","confirmed"}
                           or event.get('stage') == 'approaching' and event.get('signal_type') == 'native_point_preview'
-                         or event.get('stage') == 'invalidated' and event.get('signal_type') == 'consolidation_divergence' and event.get('inline_chart')
+                         or event.get('stage') == 'invalidated' and event.get('signal_type') == 'consolidation_divergence'
                          or event.get('stage') == 'triggered' and event.get('signal_type') == 'holding_risk')
                         or event.get('recorded_at', 0) < enabled_at and not event.get('inline_chart')
                         or not event.get("evidence") or not event.get("evidence_run_id")):
