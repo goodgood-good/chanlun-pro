@@ -198,6 +198,31 @@ def test_compact_index_and_lazy_detail_keep_the_same_verified_candidate(fixture_
         workbench.candidate_detail("f" * 32, row["id"])
 
 
+def test_completed_list_reuses_projection_but_rechecks_changed_evidence(fixture_run, monkeypatch):
+    manager, run_id, _ = fixture_run
+    project = Mock(wraps=workbench._current_rows)
+    monkeypatch.setattr(workbench, '_current_rows', project)
+    first = workbench.dashboard(compact=True)
+    assert len(first['candidates']) == 1
+    projected = project.call_count
+    first['candidates'][0]['point']['anchor_price'] = -1
+    second = workbench.dashboard(compact=True)
+    assert project.call_count == projected
+    assert second['candidates'][0]['point']['anchor_price'] == 10
+    from cl_app.services.signal_monitor import service
+    row = second['candidates'][0]
+    with monkeypatch.context() as live:
+        live.setattr(service, 'selection_overlay', lambda *_: {
+            'a:SH.600088:5m': {'cutoff': (row.get('source_closed_at') or 100) + 300,
+                'checked_at': 1000, 'identities': []}})
+        assert not workbench.dashboard(compact=True)['candidates']
+        assert project.call_count == projected
+    evidence = manager.root / run_id / 'evidence' / 'SH.600088_5m.json.gz'
+    evidence.write_bytes(b'changed evidence')
+    assert not workbench.dashboard(compact=True)['candidates']
+    assert project.call_count > projected
+
+
 def test_latest_verified_period_removes_stale_candidate_but_failed_or_older_checks_do_not(fixture_run, monkeypatch):
     manager, run_id, archive = fixture_run
     from cl_app.services.signal_monitor import service

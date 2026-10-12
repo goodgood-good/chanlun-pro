@@ -13,6 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import threading
 
 from chanlun import config
 from chanlun.cl_utils.point_exits import EXIT_PRICE_SOURCES
@@ -147,6 +148,31 @@ def _index_rows(payload, source, *, compact):
     return _compact_rows(_current_rows(payload, source), compact, context=True)
 
 
+_INDEX_LOCK = threading.Lock()
+_INDEX_CACHE = None
+
+
+def _published_index(payload, compact):
+    """Reuse one immutable verified snapshot; live checks still run per request.
+
+    ScreeningManager replaces its published payload when source, progress or
+    evidence changes, and deep-copies the projected view for every caller.
+    Holding the object itself also prevents an id from being reused. Active
+    scans are projected afresh, without retaining their preceding full payload.
+    """
+    global _INDEX_CACHE
+    source = payload.get('run_id', 'idle')
+    if not compact:
+        return _current_rows(payload, source)
+    with _INDEX_LOCK:
+        if payload.get('status') != 'completed':
+            _INDEX_CACHE = None
+            return _index_rows(payload, source, compact=True)
+        if _INDEX_CACHE is None or _INDEX_CACHE[0] is not payload:
+            _INDEX_CACHE = (payload, _index_rows(payload, source, compact=True))
+        return _INDEX_CACHE[1]
+
+
 def _compact_context(context):
     """The list needs explanations; complete peer evidence belongs in detail."""
     return {**{key: value for key, value in context.items() if key != "periods"},
@@ -156,13 +182,16 @@ def _compact_context(context):
 
 
 def _dashboard_projection(payload, compact):
+    # Replacement cursors are only needed while a scan is still filling its
+    # results. A completed list must not copy 16,000 task tuples on each read.
+    progressive = payload.get('status') != 'completed' or payload.get('results_loading')
     return {**{key: value for key, value in payload.items() if key not in {
         "selected", "observations", "entry_waiting", "consolidation_alerts", "processed_symbols", "processed_periods",
         "u295_lower_structural_witnesses", "recent_rejections", "verified_periods",
-    }}, "_workbench_rows": _index_rows(payload, payload.get('run_id', 'idle'), compact=compact),
-        '_workbench_verified': [(r.get('market','a'),r['code'],r['frequency']) for r in payload.get('verified_periods',[])],
-        '_workbench_processed': [(r.get('market','a'),r['code']) for r in payload.get('processed_symbols',[])],
-        '_workbench_processed_periods': [(r.get('market','a'),r['code'],r['frequency']) for r in payload.get('processed_periods',[])]}
+    }}, "_workbench_rows": _published_index(payload, compact),
+        '_workbench_verified': [(r.get('market','a'),r['code'],r['frequency']) for r in payload.get('verified_periods',[])] if progressive else [],
+        '_workbench_processed': [(r.get('market','a'),r['code']) for r in payload.get('processed_symbols',[])] if progressive else [],
+        '_workbench_processed_periods': [(r.get('market','a'),r['code'],r['frequency']) for r in payload.get('processed_periods',[])] if progressive else []}
 
 
 def candidate_detail(source, candidate_id):

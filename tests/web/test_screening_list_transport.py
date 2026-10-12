@@ -64,3 +64,15 @@ def test_compact_linkage_keeps_explanations_without_copying_peer_proofs():
     assert compact['periods'][0]['source_closed_at'] == 300
     assert 'signal' not in compact['periods'][0] and 'center' not in compact['periods'][0]
     assert original['periods'][0]['signal']['point_id'] == 'sell'
+
+
+@pytest.mark.parametrize('status,loading,kept', [('running', False, True),
+    ('completed', True, True), ('completed', False, False)])
+def test_only_progressive_lists_copy_replacement_cursors(status, loading, kept):
+    task = {'market': 'a', 'code': 'SH.600000', 'frequency': '5m'}
+    payload = {'status': status, 'results_loading': loading, 'verified_periods': [task],
+        'processed_symbols': [task], 'processed_periods': [task]}
+    data = workbench._dashboard_projection(payload, True)
+    assert bool(data['_workbench_verified']) is kept
+    assert bool(data['_workbench_processed']) is kept
+    assert bool(data['_workbench_processed_periods']) is kept
