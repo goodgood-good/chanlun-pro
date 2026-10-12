@@ -158,7 +158,8 @@ def test_affinity_holding_protection_is_bounded_per_worker_and_per_pool(pool, tm
 def test_memory_pressure_releases_idle_workers_and_resumes_without_losing_stocks(pool,tmp_path,monkeypatch):
     from chanlun.screening import compute_capacity
     results(scan(pool,tmp_path/'warm'))
-    calls=[];capacities=[]
+    calls=[]
+    capacities=[]
     def pressure(_budget,**_options):
         calls.append(True)
         return {'limit':0 if len(calls)<4 else 3}
@@ -173,7 +174,8 @@ def test_memory_pressure_releases_idle_workers_and_resumes_without_losing_stocks
 
 def test_critical_memory_requeues_unpublished_work_without_a_false_failure(pool,tmp_path,monkeypatch):
     from chanlun.screening import compute_capacity
-    marker=tmp_path/'first_attempt';pressure_polls=[]
+    marker=tmp_path/'first_attempt'
+    pressure_polls=[]
     def pressure(_budget,**_options):
         if marker.exists() and len(pressure_polls)<3:
             pressure_polls.append(True)
@@ -235,11 +237,13 @@ def test_reply_cleanup_failure_does_not_fail_a_stock_or_replace_a_healthy_child(
 
 
 def test_transient_reply_lock_is_retried_after_the_batch(pool,tmp_path,monkeypatch):
-    original=Path.unlink;attempts={}
+    original=Path.unlink
+    attempts={}
     def transient(self,*args,**kwargs):
         if self.name.startswith('worker_reply.'):
             attempts[self]=attempts.get(self,0)+1
-            if attempts[self]==1:raise PermissionError('short reply lock')
+            if attempts[self]==1:
+                raise PermissionError('short reply lock')
         return original(self,*args,**kwargs)
     monkeypatch.setattr(Path,'unlink',transient)
     result=results(scan(pool,tmp_path/'once'))[0]
@@ -249,7 +253,8 @@ def test_transient_reply_lock_is_retried_after_the_batch(pool,tmp_path,monkeypat
 
 
 def test_unaccepted_reply_is_retained_when_consumer_stops_before_commit(pool,tmp_path):
-    directory=tmp_path/'uncommitted';stream=scan(pool,directory)
+    directory=tmp_path/'uncommitted'
+    stream=scan(pool,directory)
     result=None
     while result is None:
         result,_=next(stream)
@@ -361,3 +366,144 @@ def test_failed_result_write_releases_borrowed_iterator_and_keeps_committed_pref
     assert pool.iterator.closed
     assert json.loads((tmp_path/'status.json').read_text(encoding='utf-8'))['status'] == 'failed'
     assert len((tmp_path/'results.jsonl').read_text(encoding='utf-8').splitlines()) == 1
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows job shutdown recovery')
+def test_cancel_kill_denial_reaps_job_and_releases_batch_without_reusing_poisoned_pool(pool, tmp_path, monkeypatch):
+    directory = tmp_path/'denied'
+    started = directory/'started'
+    stream = scan(pool, directory, [{'code':'SH.600000', 'name':'blocked', 'blocked':True,
+                                    'started_file':str(started)}], timeout_seconds=60)
+    while not started.exists():
+        assert next(stream)[0] is None
+    process = pool.slots[0]['process']
+    pid = process.pid
+    monkeypatch.setattr(process, 'terminate', lambda: None)
+    def denied():
+        raise PermissionError(5, 'isolated Windows kill denial')
+    monkeypatch.setattr(process, 'kill', denied)
+    (directory/'cancel').touch()
+    with pytest.raises(PermissionError, match='kill denial'):
+        list(stream)
+    assert pool.busy is False and pool.closed is True
+    assert pool.slots == [] and pool.snapshot()['worker_pids'] == []
+    from chanlun.screening.worker_lifetime import process_identity
+    assert process_identity(pid)['alive'] is False
+    with pytest.raises(RuntimeError, match='closed'):
+        results(scan(pool, tmp_path/'must-replace'))
+
+
+def test_batch_ownership_is_acquired_before_input_serialization(pool, tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from chanlun.screening import worker_pool
+    entered, release = Event(), Event()
+    original = worker_pool.store_job
+    writes = []
+    def blocked_store(*args, **kwargs):
+        writes.append(args[3])
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(worker_pool, 'store_job', blocked_store)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(results, scan(pool, tmp_path/'owner'))
+        try:
+            assert entered.wait(5)
+            assert pool.busy is True
+            with pytest.raises(RuntimeError, match='already serving'):
+                results(scan(pool, tmp_path/'competitor'))
+            with pytest.raises(RuntimeError, match='already serving'):
+                pool.close()
+            assert len(writes) == 1
+        finally:
+            release.set()
+        assert len(first.result(timeout=12)) == 1
+    assert pool.busy is False and pool.closed is False
+    assert len(results(scan(pool, tmp_path/'next'))) == 1
+
+
+@pytest.mark.parametrize('stage', ['inputs', 'capacity'])
+def test_batch_setup_or_callback_exception_releases_ownership(pool, tmp_path, monkeypatch, stage):
+    from chanlun.screening import worker_pool
+    def failed(*_args, **_kwargs):
+        raise OSError('isolated callback failure')
+    with monkeypatch.context() as fault:
+        if stage == 'inputs':
+            fault.setattr(worker_pool, 'store_job', failed)
+        with pytest.raises(OSError, match='callback failure'):
+            results(scan(pool, tmp_path/'failed', capacity_callback=failed if stage == 'capacity' else None))
+    assert pool.busy is False and pool.closed is False
+    assert len(results(scan(pool, tmp_path/'healthy'))) == 1
+
+
+def test_zero_worker_argument_fails_without_claiming_or_poisoning_pool(pool, tmp_path):
+    with pytest.raises(ValueError, match='positive'):
+        results(scan(pool, tmp_path/'zero', workers=0))
+    assert pool.busy is False and pool.closed is False
+    assert len(results(scan(pool, tmp_path/'healthy'))) == 1
+
+
+@pytest.mark.parametrize('method', ['terminate', 'kill'])
+@pytest.mark.parametrize('exit_during_denial', [True, False])
+def test_worker_permission_denial_requires_confirmed_exit(method, exit_during_denial):
+    from chanlun.screening.runner import _stop_worker
+    class Process:
+        alive, closed = True, False
+        def is_alive(self):
+            return self.alive
+        def join(self, **_kwargs):
+            pass
+        def terminate(self):
+            if method == 'terminate':
+                self.denied()
+        def kill(self):
+            self.denied()
+        def denied(self):
+            if exit_during_denial:
+                self.alive = False
+            raise PermissionError(5, 'termination denied')
+        def close(self):
+            assert not self.alive
+            self.closed = True
+    class Connection:
+        def close(self):
+            pass
+    process = Process()
+    slot = {'process':process, 'connection':Connection(), 'stock':{'code':'blocked'}, 'stopped':False}
+    if exit_during_denial:
+        _stop_worker(slot)
+        assert slot['stopped'] is True and process.closed
+    else:
+        with pytest.raises(PermissionError, match='termination denied'):
+            _stop_worker(slot)
+        assert slot['stopped'] is False and not process.closed
+        process.alive = False
+        _stop_worker(slot)
+        assert slot['stopped'] is True and process.closed
+
+
+def test_pool_cannot_be_replaced_until_all_old_children_are_confirmed_dead(pool):
+    class RefusingProcess:
+        pid = 123
+        alive = True
+        def is_alive(self):
+            return self.alive
+        def join(self, **_kwargs):
+            pass
+        def terminate(self):
+            raise PermissionError(5, 'still alive')
+        def close(self):
+            assert not self.alive
+    class Connection:
+        def close(self):
+            pass
+    process = RefusingProcess()
+    pool.slots.append({'process':process, 'connection':Connection(), 'stock':{'code':'blocked'},
+                       'stopped':False, 'affinity_id':'denied'})
+    with pytest.raises(RuntimeError, match='could not confirm'):
+        pool.close()
+    assert pool.closed and not pool.busy and pool.slots
+    process.alive = False
+    pool.close()
+    assert pool.slots == []

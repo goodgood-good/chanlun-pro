@@ -304,8 +304,8 @@ def test_slow_final_commit_cannot_send_expired_members_or_lose_newer_members(
     delayed = []
 
     @contextmanager
-    def blocked_commit():
-        with connect() as db:
+    def blocked_commit(**kwargs):
+        with connect(**kwargs) as db:
             yield db
             started = db.execute("SELECT send_started FROM outbox").fetchone()[0]
         if started is not None and not delayed:

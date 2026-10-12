@@ -90,6 +90,13 @@ def serve(root, generation, *, idle_seconds=IDLE_SECONDS, poll_seconds=0.5,
                             publish('stopping', force=True)
                             break
                         if candidate is not None:
+                            if pool.busy:
+                                raise RuntimeError('Monitor coordinator still owns an active worker batch')
+                            if pool.closed:
+                                # Failed teardown is not an idle reusable pool.
+                                # Reap all previous children before replacing it.
+                                pool.close()
+                                pool = pool_factory(revision)
                             directory, request = candidate
                             # The dispatcher publishes the owner before release
                             # of this same lock. A ready host is the only writer.

@@ -86,20 +86,22 @@ def public_base():
     return raw
 
 
-def event_priority(events):
+def event_priority(events, holding_symbols=None):
     """Holding risks precede holdings, which precede ordinary watchlist events."""
-    return max((2 if row.get('signal_type') == 'holding_risk' else
-                1 if row.get('holding') is True or row.get('signal_type') == 'consolidation_divergence' else 0
-                for row in events if isinstance(row, dict)), default=0)
+    def priority(row):
+        held = (f"{row.get('market', 'a')}:{row.get('code')}" in holding_symbols if holding_symbols is not None
+                else row.get('holding') is True or row.get('signal_type') in {'holding_risk', 'consolidation_divergence'})
+        return (2 if row.get('signal_type') == 'holding_risk' else 1) if held else 0
+    return max((priority(row) for row in events if isinstance(row, dict)), default=0)
 
 
-def queued_priority(payload):
+def queued_priority(payload, holding_symbols=None):
     """SQLite sort helper; malformed old payloads must not block the queue."""
     try:
         events = json.loads(payload) if payload else []
     except (ValueError, TypeError, RecursionError):
         return 0
-    return event_priority([events] if isinstance(events, dict) else events) if isinstance(events, (dict, list)) else 0
+    return event_priority([events] if isinstance(events, dict) else events, holding_symbols) if isinstance(events, (dict, list)) else 0
 
 
 def heading(row):

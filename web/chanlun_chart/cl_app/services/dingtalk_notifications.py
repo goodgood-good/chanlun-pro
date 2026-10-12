@@ -156,11 +156,12 @@ class DingTalkTransport:
 
 
 class DingTalkOutbox:
-    def __init__(self, path, *, transport=None, now=None, signal_validator=None, charts=False):
+    def __init__(self, path, *, transport=None, now=None, signal_validator=None, charts=False, holding_reader=None):
         self.path = Path(path)
         self.transport = transport if transport is not None else DingTalkTransport()
         self.now = now or time.time
         self.signal_validator = signal_validator
+        self.holding_reader = holding_reader
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -174,12 +175,12 @@ class DingTalkOutbox:
             self.charts = NotificationCharts(self)
 
     @contextmanager
-    def _connect(self, *, timeout=5):
+    def _connect(self, *, timeout=5, holding_symbols=None):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.path, timeout=timeout)
         try:
             db.row_factory = sqlite3.Row
-            db.create_function('holding_priority', 1, queued_priority)
+            db.create_function('holding_priority', 1, lambda payload: queued_priority(payload, holding_symbols))
             db.executescript("""
             CREATE TABLE IF NOT EXISTS markers (id TEXT PRIMARY KEY, created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox (
@@ -271,6 +272,29 @@ class DingTalkOutbox:
         with self._read_connect() as db:
             return db.execute("SELECT 1 FROM markers WHERE id=?", (identity,)).fetchone() is not None
 
+    def _holding_snapshot(self):
+        """A bounded state-only scheduling hint; call outside every queue lock.
+
+        None means unknown and preserves recorded hints. This never replaces
+        the fresh membership/evidence validator which authorizes delivery.
+        """
+        if self.holding_reader is None:
+            return None
+        try:
+            value = self.holding_reader()
+            if isinstance(value, (set, frozenset)) and all(isinstance(key, str) for key in value):
+                return frozenset(value)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _holding_hints(events, holding_symbols):
+        if holding_symbols is None:
+            return events
+        return [{**event, 'holding': f"{event.get('market', 'a')}:{event.get('code')}" in holding_symbols}
+                for event in events]
+
     @staticmethod
     def _window_start(db):
         row = db.execute("SELECT value FROM delivery_settings WHERE key='window_start'").fetchone()
@@ -341,7 +365,7 @@ class DingTalkOutbox:
     def signal_events(self, events, *, since):
         from .notification_coalescing import append_pending, bucket as coalesce_bucket, BATCH_PREFIX
         stamp = self.now()
-        eligible = eligible_signal_events(events,since=since,stamp=stamp)
+        eligible = eligible_signal_events(self._holding_hints(events, self._holding_snapshot()), since=since, stamp=stamp)
         if not eligible:
             return
         inline_events = []
@@ -573,12 +597,14 @@ class DingTalkOutbox:
         except InterprocessLockTimeout:
             return self.now() + .1
 
-    def _deliver_one(self):
+    def _deliver_one(self, *, skip_waiting=False):
         """Process one receipt, or return the next attempt time when not yet due."""
         if not self.path.is_file():
             return
         stamp = self.now()
-        with self._lock, self._connect() as db:
+        holding_symbols = self._holding_snapshot()
+        ready_only = ("AND o.error NOT IN ('等待信号有效性复核','等待图文消息生成') " if skip_waiting else "")
+        with self._lock, self._connect(holding_symbols=holding_symbols) as db:
             db.execute("UPDATE outbox SET status='expired',error='通知已过期，未补发旧信号' WHERE status IN ('pending','retry','sending') AND expires<=?", (stamp,))
             # The dispatch lock is now ours, so a remaining request marker is
             # an interrupted transport/receipt commit. Its exact finish time
@@ -599,15 +625,12 @@ class DingTalkOutbox:
             allowed_at = max([stamp, next_request] + [value + 4 for value in (previous, last_sent) if value is not None])
             if allowed_at > stamp:
                 return allowed_at
-            # A deferred validity check must yield to work already waiting.
-            # Sorting only by creation time lets two old uncertain groups
-            # alternate retries forever ahead of a later ready signal.
-            # Holding alerts and their images precede ordinary messages. Work
-            # waiting for evidence/image generation yields to ready messages.
+            # Retry deadlines let unknown work yield without losing its
+            # holding tier when due again. Within a tier next_try keeps old
+            # uncertain receipts from repeatedly overtaking ready siblings.
             row = db.execute("SELECT o.* FROM outbox o LEFT JOIN signal_payloads p ON p.outbox_id=o.id "
-                             "WHERE o.status IN ('pending','retry','sending') AND o.next_try<=? "
-                             "ORDER BY CASE WHEN o.error IN ('等待信号有效性复核','等待图文消息生成') THEN 0 "
-                             "ELSE holding_priority(p.events) END DESC, "
+                             "WHERE o.status IN ('pending','retry','sending') AND o.next_try<=? " + ready_only +
+                             "ORDER BY holding_priority(p.events) DESC, "
                              "CASE WHEN o.kind='chart' THEN 1 ELSE 0 END,o.next_try,o.created,o.rowid LIMIT 1", (stamp,)).fetchone()
             if row is None:
                 next_due = db.execute("SELECT MIN(next_try) FROM outbox WHERE status IN ('pending','retry','sending')").fetchone()[0]
@@ -630,6 +653,9 @@ class DingTalkOutbox:
                 events=[]
         except (ValueError,TypeError):
             events=[]
+        events = self._holding_hints(events, holding_symbols)
+        priority_retry = (not skip_waiting and row['error'] in ('等待信号有效性复核', '等待图文消息生成')
+                          and event_priority(events, holding_symbols) > 0)
         inline = row['kind']=='signals' and len(events)==1 and events[0].get('inline_chart') is True
         dispatch_events = events
         validation_started = validation_finished = None
@@ -667,7 +693,13 @@ class DingTalkOutbox:
                                (json.dumps(pending, ensure_ascii=False, allow_nan=False), row["id"]))
                     # No provider request consumed the shared send budget.
                     # Continue ready work without adding an idle four seconds.
-                    return db.execute("SELECT MIN(next_try) FROM outbox WHERE status IN ('pending','retry','sending')").fetchone()[0]
+                    next_due = db.execute("SELECT MIN(next_try) FROM outbox WHERE status IN ('pending','retry','sending')").fetchone()[0]
+                if priority_retry and pending and next_due is not None and next_due <= self.now():
+                    # A due holding retry gets the first fresh check. If it
+                    # still cannot send, allow one ready receipt to progress
+                    # in this call; never recursively drain unknown work.
+                    return self._deliver_one(skip_waiting=True)
+                return next_due
             if inline:
                 # Validity uses current state, but text and image both describe
                 # the exact frozen event which initiated this notification.
@@ -693,6 +725,7 @@ class DingTalkOutbox:
                 db.execute("UPDATE outbox SET content=?,expires=? WHERE id=?",
                            (content,max(e['recorded_at']+1800 for e in dispatch_events),row["id"]))
         if inline:
+            image_waiting = False
             with self._lock,self._connect() as db:
                 if self._current_delivery(db, row) is None:
                     return
@@ -700,13 +733,25 @@ class DingTalkOutbox:
                 if chart is None:
                     db.execute("UPDATE outbox SET status='retry',attempts=?,next_try=?,error='等待图文消息生成' WHERE id=? AND status='sending'",
                                (row['attempts'],stamp+3,row['id']))
-                    return db.execute("SELECT MIN(next_try) FROM outbox WHERE status IN ('pending','retry','sending')").fetchone()[0]
-                content=json.dumps(illustrated_signal(events[0],chart['url'],stamp),ensure_ascii=False)
-                db.execute('UPDATE outbox SET content=? WHERE id=?',(content,row['id']))
+                    image_waiting = True
+                    next_due = db.execute("SELECT MIN(next_try) FROM outbox WHERE status IN ('pending','retry','sending')").fetchone()[0]
+                else:
+                    content=json.dumps(illustrated_signal(events[0],chart['url'],stamp),ensure_ascii=False)
+                    db.execute('UPDATE outbox SET content=? WHERE id=?',(content,row['id']))
+            if image_waiting:
+                if priority_retry and next_due is not None and next_due <= self.now():
+                    return self._deliver_one(skip_waiting=True)
+                return next_due
         error = ""
         # A switch change may have retired this lease while validity checking
         # or image generation was running. Do not resurrect that delivery.
-        with self._lock, self._connect() as db:
+        # Producers can publish a holding notice while ordinary validation is
+        # running. Re-read only the bounded membership hint, outside SQLite
+        # and the queue lock, then yield before reserving an HTTP attempt.
+        holding_symbols = self._holding_snapshot()
+        with self._lock, self._connect(holding_symbols=holding_symbols) as db:
+            if not db.in_transaction:
+                db.execute('BEGIN IMMEDIATE')
             current = self._current_delivery(db, row)
             if current is None:
                 return
@@ -717,6 +762,17 @@ class DingTalkOutbox:
                 db.execute("UPDATE outbox SET status='expired',error='通知已过期，未补发旧信号' WHERE id=?",
                            (row['id'],))
                 return
+            priority = event_priority(final_events, holding_symbols)
+            higher = db.execute(
+                "SELECT 1 FROM outbox o LEFT JOIN signal_payloads p ON p.outbox_id=o.id "
+                "WHERE o.id!=? AND o.status IN ('pending','retry','sending') "
+                "AND o.next_try<=? AND o.expires>? AND o.created>=? " + ready_only +
+                "AND holding_priority(p.events)>? LIMIT 1",
+                (row['id'], dispatch_stamp, dispatch_stamp, self._window_start(db), priority)).fetchone()
+            if higher is not None:
+                db.execute("UPDATE outbox SET status='retry',attempts=?,next_try=?,send_started=NULL,error='' "
+                           "WHERE id=? AND status='sending'", (row['attempts'], dispatch_stamp, row['id']))
+                return dispatch_stamp
             if row['kind']=='signals' and not inline:
                 content=self._signal_content(final_events,dispatch_stamp)
                 db.execute('UPDATE outbox SET content=? WHERE id=?',(content,row['id']))

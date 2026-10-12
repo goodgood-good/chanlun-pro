@@ -270,12 +270,12 @@ class NotificationCharts:
         self.history_progress = WorkerProgress(180)
 
     @contextmanager
-    def _db(self, *, timeout=5):
+    def _db(self, *, timeout=5, holding_symbols=None):
         self.root.mkdir(parents=True,exist_ok=True)
         db = sqlite3.connect(self.root / "chart_jobs.sqlite3",timeout=timeout)
         try:
             db.row_factory=sqlite3.Row
-            db.create_function('holding_priority', 1, queued_priority)
+            db.create_function('holding_priority', 1, lambda payload: queued_priority(payload, holding_symbols))
             db.create_function('frequency_priority', 1, _frequency_priority)
             db.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,event TEXT,status TEXT,created REAL,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0,error TEXT DEFAULT '',updated REAL)")
             if 'updated' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
@@ -452,10 +452,11 @@ class NotificationCharts:
                 continue
         return False
 
-    def _process_one(self, lane):
+    def _process_one(self, lane, *, skip_waiting=False):
         now=self.outbox.now()
         worker_progress = self.progress if lane == 'initial' else self.history_progress
-        with self._db() as db:
+        holding_symbols = self.outbox._holding_snapshot()
+        with self._db(holding_symbols=holding_symbols) as db:
             # Schema migration precedes an explicit serialized claim. The lane
             # file lock bounds execution across separate outbox instances too.
             db.commit()
@@ -465,10 +466,12 @@ class NotificationCharts:
                     "AND next_try<=? LIMIT 1", (now,)).fetchone():
                 return False
             condition = "initial_image_hash=''" if lane == 'initial' else "initial_image_hash!=''"
+            if skip_waiting:
+                condition += " AND error!='等待信号有效性复核'"
             row=db.execute("SELECT * FROM jobs WHERE status IN ('pending','running') AND next_try<=? "
                            "AND " + condition + " "
-                           "ORDER BY CASE WHEN error='等待信号有效性复核' THEN 0 ELSE holding_priority(event) END DESC, "
-                           "CASE WHEN error='等待信号有效性复核' THEN 0 ELSE frequency_priority(event) END DESC, "
+                           "ORDER BY holding_priority(event) DESC, "
+                           "frequency_priority(event) DESC, "
                            "next_try,created,rowid LIMIT 1",(now,)).fetchone()
             if row is None:
                 return False
@@ -537,13 +540,18 @@ class NotificationCharts:
             try:
                 worker_progress.phase('signal_validation')
                 if self.outbox.signal_validator:
-                    valid,pending=self.outbox.signal_validator([event])
+                    valid,pending=self.outbox.signal_validator(self.outbox._holding_hints([event], holding_symbols))
                     check_deadline()
                     if pending:
                         from .notification_validation import retry_delay
                         with self._db() as db:
                             db.execute("UPDATE jobs SET status='pending',attempts=?,next_try=?,error='等待信号有效性复核' WHERE id=? AND status='running'",
                                        (row['attempts'],now+retry_delay(pending),row['id']))
+                        if (not skip_waiting and row['error'] == '等待信号有效性复核'
+                                and queued_priority(row['event'], holding_symbols) > 0):
+                            # Preserve due holding priority, then let one
+                            # ready same-lane image proceed if still unknown.
+                            self._process_one(lane, skip_waiting=True)
                         return True
                     if not valid:
                         with self._db() as db:

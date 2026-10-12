@@ -3,7 +3,6 @@ from functools import partial
 import json
 import multiprocessing
 import os
-from pathlib import Path
 import time
 
 import pytest
@@ -180,3 +179,111 @@ def test_host_death_reaps_a_blocked_child_and_new_host_recovers(host):
             replacement.terminate()
             replacement.join(timeout=5)
         replacement.close()
+
+
+def retiring_run(directory, *, worker_pool, pinned_revision, heartbeat):
+    """First batch reproduces cleanup denial; later batches use normal workers."""
+    if directory.name != f'{1:032x}':
+        return fake_run(directory, worker_pool=worker_pool, pinned_revision=pinned_revision, heartbeat=heartbeat)
+    request = read(directory/'request.json')
+    settings = request['settings']
+    write_json(directory/'status.json', {**request, 'status':'running', 'completed':0})
+    if not settings['symbols'][0].get('blocked'):
+        fake_run(directory, worker_pool=worker_pool, pinned_revision=pinned_revision, heartbeat=heartbeat)
+        worker_pool.close()
+        return
+    stream = worker_pool.scan(settings['symbols'], settings, {}, directory, 1, pinned_revision,
+                              request=request, timeout_seconds=60)
+    try:
+        while not (directory/'blocked.worker').exists():
+            next(stream)
+            heartbeat()
+        process = worker_pool.slots[0]['process']
+        process.terminate = lambda: None
+        def denied():
+            raise PermissionError(5, 'isolated kill denial')
+        process.kill = denied
+        (directory/'cancel').touch()
+        try:
+            list(stream)
+        except PermissionError as exc:
+            write_json(directory/'status.json', {**request, 'status':'failed', 'completed':0,
+                                                 'error':str(exc)})
+    finally:
+        stream.close()
+
+
+def fixture_recovering_host(root, generation):
+    factory = partial(ReusableWorkerPool, worker_target=echo_worker, revision_reader=lambda: 'test')
+    serve(root, generation, idle_seconds=30, poll_seconds=0.05,
+          revision_reader=lambda: 'test', pool_factory=factory, run=retiring_run)
+
+
+@pytest.mark.parametrize('cleanup_denied', [False, True])
+def test_host_recreates_a_closed_pool_only_after_old_children_exit(tmp_path, cleanup_denied):
+    from chanlun.screening.worker_lifetime import process_identity
+    first = enqueue(tmp_path, 1, blocked=cleanup_denied)
+    process = multiprocessing.get_context('spawn').Process(target=fixture_recovering_host, args=(tmp_path, 'one'))
+    try:
+        process.start()
+        if cleanup_denied:
+            wait_until(lambda: read(first/'status.json').get('status') == 'failed')
+            assert 'kill denial' in read(first/'status.json')['error']
+            old_pid = int((first/'blocked.worker').read_text(encoding='utf-8'))
+        else:
+            old_pid = finish(first)['pid']
+        recovered = finish(enqueue(tmp_path, 2))
+        assert recovered['pid'] != old_pid
+        assert process_identity(old_pid)['alive'] is False
+        assert process.is_alive()
+        # Healthy replacement workers retain affinity/reuse across later batches.
+        assert finish(enqueue(tmp_path, 3))['pid'] == recovered['pid']
+    finally:
+        write_json(tmp_path/STOP_FILE, {'stop':True})
+        process.join(timeout=8)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        process.close()
+
+
+def test_host_never_replaces_an_active_pool_or_claims_another_batch(tmp_path):
+    directory = enqueue(tmp_path, 1)
+    pools = []
+    class ActivePool:
+        busy = True
+        closed = True
+        def snapshot(self):
+            return {'worker_pids':[]}
+        def close(self):
+            pass
+    def create(_revision):
+        pool = ActivePool()
+        pools.append(pool)
+        return pool
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('active pool must not be dispatched a second batch')
+    with pytest.raises(RuntimeError, match='active worker batch'):
+        serve(tmp_path, 'one', revision_reader=lambda:'test', pool_factory=create, run=forbidden)
+    assert len(pools) == 1
+    assert read(directory/'status.json')['status'] == 'starting'
+
+
+def test_host_refuses_replacement_when_closed_pool_cannot_reap_a_child(tmp_path):
+    directory = enqueue(tmp_path, 1)
+    pools = []
+    class UnreapedPool:
+        busy = False
+        closed = True
+        def snapshot(self):
+            return {'worker_pids':[123]}
+        def close(self):
+            raise RuntimeError('old child still alive')
+    def create(_revision):
+        pool = UnreapedPool()
+        pools.append(pool)
+        return pool
+    with pytest.raises(RuntimeError, match='old child still alive'):
+        serve(tmp_path, 'one', revision_reader=lambda:'test', pool_factory=create)
+    assert len(pools) == 1
+    assert read(directory/'status.json')['status'] == 'starting'

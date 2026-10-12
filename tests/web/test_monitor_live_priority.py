@@ -72,15 +72,15 @@ def background(mixed):
     return service, live, clock, closed
 
 
-def test_live_clock_is_checked_before_closed_market_rebuild_even_if_closed_stock_is_held(
+def test_closed_market_holding_is_checked_before_ordinary_live_and_history(
     mixed,
 ):
     service, _, live, clock, _ = mixed
     service._schedule_monitor(clock[0], None)
     assert [s["code"] for s in live.started[0]["symbols"]] == [
-        "LIVE.US", "SH.600000", "SH.600001", "SH.600002", "SH.600003"]
-    assert service._load()["pending_symbols_count"] == 16
-    assert len(service._load()["force_pending_symbols"]) == 16
+        "SH.600000", "LIVE.US", "SH.600001", "SH.600002", "SH.600003", "SH.600004"]
+    assert service._load()["pending_symbols_count"] == 15
+    assert len(service._load()["force_pending_symbols"]) == 15
 
 
 def test_background_batches_are_small_while_another_market_has_live_bars(mixed):
@@ -178,6 +178,7 @@ def test_a_naturally_completed_batch_wins_a_racing_yield_request(mixed):
 
 def test_slow_live_work_yields_once_when_a_new_key_bar_closes(mixed):
     service, _, live, clock, closed = mixed
+    service._load()['holding_symbols'] = []  # Ordinary work retains its existing yield contract.
     service._schedule_monitor(clock[0], None)
     clock[0] += timedelta(minutes=5)
     closed["us"] += 300
@@ -194,6 +195,7 @@ def test_unowned_cancellation_still_reports_unchecked_work_for_retry(mixed):
 
 def test_yielded_completed_prefix_is_fully_consumed_before_replacement(mixed, monkeypatch):
     service, _, live, clock, closed = mixed
+    service._load()['holding_symbols'] = []  # This fixture exercises an ordinary background prefix.
     # Exercise recovery of an existing large background batch independently
     # from the normal short-wave admission policy.
     monkeypatch.setattr('cl_app.services.signal_monitor.MONITOR_BACKGROUND_WAVES', 16)

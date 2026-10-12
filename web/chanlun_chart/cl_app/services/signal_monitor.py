@@ -44,6 +44,7 @@ MONITOR_BACKGROUND_WAVES = 2
 MONITOR_MAX_FAILURES = 3
 MONITOR_READ_ATTEMPTS = 3
 MONITOR_LIVE_SLICE_SECONDS = 30
+MONITOR_HOLDING_WAIT_SECONDS = 5
 MORNING_AFTER_CLOSE = "11:35"
 LOG = logging.getLogger(__name__)
 _PRIVATE_SNAPSHOT_FIELDS = frozenset({
@@ -408,8 +409,23 @@ class SignalMonitor:
                 if self._notifications is None:
                     from .dingtalk_notifications import DingTalkOutbox
                     self._notifications = DingTalkOutbox(self.root / "dingtalk_outbox.sqlite3",
-                                                         signal_validator=self._validate_notification_events, charts=True)
+                                                         signal_validator=self._validate_notification_events, charts=True,
+                                                         holding_reader=self._notification_holding_keys)
         return self._notifications
+
+    def _notification_holding_keys(self):
+        """A bounded membership snapshot for queue order, never send approval."""
+        if not self._lock.acquire(timeout=.02):
+            return None
+        try:
+            state = self._state
+            if not state or state.get('holding_source_current') is not True:
+                return None
+            return set(state.get('holding_symbols', []))
+        except (TypeError, ValueError):
+            return None
+        finally:
+            self._lock.release()
 
     def _validate_notification_events(self, events):
         """Yield slow dependencies; only current state may authorize sending."""
@@ -2003,6 +2019,11 @@ class SignalMonitor:
                 if not current(state):
                     return
                 seed=state.get('seed') or {}
+                unfinished = set(state.get('active_symbols', [])) - set(state.get('active_consumed_symbols', []))
+                if unfinished & set(state.get('holding_symbols', [])):
+                    # A holding already admitted to this run gets a complete
+                    # attempt before another market's ordinary work can yield it.
+                    return
                 # A durable intent survives a restart before the cancel flag
                 # is written. Never overlap two private runs.
                 requested=state.get('yielding_monitor_run')==identity
@@ -2049,10 +2070,15 @@ class SignalMonitor:
                 active_periods = state.get('active_periods', {})
                 if not active_periods:
                     return
+                held = set(state.get('holding_symbols', []))
+                unfinished = set(state.get('active_symbols', [])) - set(state.get('active_consumed_symbols', []))
+                if unfinished & held:
+                    return
                 active_lanes = state.get('active_service_lanes', {})
                 cold_batch = bool(active_lanes) and all(lane == 'cold' for lane in active_lanes.values())
                 elapsed = now.timestamp() - state.get('active_scheduled_at', now.timestamp())
-                if elapsed < (5 if cold_batch else MONITOR_LIVE_SLICE_SECONDS):
+                short_wait = bool(held - unfinished) or cold_batch
+                if elapsed < (MONITOR_HOLDING_WAIT_SECONDS if short_wait else MONITOR_LIVE_SLICE_SECONDS):
                     return
                 revision = status.get('current_source_revision') or status.get('source_revision')
                 waiting = False
@@ -2081,7 +2107,8 @@ class SignalMonitor:
                         needed = (check.get('revision') != revision or check.get('cutoff') != target
                                   or key in urgent or frequency == '1m' and key in state.get('minute_force_pending', {}))
                         lane = task_lane(frequency, decisions.get(key, {}))
-                        slice_due = elapsed >= MONITOR_LIVE_SLICE_SECONDS or cold_batch and lane == 'hot'
+                        slice_due = (elapsed >= MONITOR_LIVE_SLICE_SECONDS or cold_batch and lane == 'hot'
+                                     or key in held and elapsed >= MONITOR_HOLDING_WAIT_SECONDS)
                         if not in_flight and needed and slice_due:
                             waiting = True
                             break
@@ -2399,8 +2426,8 @@ class SignalMonitor:
                 return
             if remember_pending(state, planned_periods, planned_targets, minute_decisions, revision, now.timestamp()):
                 self._save()
-            # Live clocks precede historical rebuilds. Within each class keep
-            # holdings/watchlist priority, bounded retries and queue rotation.
+            # Eligible holdings precede both live and historical ordinary work;
+            # the remaining budget retains bounded retries and fair rotation.
             backlog = len(pending)
             pending_keys={_symbol_key(symbol) for symbol in pending}
             forced = ({_symbol_key(s) for s in pending} if state["force"]
@@ -2491,23 +2518,32 @@ class SignalMonitor:
 
     @staticmethod
     def _fair_batch(plan, capacity):
-        """Choose the fair shares using the effective worker budget."""
+        """Admit holdings first, then divide the remaining effective budget."""
         recent = set(plan['recent'])
-        live = [s for s in plan['symbols'] if _symbol_key(s) in recent]
-        history = [s for s in plan['symbols'] if _symbol_key(s) not in recent]
+        held = set(plan['state'].get('holding_symbols', []))
+        holdings = [s for s in plan['symbols'] if _symbol_key(s) in held]
+        live = [s for s in plan['symbols'] if _symbol_key(s) not in held and _symbol_key(s) in recent]
+        history = [s for s in plan['symbols'] if _symbol_key(s) not in held and _symbol_key(s) not in recent]
         cursor = plan['cursor']
         critical = plan['state'].get('monitor_critical_cursor') or 0
         options = dict(state=plan['state'], targets=plan['targets'], minute_decisions=plan['decisions'],
                        urgent=plan['urgent'], now=plan['now'])
-        limit = min(MONITOR_BATCH_SIZE, capacity*(MONITOR_WORKER_WAVES if live else MONITOR_BACKGROUND_WAVES))
+        live_pending = any(_symbol_key(s) in recent for s in plan['symbols'])
+        limit = min(MONITOR_BATCH_SIZE, capacity*(MONITOR_WORKER_WAVES if live_pending else MONITOR_BACKGROUND_WAVES))
+        tasks, cursor = plan_batch(holdings, plan['periods'], limit=limit, cursor=cursor,
+                                   critical_cursor=critical, **options)
+        remaining = max(0, limit-len(tasks))
+        ordinary_critical = critical+sum(t['lane']=='critical' for t in tasks)
         if not live:
-            tasks, cursor = plan_batch(history, plan['periods'], limit=limit, cursor=cursor,
-                                       critical_cursor=critical, **options)
+            old, cursor = plan_batch(history, plan['periods'], limit=remaining, cursor=cursor,
+                                     critical_cursor=ordinary_critical, **options)
+            tasks.extend(old)
         else:
-            protected = sum(_symbol_key(s) in plan['state']['holding_symbols'] or _symbol_key(s) in plan['urgent'] for s in live)
-            reserved = min(capacity, max(1,limit//4), len(history), max(0,limit-max(1,protected)))
-            tasks, cursor = plan_batch(live, plan['periods'], limit=limit-reserved, cursor=cursor,
-                                       critical_cursor=critical, **options)
+            protected = sum(_symbol_key(s) in plan['urgent'] for s in live)
+            reserved = min(capacity, max(1,limit//4), len(history), max(0,remaining-max(1,protected)))
+            current, cursor = plan_batch(live, plan['periods'], limit=remaining-reserved, cursor=cursor,
+                                         critical_cursor=ordinary_critical, **options)
+            tasks.extend(current)
             old, cursor = plan_batch(history, plan['periods'], limit=reserved, cursor=cursor,
                 critical_cursor=critical+sum(t['lane']=='critical' for t in tasks), **options)
             tasks.extend(old)

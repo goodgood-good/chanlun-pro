@@ -123,6 +123,37 @@ def _critical_period(queues, cursor):
         queues[frequency][0]['priority'][4:])) if available else None
 
 
+def _holding_task(tasks, state, now, critical_cursor):
+    """Give the first minute a turn, then serve its overdue older siblings."""
+    minute = next((task for task in tasks if task['frequency'] == '1m'), None)
+    siblings = [task for task in tasks if task['frequency'] != '1m']
+
+    def attempted_at(task):
+        period_key = f"{task['key']}:{task['frequency']}"
+        pending = state.get('monitor_pending_deadlines', {}).get(period_key, {})
+        attempt = state.get('attempted_monitor_periods', {}).get(period_key, {})
+        return attempt.get('scheduled_at', 0) if attempt.get('revision') == pending.get('revision') else 0
+
+    if minute:
+        # A minute from an older source revision cannot consume this revision's
+        # initial fast check. A retried minute cannot consume every later turn.
+        minute_attempt = state.get('attempted_monitor_periods', {}).get(f"{minute['key']}:1m", {})
+        older = []
+        for task in siblings:
+            pending = state.get('monitor_pending_deadlines', {}).get(f"{task['key']}:{task['frequency']}", {})
+            minute_at = (minute_attempt.get('scheduled_at', 0)
+                         if minute_attempt.get('revision') == pending.get('revision') else 0)
+            if (task['deadline'] <= now and minute_at > attempted_at(task)
+                    and minute_at >= pending.get('first_pending_at', now)):
+                older.append(task)
+        if not older:
+            return minute
+        siblings = older
+    return min(siblings, key=lambda task: (
+        task['priority'][:4], attempted_at(task),
+        task['frequency'] != ('5m', '30m')[critical_cursor % 2], task['priority'][4:]))
+
+
 def _reserve_older_siblings(queues, cursor, critical_cursor, limit, now, excluded, state):
     """Protect the critical share from earlier claims by the same symbol.
 
@@ -168,11 +199,12 @@ def plan_batch(symbols, periods, *, state, targets, minute_decisions, urgent,
                limit, cursor, now, excluded=(), critical_cursor=None):
     """One symbol/period per batch; unused shares are borrowed immediately.
 
-    The cursor survives batch boundaries, so even tiny batches reach every
-    nonempty lane. Holdings and notification repairs lead their lane; deadline
-    and the last attempted clock retain age within the same protection class.
+    Due holdings precede all ordinary lanes and do not spend their fair-share
+    cursor. The ordinary cursor survives batch boundaries, so even tiny spare
+    batches reach every nonempty lane. Notification repairs lead their lane.
     """
     queues = defaultdict(list)
+    holding_tasks = defaultdict(list)
     held = set(state.get('holding_symbols', []))
     for symbol in symbols:
         key = f"{symbol.get('market', 'a')}:{symbol['code']}"
@@ -182,13 +214,24 @@ def plan_batch(symbols, periods, *, state, targets, minute_decisions, urgent,
             deadline = task_deadline(state, key, frequency, targets.get(f'{key}:{frequency}'), decision, now)
             priority = (key not in held, key not in urgent, symbol.get('origin') != 'watchlist',
                         deadline, state.get('attempted_cutoffs', {}).get(key, 0), key, frequency)
-            queues[frequency if lane == 'critical' else lane].append({'symbol': symbol, 'key': key, 'frequency': frequency,
-                                 'lane': lane, 'deadline': deadline, 'priority': priority})
+            task = {'symbol': symbol, 'key': key, 'frequency': frequency,
+                    'lane': lane, 'deadline': deadline, 'priority': priority}
+            if key in held:
+                holding_tasks[key].append(task)
+            else:
+                queues[frequency if lane == 'critical' else lane].append(task)
     queues = {lane: deque(sorted(rows, key=lambda row: row['priority'])) for lane, rows in queues.items()}
     selected, used = [], set(excluded)
     critical_cursor = state.get('monitor_critical_cursor', 0) if critical_cursor is None else critical_cursor
-    reserved = _reserve_older_siblings(queues, cursor, critical_cursor, limit, now, used, state)
-    for _ in range(limit):
+    holdings = [_holding_task(tasks, state, now, critical_cursor)
+                for key, tasks in holding_tasks.items() if key not in used]
+    for task in sorted(holdings, key=lambda task: task['priority'])[:max(0, limit)]:
+        selected.append(task)
+        used.add(task['key'])
+        critical_cursor += task['lane'] == 'critical'
+    remaining = max(0, limit-len(selected))
+    _reserve_older_siblings(queues, cursor, critical_cursor, remaining, now, used, state)
+    for _ in range(remaining):
         for queue in queues.values():
             while queue and queue[0]['key'] in used:
                 queue.popleft()
@@ -207,8 +250,4 @@ def plan_batch(symbols, periods, *, state, targets, minute_decisions, urgent,
         selected.append(task)
         used.add(task['key'])
         cursor = (cursor + 1) % len(SERVICE_PATTERN)
-    # A holding keeps its front-of-batch position when its due sibling takes
-    # the turn. This changes neither the chosen shares nor their cursor.
-    reserved_holdings = reserved & held
-    selected.sort(key=lambda task: task['key'] not in reserved_holdings)
     return selected, cursor

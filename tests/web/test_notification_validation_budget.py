@@ -259,6 +259,12 @@ def test_two_slow_holding_receipts_cannot_evict_each_others_completed_reads(read
     monkeypatch.setattr(signal_monitor, 'holding_symbols', gated_holdings)
     base = service.now().timestamp()
     clock = [base]
+    # This case models the .25/.3/.5 second handoff, including the bounded
+    # completed-result ages. Host SQLite latency must not advance only the
+    # monotonic half of that scenario while its outbox clock remains frozen.
+    # Future.result still uses its real bounded wait; wall-budget tests above
+    # independently cover slow reads against the real monotonic clock.
+    monkeypatch.setattr(notification_validation, 'time', SimpleNamespace(monotonic=lambda: clock[0] - base))
     transport = Transport()
     box = DingTalkOutbox(tmp_path / 'two-holdings.sqlite', transport=transport, now=lambda: clock[0],
                         signal_validator=service._validate_notification_events)

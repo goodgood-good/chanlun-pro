@@ -486,9 +486,13 @@ def test_source_exhaustion_is_distinct_from_meeting_the_requested_duration(recor
 
 def test_history_routes_require_login_and_do_not_dispatch(records,monkeypatch):
     from cl_app import create_app
-    root,_=records
+    root,reader=records
     add(root,'signals:login',[event()])
     monkeypatch.setattr('cl_app.blueprints.monitor.service',SimpleNamespace(root=root))
+    def read_fixture(path):
+        assert Path(path) == root
+        return reader
+    monkeypatch.setattr('cl_app.blueprints.monitor.reader_for',read_fixture)
     app=create_app(test_config={'TESTING':True,'VALIDATE_WEB_SECURITY':False,'LOGIN_DISABLED':False})
     client=app.test_client()
     assert client.get('/monitor/notifications').status_code in (302,401)

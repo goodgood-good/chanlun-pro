@@ -38,7 +38,7 @@ def inputs(size=4):
 
 
 @pytest.mark.parametrize("cursor", [0, 4, 8])
-def test_holding_older_sibling_receives_the_existing_critical_share(cursor):
+def test_holding_older_sibling_precedes_the_ordinary_fair_share(cursor):
     symbols, keys, periods, state, targets = inputs()
     tasks, _ = plan_batch(
         symbols,
@@ -56,9 +56,9 @@ def test_holding_older_sibling_receives_the_existing_critical_share(cursor):
     assert tasks[0] == holding[0], (
         "A reserved holding must not queue behind ordinary minutes"
     )
-    expected = {"hot": 2, "critical": 2} if cursor == 4 else {"hot": 3, "critical": 1}
-    # At cursor 4 the empty cold lane lends a slot to the older key period.
-    assert Counter(task["lane"] for task in tasks) == expected
+    # The holding has its own first slot. Three ordinary slots then follow
+    # their unchanged cursor, including a share for ordinary critical work.
+    assert Counter(task["lane"] for task in tasks) == {"hot": 2, "critical": 2}
     assert len({task["key"] for task in tasks}) == 4
 
 
@@ -77,8 +77,8 @@ def test_large_pool_retains_the_hot_share_while_overdue_critical_siblings_advanc
         now=120,
     )
     assert Counter(task["lane"] for task in tasks) == {
-        "hot": 32,
-        "critical": 12,
+        "hot": 31,
+        "critical": 13,
         "cold": 4,
     }
     assert len({task["key"] for task in tasks}) == 48

@@ -832,7 +832,6 @@ def _scan_worker_symbol_with_capacity(stock, settings, contexts, run_dir, revisi
 def _stop_worker(slot):
     if slot.get("stopped"):
         return
-    slot["stopped"] = True
     process, connection = slot["process"], slot["connection"]
     if process.is_alive() and slot["stock"] is None:
         try:
@@ -842,12 +841,27 @@ def _stop_worker(slot):
     connection.close()
     process.join(timeout=0.25)
     if process.is_alive():
-        process.terminate()
+        try:
+            process.terminate()
+        except PermissionError:
+            # Windows can deny termination after the child has already exited.
+            # A denied request alone never proves that it stopped.
+            process.join(timeout=0.25)
+            if process.is_alive():
+                raise
         process.join(timeout=2)
     if process.is_alive():
-        process.kill()
+        try:
+            process.kill()
+        except PermissionError:
+            process.join(timeout=0.25)
+            if process.is_alive():
+                raise
         process.join(timeout=1)
+    if process.is_alive():
+        raise RuntimeError('Worker did not exit after termination')
     process.close()
+    slot["stopped"] = True
 
 
 def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,

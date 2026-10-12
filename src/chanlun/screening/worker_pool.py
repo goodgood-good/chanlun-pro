@@ -4,6 +4,7 @@ from collections import deque, OrderedDict
 import multiprocessing
 import os
 from pathlib import Path
+from threading import Lock
 import time
 from uuid import uuid4
 
@@ -66,6 +67,7 @@ class ReusableWorkerPool:
         self.slots = []
         self.busy = False
         self.closed = False
+        self._batch_lock = Lock()
         self.job = WindowsWorkerJob() if os.name == 'nt' else None
         self.started_processes = 0
         self.completed_tasks = 0
@@ -89,7 +91,12 @@ class ReusableWorkerPool:
         except BaseException:
             child.close()
             if process.pid is not None:
-                _stop_worker(slot)
+                try:
+                    _stop_worker(slot)
+                except BaseException:
+                    self.closed = True
+                    self.slots.append(slot)
+                    raise
             else:
                 parent.close()
             raise
@@ -97,7 +104,16 @@ class ReusableWorkerPool:
         return slot
 
     def _discard(self, slot):
-        _stop_worker(slot)
+        try:
+            _stop_worker(slot)
+        except BaseException:
+            # Unknown child liveness invalidates the whole reusable pool.
+            # Its Windows job is retired before any replacement can start.
+            self.closed = True
+            raise
+        self._forget(slot)
+
+    def _forget(self, slot):
         self.slots.remove(slot)
         for key, value in list(self._affinity.items()):
             if value[0] == slot['affinity_id']:
@@ -137,13 +153,31 @@ class ReusableWorkerPool:
 
     def snapshot(self):
         return {'started_processes': self.started_processes, 'completed_tasks': self.completed_tasks,
+                'pool_closed': self.closed, 'pool_busy': self.busy,
                 'affinity_hits': self.affinity_hits, 'affinity_keys': len(self._affinity),
                 'worker_pids': [s['process'].pid for s in self.slots if s['process'].is_alive()]}
 
     def scan(self, stocks, settings, contexts, run_dir, workers, revision, *, request,
              timeout_seconds=SYMBOL_TIMEOUT_SECONDS, capacity_callback=None):
-        if self.closed or self.busy:
-            raise RuntimeError('Worker pool is closed or already serving a batch')
+        if not self._batch_lock.acquire(blocking=False):
+            raise RuntimeError('Worker pool is already serving a batch')
+        try:
+            if self.closed:
+                raise RuntimeError('Worker pool is closed')
+            self.busy = True
+            yield from self._scan(stocks, settings, contexts, run_dir, workers, revision,
+                                 request=request, timeout_seconds=timeout_seconds,
+                                 capacity_callback=capacity_callback)
+        finally:
+            try:
+                if self.closed:
+                    self._close_pool()
+            finally:
+                self.busy = False
+                self._batch_lock.release()
+
+    def _scan(self, stocks, settings, contexts, run_dir, workers, revision, *, request,
+              timeout_seconds, capacity_callback):
         if revision != self.revision or self.revision_reader() != self.revision:
             raise RuntimeError('Worker pool source revision is stale')
         if type(workers) is not int or workers < 1:
@@ -152,7 +186,6 @@ class ReusableWorkerPool:
         if (run_dir / 'cancel').exists() or not stocks:
             return
         inputs = store_job(stocks, settings, contexts, run_dir, revision, request)
-        self.busy = True
         pending = deque(enumerate(stocks))
         cleanup_pending = []
         try:
@@ -166,7 +199,8 @@ class ReusableWorkerPool:
                     raise RuntimeError('Screening source changed during a reusable batch')
                 if (run_dir / 'cancel').exists():
                     return
-                target=workers;pressure={'limit':workers}
+                target = workers
+                pressure = {'limit': workers}
                 if request.get('compute_budget'):
                     from .compute_capacity import update_resource_budget,role_capacity
                     monitor=request.get('worker_runtime') is not None
@@ -267,15 +301,29 @@ class ReusableWorkerPool:
                     self._discard(slot)
             for reference in cleanup_pending:
                 discard_reply(*reference, run_dir)
-            self.busy = False
 
     def close(self):
-        if self.closed:
-            return
+        if not self._batch_lock.acquire(blocking=False):
+            raise RuntimeError('Worker pool is already serving a batch')
         try:
-            for slot in list(self.slots):
-                self._discard(slot)
+            self._close_pool()
         finally:
-            if self.job is not None:
-                self.job.close()
-            self.closed = True
+            self._batch_lock.release()
+
+    def _close_pool(self):
+        self.closed = True
+        # Closing this non-inherited job handle also terminates children whose
+        # individual process handle refused terminate/kill. Still reap and
+        # verify every child below before allowing the host to create a pool.
+        if self.job is not None:
+            self.job.close()
+        failure = None
+        for slot in list(self.slots):
+            try:
+                _stop_worker(slot)
+            except Exception as exc:
+                failure = exc
+            else:
+                self._forget(slot)
+        if self.slots:
+            raise RuntimeError('Worker pool shutdown could not confirm every child exited') from failure

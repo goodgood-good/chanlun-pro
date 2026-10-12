@@ -3,8 +3,8 @@ from datetime import timedelta
 
 import pytest
 
-from tests.web.test_monitor_live_priority import mixed, finish
-from tests.test_screening_worker_pool import pool, scan, results
+from tests.web.test_monitor_live_priority import mixed as mixed, finish
+from tests.test_screening_worker_pool import pool as pool, scan, results
 
 
 @pytest.mark.parametrize('full_scan,expected', [(False, 4), (True, 3)])
@@ -13,14 +13,14 @@ def test_urgent_batch_keeps_backlog_capacity_within_the_current_resource_budget(
     if full_scan:
         manual.state['status'] = 'running'
     service._schedule_monitor(clock[0], None)
-    # The fair recheck share follows live work and stays within one worker
-    # wave, including the reduced capacity during a full screening run.
+    # The holding comes first across markets. Ordinary history still receives
+    # its fair share within the reduced full-screening process budget.
     symbols = live.started[-1]['symbols']
-    assert symbols[0]['code'] == 'LIVE.US'
-    assert len(symbols) == 1 + expected
-    assert all(item['market'] == 'a' for item in symbols[1:])
+    assert [symbol['code'] for symbol in symbols[:2]] == ['SH.600000', 'LIVE.US']
+    assert len(symbols) == 2 + expected
+    assert all(item['market'] == 'a' for item in symbols[2:])
     assert live.started[-1]['workers'] == expected
-    assert service._load()['pending_symbols_count'] == 20 - expected
+    assert service._load()['pending_symbols_count'] == 19 - expected
 
 
 def test_a_small_total_queue_still_reduces_the_process_budget(mixed):
