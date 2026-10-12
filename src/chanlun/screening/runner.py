@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 import hashlib
 import json
+import math
 import multiprocessing
 import os
 from pathlib import Path
@@ -38,6 +39,15 @@ CATALOG_TIMEOUT_SECONDS = 60
 
 class ScreeningCancelled(Exception):
     """Cancellation is a terminal state, not a failed data calculation."""
+
+
+class ScreeningTimeBudget(Exception):
+    """A scheduled scan must release resources when its shared budget ends."""
+
+
+def time_budget_expired(request):
+    deadline = request.get('deadline_at')
+    return deadline is not None and time.time() >= deadline
 
 
 def write_json(path: Path, value, *, durable=False) -> None:
@@ -873,12 +883,42 @@ def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,
     request_path = Path(run_dir, "request.json")
     request = json.loads(request_path.read_text(encoding="utf-8")) if request_path.is_file() else {}
     options = {"worker_target": worker_target, "revision_reader": lambda: revision} if worker_target else {}
-    pool = ReusableWorkerPool(revision, max_tasks=min(256,max(1,len(stocks))), **options)
-    try:
-        yield from pool.scan(stocks, settings, contexts, run_dir, workers, revision,
-                             request=request, timeout_seconds=timeout_seconds, capacity_callback=capacity_callback)
-    finally:
-        pool.close()
+    def identity(item):
+        return item.get('market', 'a'), item['code'], tuple(item.get('_monitor_periods', settings['frequencies']))
+    pending = {identity(stock): stock for stock in stocks}
+    recoverable = len(pending) == len(stocks)
+    remaining = list(stocks)
+    for attempt in range(3):
+        failure = None
+        pool = ReusableWorkerPool(revision, max_tasks=min(256,max(1,len(remaining))), **options)
+        try:
+            try:
+                for result, current in pool.scan(remaining, settings, contexts, run_dir, workers, revision,
+                        request=request, timeout_seconds=timeout_seconds, capacity_callback=capacity_callback):
+                    if result is not None:
+                        key = (result.get('market', 'a'), result['code'],
+                               tuple(result.get('requested_frequencies', settings['frequencies'])))
+                        if key not in pending:
+                            recoverable = False
+                        pending.pop(key, None)
+                    yield result, current
+            except PermissionError as exc:
+                failure = exc
+        finally:
+            # A new pool is permitted only after the old Windows job has been
+            # closed and every child reaped. Unknown liveness still fails.
+            pool.close()
+        if failure is None or Path(run_dir, 'cancel').exists() or time_budget_expired(request):
+            return
+        if not recoverable or attempt == 2 or (not worker_target and source_revision() != revision):
+            raise failure
+        remaining = list(pending.values())
+        if not remaining:
+            return
+        write_json(Path(run_dir, 'worker_recovery.json'), {
+            'recoveries': attempt + 1, 'remaining': len(remaining), 'completed': len(stocks)-len(remaining),
+            'reason': 'worker_retirement_permission_error', 'recovered_at': time.time(),
+        })
 
 
 def _catalog_worker(connection, settings, _run_dir):
@@ -976,6 +1016,9 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
         raise ValueError('Pinned screening revision requires its matching worker pool')
     request = json.loads((run_dir / "request.json").read_text(encoding="utf-8"))
     settings = request["settings"]
+    deadline = request.get('deadline_at')
+    if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline) or deadline <= 0):
+        raise ValueError('Invalid screening deadline')
     observed = datetime.fromisoformat(request["observed_at"])
     state = {**request, "status": "running", "phase": "catalog", "completed": 0,
              "total": 0, "selected_count": 0, "error_count": 0, "successful_period_count": 0, "started_at": time.time(),
@@ -993,6 +1036,8 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
     publish_status()
     stream = None
     try:
+        if time_budget_expired(request):
+            raise ScreeningTimeBudget()
         catalog = None
         holding_snapshot=request.get('holding_snapshot')
         if settings.get('scope')=='symbols' and holding_snapshot is not None:
@@ -1013,12 +1058,16 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
             state['catalog_reused']=True
         else:
             for result in bounded_catalog(settings, run_dir):
+                if time_budget_expired(request):
+                    raise ScreeningTimeBudget()
                 state.update(updated_at=time.time(), elapsed_seconds=round(time.time()-state["started_at"], 1))
                 publish_status()
                 if result is not None:
                     catalog = result
         if catalog is None or (run_dir / "cancel").exists():
             raise ScreeningCancelled()
+        if time_budget_expired(request):
+            raise ScreeningTimeBudget()
         stocks = catalog["stocks"]
         state["excluded_requested_codes"] = catalog["excluded_requested_codes"]
         contexts = {}
@@ -1072,7 +1121,9 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
             state['resource_limit']=pressure['limit']
             state['resource_mode']='waiting' if pressure.get('waiting') else 'limited' if pressure['limit']<request.get('compute_budget',{}).get('limit',workers) else 'normal'
             state['available_memory_mb']=pressure.get('available_mb')
-        stream = (bounded_scan(stocks, settings, contexts, run_dir, workers, state["source_revision"],capacity_callback=capacity_changed)
+        stream = (bounded_scan(stocks, settings, contexts, run_dir, workers, state["source_revision"],
+                               timeout_seconds=30 if deadline is not None else SYMBOL_TIMEOUT_SECONDS,
+                               capacity_callback=capacity_changed)
                   if worker_pool is None else worker_pool.scan(
                       stocks, settings, contexts, run_dir, workers, state["source_revision"], request=request,capacity_callback=capacity_changed))
         for result, current_codes in stream:
@@ -1097,11 +1148,16 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
             state.update(current_codes=current_codes,
                          elapsed_seconds=round(time.time() - state["started_at"], 1), updated_at=time.time())
             publish_status()
+        if state['completed'] < state['total'] and time_budget_expired(request):
+            raise ScreeningTimeBudget()
         state["status"] = "cancelled" if (run_dir / "cancel").exists() else "completed"
         state["scan_elapsed_seconds"] = round(time.time() - scan_started, 1)
         state["phase"] = "finished"
     except ScreeningCancelled:
         state.update(status="cancelled", phase="finished")
+    except ScreeningTimeBudget:
+        state.update(status='cancelled', phase='finished', stop_reason='time_budget',
+                     error=f"午间选股已达到时间上限，保留已完成的 {state['completed']} / {state['total']} 个计算项；未完成范围等待后续选股。")
     except Exception as exc:
         traceback.print_exc()
         state.update(status="failed", phase="finished", error=f"{type(exc).__name__}: {exc}")

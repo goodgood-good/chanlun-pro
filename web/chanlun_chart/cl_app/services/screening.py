@@ -957,11 +957,15 @@ class ScreeningManager:
                 **({"strict_structure": frozen_structure}
                    if authoritative else {})}
 
-    def start(self, body, *, external_notifications=True, force_rebuild=False, monitor_periods=None, holding_snapshot=None, due_periods=None):
+    def start(self, body, *, external_notifications=True, force_rebuild=False, monitor_periods=None, holding_snapshot=None, due_periods=None, deadline_at=None):
         if type(external_notifications) is not bool:
             raise ValueError("外部通知选项必须是布尔值")
         if type(force_rebuild) is not bool:
             raise ValueError("重新计算选项必须是布尔值")
+        if deadline_at is not None:
+            if (self._reuse_workers or type(deadline_at) not in (int, float)
+                    or not math.isfinite(deadline_at) or deadline_at <= self._now().timestamp()):
+                raise ValueError('午间选股截止时间无效')
         settings = validate_settings(body, max_codes=self._max_codes)
         if holding_snapshot is not None:
             from chanlun.screening.markets import validate_symbol
@@ -996,6 +1000,8 @@ class ScreeningManager:
             directory = self.root / run_id
             request = {"run_id": run_id, "observed_at": self._now().isoformat(),
                        "settings": settings}
+            if deadline_at is not None:
+                request.update(deadline_at=deadline_at, deadline_kind='noon')
             if not self._reuse_workers and settings.get('alert_mode') == 'native_center_signals':
                 request['incremental_periods'] = True
             from chanlun.screening.compute_capacity import budget_request

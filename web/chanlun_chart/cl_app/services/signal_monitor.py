@@ -51,6 +51,7 @@ MONITOR_READ_ATTEMPTS = 3
 MONITOR_LIVE_SLICE_SECONDS = 30
 MONITOR_HOLDING_WAIT_SECONDS = 5
 MORNING_AFTER_CLOSE = "11:35"
+MORNING_BUDGET_SECONDS = 20 * 60
 LOG = logging.getLogger(__name__)
 _PRIVATE_SNAPSHOT_FIELDS = frozenset({
     'point_notification_since',
@@ -1719,7 +1720,8 @@ class SignalMonitor:
                 return
             cursor = state.get('screening_monitor_cursor') or {}
             seed = state.get('seed') or {}
-            eligible = (identity and manual.get('status') in ACTIVE
+            budget_stopped = manual.get('status') == 'cancelled' and manual.get('stop_reason') == 'time_budget'
+            eligible = (identity and (manual.get('status') in ACTIVE or budget_stopped)
                         and manual.get('source_current') is True
                         and identity != seed.get('run_id'))
             if not eligible:
@@ -1751,7 +1753,8 @@ class SignalMonitor:
         if result is None:
             return
         if (result.get('run_id') != identity or not result.get('source_current')
-                or result.get('status') not in ACTIVE | {'completed'}
+                or (result.get('status') not in ACTIVE | {'completed'} and not (
+                    result.get('status') == 'cancelled' and result.get('stop_reason') == 'time_budget'))
                 or result.get('frozen_native_review') or result.get('results_loading')):
             return
         if result.get('results_through', after) <= after:
@@ -1922,8 +1925,12 @@ class SignalMonitor:
                 if record.get("run_id") != manual.get("run_id") or record.get("status") != "started":
                     continue
                 healthy = manual["status"] == "completed" and not all_periods_failed(manual)
-                record["status"] = "completed" if healthy else "failed"
+                budget_stopped = manual.get('stop_reason') == 'time_budget'
+                record["status"] = ('partial' if manual.get('completed', 0) else 'timed_out') if budget_stopped else (
+                    'completed' if healthy else 'failed')
                 record["finished_at"] = manual.get("finished_at")
+                if manual.get('stop_reason') == 'time_budget':
+                    record.update(completed=manual.get('completed', 0), total=manual.get('total', 0))
                 self._save()
                 break
 
@@ -1987,15 +1994,33 @@ class SignalMonitor:
             if daily.get("session") != session:
                 daily = state["daily"] = {"session": session}
             phase_state = daily.get(phase, {})
-            if phase_state.get("status") == "completed":
+            if phase_state.get("status") in {"completed", "partial", "timed_out"}:
                 if self._clear_start_failure('daily',state):
                     self._save()
                 self._startup_retries.pop('daily',None)
                 return
+            phase_settings = deepcopy(settings['screening'])
+            deadline_at = None
+            if phase == 'morning':
+                if phase_settings.get('strategy') == 'direct_structural':
+                    phase_settings['frequencies'] = ['5m', '30m']
+                    # The optional one-period MACD view cannot be carried onto
+                    # a two-period run; retain it in the saved/manual settings.
+                    phase_settings.pop('minimum_operating_frequency', None)
+                deadline_at = phase_state.get('deadline_at') or min(
+                    now.timestamp() + MORNING_BUDGET_SECONDS,
+                    now.replace(hour=12, minute=55, second=0, microsecond=0).timestamp())
+                if not phase_state.get('deadline_at') and manual.get('status') not in ACTIVE:
+                    phase_state = daily[phase] = {**phase_state, 'deadline_at': deadline_at}
+                    self._save()
+                if now.timestamp() >= deadline_at and manual.get('status') not in ACTIVE:
+                    daily[phase] = {**phase_state, 'status': 'timed_out', 'deadline_at': deadline_at}
+                    self._save()
+                    return
             if (manual["status"] == "completed" and manual.get("source_current")
                     and not all_periods_failed(manual)
                     and manual.get("cutoffs", {}).get("5m") == cutoff
-                    and manual.get("settings") == settings["screening"]):
+                    and manual.get("settings") == phase_settings):
                 daily[phase] = {**phase_state, "run_id": manual["run_id"], "status": "completed"}
                 self._clear_start_failure('daily',state)
                 self._save()
@@ -2035,12 +2060,12 @@ class SignalMonitor:
                         and monitor_status.get("run_id") != state.get("processed_run"))):
                     # Finish the last intraday check before the full-market scan.
                     return
-                settings=deepcopy(state['settings']['screening'])
+                settings=phase_settings
                 context={'control':control_version,'session':session,'phase':phase}
                 if not self._start_allowed('daily',context):
                     return
             try:
-                launched = self.screening.start(settings)
+                launched = self.screening.start(settings, **({'deadline_at': deadline_at} if deadline_at is not None else {}))
             except Exception as error:
                 self._record_start_failure('daily',context,error)
                 raise TaskStartError('daily',error) from error
@@ -2049,7 +2074,9 @@ class SignalMonitor:
                 state['daily'][phase] = {**({'source_recovery_revision':phase_state['source_recovery_revision']}
                                            if phase_state.get('source_recovery_revision') else {}),
                                         "run_id": launched["run_id"], "status": "started",
-                                                "attempts": attempts + 1, "retry_at": now.timestamp() + 900}
+                                                "attempts": attempts + 1, "retry_at": now.timestamp() + (60 if phase == 'morning' else 900)}
+                if deadline_at is not None:
+                    state['daily'][phase]['deadline_at'] = deadline_at
                 self._clear_start_failure('daily',state)
                 self._save()
                 self._startup_retries.pop('daily',None)

@@ -48,7 +48,7 @@ class Jobs:
                     for symbol in selected for frequency in symbol.get('_monitor_periods',self.state["settings"].get("frequencies", []))
                 ]}
 
-    def start(self, settings, *, external_notifications=True, monitor_periods=None, holding_snapshot=None, due_periods=None):
+    def start(self, settings, *, external_notifications=True, monitor_periods=None, holding_snapshot=None, due_periods=None, deadline_at=None):
         if due_periods is not None:
             settings=deepcopy(settings)
             settings['symbols']=[{**s,'_monitor_periods':due_periods[f"{s['market']}:{s['code']}"]} for s in settings['symbols']]
@@ -56,6 +56,8 @@ class Jobs:
         self.holding_snapshot = holding_snapshot
         self.started.append(deepcopy(settings))
         self.state = {"status": "running", "run_id": str(len(self.started)).zfill(32), "settings": settings, "completed": 0}
+        if deadline_at is not None:
+            self.state.update(deadline_at=deadline_at, deadline_kind='noon')
         self.committed = None
         if not external_notifications:
             self.state["external_notifications"] = False

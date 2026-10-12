@@ -454,7 +454,7 @@
       renderRunControls();
       const incompleteRun=status.status==='completed'&&status.total>0
         &&status.error_count/status.total>=.2;
-      $('run-status').textContent=(STATES[status.status] || status.status)
+      $('run-status').textContent=(status.stop_reason==='time_budget'?'午间限时结束 · 保留部分结果':STATES[status.status] || status.status)
         +(status.results_loading?' · 正在读取结果…':incompleteRun?' · 结果不完整':'');
       const settings=status.settings||{};
       const nativeSignals=!status.run_id || settings.alert_mode==='native_center_signals'
@@ -469,6 +469,7 @@
         settings.strategy===STRATEGY?'5m 主信号 · 区间内 1m 结构确认':settings.frequencies?.map(f=>`${f} K线周期`).join(' / '),
         nativeSignals?'按本周期中枢买卖点筛选':'',settings.point_types?.map(p=>POINTS[p]||p).join(' / '),
         settings.minimum_operating_frequency?`MACD基础避险最低周期 ${settings.minimum_operating_frequency}`:'',
+        status.deadline_kind==='noon'?'午间整轮限时 20 分钟，重试共用预算':'',
         settings.recent_sessions ? `最近 ${settings.recent_sessions} 个交易日确认` : '',
         status.cancel_requested&&activeRun(status.status)?'正在取消选股计算':''].filter(Boolean).join(' · ');
       $('symbol-count').textContent=initialLoading?'—':new Set(currentCandidates.map(r=>r.market+':'+r.code)).size;

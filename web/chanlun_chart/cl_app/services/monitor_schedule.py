@@ -40,8 +40,9 @@ def describe(state, manual, observed_at):
         phase.get("status") in {"failed", "cancelled", "interrupted"}
         for phase in phases.values()
     )
+    limited = any(phase.get('status') in {'partial', 'timed_out'} for phase in phases.values())
     exhausted = any(
-        phase.get("status") != "completed" and phase.get("attempts", 0) >= 3
+        phase.get("status") not in {"completed", "partial", "timed_out"} and phase.get("attempts", 0) >= 3
         for phase in phases.values()
     )
     if manual.get("status") in {"starting", "running"}:
@@ -53,6 +54,8 @@ def describe(state, manual, observed_at):
         status, title = "paused", "自动选股已暂停"
     elif failed:
         status, title = "attention", "本日选股需要检查"
+    elif limited:
+        status, title = 'partial', '午间已限时收尾，保留已完成结果'
     elif completed == 2:
         status, title = "completed", "今日两轮已完成"
     elif any(phase.get("status") == "started" for phase in phases.values()):
@@ -73,6 +76,8 @@ def describe(state, manual, observed_at):
         phase_status = phase.get("status")
         if phase_status == "completed":
             text = "已完成"
+        elif phase_status in {'partial', 'timed_out'}:
+            text = f"已达午间时间上限，完成 {phase.get('completed', 0)} / {phase.get('total', '—')} 个计算项"
         elif phase_status == "started":
             text = "计算中"
         elif phase_status in {"failed", "cancelled", "interrupted"}:
@@ -118,6 +123,7 @@ def describe(state, manual, observed_at):
         detail += "请检查行情后手动重新选股。"
     if manual.get("error"):
         detail += str(manual["error"])
+    detail += ' 午间优先扫描 5m、30m，整轮与重试共用 20 分钟预算，最晚 12:55 收尾。'
     return {
         "status": status,
         "title": title,

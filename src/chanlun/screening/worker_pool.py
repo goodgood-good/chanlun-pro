@@ -8,7 +8,7 @@ from threading import Lock
 import time
 from uuid import uuid4
 
-from .runner import SYMBOL_TIMEOUT_SECONDS, _scan_worker_symbol, _stop_worker, source_revision
+from .runner import SYMBOL_TIMEOUT_SECONDS, _scan_worker_symbol, _stop_worker, source_revision, time_budget_expired
 from .worker_lifetime import WindowsWorkerJob
 from .worker_transport import JobInputReader, bounded_message, store_job, store_reply, read_reply, discard_reply
 
@@ -183,7 +183,7 @@ class ReusableWorkerPool:
         if type(workers) is not int or workers < 1:
             raise ValueError('worker count must be positive')
         run_dir = Path(run_dir)
-        if (run_dir / 'cancel').exists() or not stocks:
+        if (run_dir / 'cancel').exists() or time_budget_expired(request) or not stocks:
             return
         inputs = store_job(stocks, settings, contexts, run_dir, revision, request)
         pending = deque(enumerate(stocks))
@@ -197,7 +197,7 @@ class ReusableWorkerPool:
             while True:
                 if self.revision_reader() != self.revision:
                     raise RuntimeError('Screening source changed during a reusable batch')
-                if (run_dir / 'cancel').exists():
+                if (run_dir / 'cancel').exists() or time_budget_expired(request):
                     return
                 target = workers
                 pressure = {'limit': workers}

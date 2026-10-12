@@ -121,6 +121,17 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
 }
 const response = (value, status=200) => ({ok:status>=200&&status<300, status, redirected:false, json:async () => value});
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(setImmediate); };
+
+test('noon time budget shows a partial stop and keeps already verified candidates visible',async()=>{
+  const latest=withCandidate();
+  Object.assign(latest.status,{status:'cancelled',stop_reason:'time_budget',deadline_kind:'noon',completed:6000,total:10000});
+  const ui=page(async url=>dispatch(latest,url));await settle();
+  assert.match(ui.get('run-status').textContent,/午间限时结束.*保留部分结果/);
+  assert.doesNotMatch(ui.get('run-status').textContent,/本次筛选完成/);
+  assert.match(ui.get('run-detail').textContent,/6000.*10000/);
+  assert.match(ui.get('run-detail').textContent,/20 分钟.*共用预算/);
+  assert.ok(displayedIds(ui).length>0);
+});
 const SIGNAL_PERIODS=['1m','5m','30m'];
 const SIGNAL_POINTS=['1buy','2buy','3buy','1sell','2sell','3sell'];
 const defaultSignals=()=>({signal_period:'5m',signal_points:[...SIGNAL_POINTS]});
