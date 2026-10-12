@@ -106,15 +106,16 @@ def test_notification_off_while_worker_finishes_does_not_enqueue(setup):
 def current_event(service, *, consolidation_event=False):
     key = 'a:SH.600088'
     state = service._load()
-    event = (_consolidation_signal(consolidation('SH.600088', 300))
-             if consolidation_event else _signal({**signal(), 'source_closed_at': 300}))
-    event.update(holding=True, available_at=100)
+    stamp = int(service.now().timestamp())
+    event = (_consolidation_signal(consolidation('SH.600088', stamp))
+             if consolidation_event else _signal({**signal(), 'source_closed_at': stamp}))
+    event.update(holding=True, available_at=stamp-200, recorded_at=stamp)
     state.update(holding_source_current=True, holding_symbols=[key],
                  consolidation_enabled_at=0, consolidation_warning_enabled_at=0)
     state['signals'] = {event['id']: deepcopy(event)}
     state['selection_checks'][key + ':5m'] = {'revision': 'current', 'error': False,
-                                             'cutoff': 300, 'identities': [event['id']]}
-    return event, {(key, '5m'): 300}
+                                             'cutoff': stamp, 'identities': [event['id']]}
+    return event, {(key, '5m'): stamp}
 
 
 def test_removed_holding_can_receive_ordinary_point_without_stale_holding_label(setup):
@@ -143,10 +144,11 @@ def test_readded_holding_does_not_send_an_old_consolidation_queue_entry(setup):
     service.tick()
     event, cutoffs = current_event(service, consolidation_event=True)
     state = service._load()
-    state['holding_notification_since']['a:SH.600088'] = 200
+    enabled = service.now().timestamp() - 100
+    state['holding_notification_since']['a:SH.600088'] = enabled
     assert service._validate_notification_state([event], 'current', True, {'a:SH.600088'}, cutoffs) == ([], [])
-    event['available_at'] = 200
-    state['signals'][event['id']]['available_at'] = 200
+    event['available_at'] = enabled
+    state['signals'][event['id']]['available_at'] = enabled
     assert len(service._validate_notification_state([event], 'current', True, {'a:SH.600088'}, cutoffs)[0]) == 1
 
 

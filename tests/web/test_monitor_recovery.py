@@ -22,6 +22,7 @@ def scenario(tmp_path, monkeypatch):
     jobs.finish(300)
     jobs.state["source_revision"] = "test"
     jobs.rows = [{**signal("SH.600000"), "source_closed_at": 300}]
+    jobs.rows[0]['point']['available_at'] = 100  # This fixture uses a 310-second clock.
     clock = [310.0]
     transport = Transport()
     box = DingTalkOutbox(

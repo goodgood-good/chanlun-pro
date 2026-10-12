@@ -16,6 +16,7 @@ def live_candidate(fixture_run, setup, monkeypatch):
     row = deepcopy(manager.results()["selected"][0])
     revision = screening.source_revision()
     service, manual, live, clock, cutoff = _seed(setup, [row])
+    row['point'].update(available_at=cutoff, confirmed_at=cutoff)
     manual.state.update(run_id=source, result_reader_revision="before-upgrade",
                         source_revision=revision, current_source_revision=revision)
     service.tick()
@@ -36,7 +37,8 @@ def suspend(live_candidate):
     service.tick()
     assert original["id"] not in service._load()["signals"]
     assert service._load()["unverified_signals"][original["id"]] == original
-    assert service._validate_notification_events([original]) == ([], [original])
+    queued = {**original, 'recorded_at':original['first_detected_at']}
+    assert service._validate_notification_events([queued]) == ([], [queued])
 
 
 @pytest.mark.parametrize("compact", [False, True])

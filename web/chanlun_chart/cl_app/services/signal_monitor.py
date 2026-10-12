@@ -30,6 +30,7 @@ from chanlun.screening.markets import closed_bar_cutoff, holding_symbols, watchl
 from .screening import ScreeningManager, MonitorResultsReadError, manager as screening_manager, read_state_json, validate_settings, all_periods_failed
 from .dingtalk_notifications import signal_status_key, signal_reference
 from .notification_handoff import retain as retain_notifications, pending_events, evidence_references
+from .notification_freshness import notification_deadline, notification_is_live, stamp_notification
 from .notification_text import REASONS, price as notification_price
 from .monitor_view import validate_page_options
 from .notification_policy import (
@@ -449,7 +450,8 @@ class SignalMonitor:
             if self._state is None:
                 return [], events
             events = [event for event in events
-                      if point_notification_decision(self._state, event, None) != 'deny']
+                      if notification_is_live(event, self.now().timestamp())
+                      and point_notification_decision(self._state, event, None) != 'deny']
             if not events:
                 return [], []
             scan_types = set((self._state.get('seed') or {}).get('settings', {}).get('point_types', []))
@@ -526,6 +528,8 @@ class SignalMonitor:
                           if state.get('active_monitor_run') != state.get('processed_run') else None)
         valid, pending = [], []
         for event in events:
+            if not notification_is_live(event, self.now().timestamp()):
+                continue
             policy_decision = point_notification_decision(state, event, fresh_holdings)
             if policy_decision == 'deny':
                 continue
@@ -650,11 +654,10 @@ class SignalMonitor:
 
     def _request_notification_recheck(self, event, cutoff, revision):
         """A pending valid notification requests a bounded, fresh recheck."""
-        recorded=event.get('recorded_at')
-        if not isinstance(recorded,(int,float)) or not 0<=self.now().timestamp()-recorded<1800:
+        if not notification_is_live(event, self.now().timestamp()):
             return
         key=(_symbol_key(event),event['frequency'])
-        value={'cutoff':cutoff,'revision':revision,'expires':recorded+1800}
+        value={'cutoff':cutoff,'revision':revision,'expires':notification_deadline(event)}
         previous=self._notification_rechecks.get(key)
         if previous and previous['revision']==revision:
             value['cutoff']=max(cutoff,previous['cutoff'])
@@ -3230,6 +3233,13 @@ class SignalMonitor:
                         item['warning_reactivated'] = recovery_cutoff is not None
                         notification_authorized &= not item['warning_recovery_pending']
                 notification_state = signal_status_key(item)
+                timely = notification_is_live({**item, 'recorded_at':stamp}, stamp)
+                # An unchanged, previously authorized occurrence stays known
+                # during a market break. Age alone must not manufacture a new
+                # warning when the next session opens.
+                same_authorized_notice = (previous and previous.get('notification_authorized')
+                                          and previous.get('notification_state') == notification_state)
+                notification_authorized &= timely or bool(same_authorized_notice)
                 previous_item = previous_signals.get(identity, {})
                 changed = previous is None or previous.get("notification_state") != notification_state
                 item["first_detected_at"] = (previous or {}).get("first_detected_at") or previous_item.get("first_detected_at")
@@ -3241,7 +3251,8 @@ class SignalMonitor:
                 if linked_preview:
                     item['first_warned_at'] = linked_preview.get('first_warned_at')
                     item['confirmed_preview_id'] = linked_preview['id']
-                if item["stage"] in {"warning", "approaching"} and (previous is None or previous.get("stage") in {"invalidated", "left"} or item.get('preview_repriced')):
+                if item["stage"] in {"warning", "approaching"} and (previous is None or previous.get("stage") in {"invalidated", "left"} or item.get('preview_repriced')
+                        or previous.get('notification_authorized') is False and notification_authorized):
                     item["first_warned_at"] = stamp
                 if not item["first_warned_at"] and item.get("signal_type") == "consolidation_divergence":
                     prior_warnings = [e for e in events if e.get("id") in {identity, legacy}
@@ -3256,7 +3267,7 @@ class SignalMonitor:
                       and notification_authorized):
                     event = {**item, "recorded_at": stamp, "run_id": result["run_id"],
                              "change": "discovered" if previous is None else "changed"}
-                    if item.get("signal_type") == "consolidation_divergence" or reclassified or historical_period or historical_member:
+                    if item.get("signal_type") == "consolidation_divergence" or not notification_authorized:
                         event["external_notifications"] = notification_authorized
                     if reclassified:
                         event['notification_suppressed_reason']='ALGORITHM_RECLASSIFICATION'
@@ -3264,6 +3275,7 @@ class SignalMonitor:
                         event['notification_suppressed_reason']='CONFIRMED_BEFORE_PERIOD_ENABLED'
                     elif historical_member:
                         event['notification_suppressed_reason']='CONFIRMED_BEFORE_POOL_ADMISSION'
+                    stamp_notification(event, stamp)
                     events.insert(0, event)
                     if event.get("external_notifications", True):
                         changed_events.append(event)
@@ -3301,8 +3313,9 @@ class SignalMonitor:
                                 f"{_symbol_key(previous)}:{previous['frequency']}",{}),result.get('source_revision'),cutoff)
                             event = {**item,'change':'changed','recorded_at':stamp,'run_id':result['run_id'],
                                      'external_notifications':authorized}
+                            stamp_notification(event, stamp)
                             events.insert(0,event)
-                            if authorized:
+                            if event['external_notifications']:
                                 changed_events.append(event)
                             known[identity] = {**known.get(identity,{}),'stage':'invalidated','notification_state':signal_status_key(item),
                                 'updated_at':stamp,'lifecycle_cycle':item.get('lifecycle_cycle',0)}
@@ -3333,6 +3346,7 @@ class SignalMonitor:
                                     result.get('source_revision'),cutoff):
                                 event.update(external_notifications=False,
                                              notification_suppressed_reason='ALGORITHM_RECLASSIFICATION')
+                            stamp_notification(event, stamp)
                             events.insert(0, event)
                             if event["external_notifications"]:
                                 changed_events.append(event)
@@ -3412,6 +3426,7 @@ class SignalMonitor:
                 state['holding_risk_plans'][key] = value['updated']
                 for change in value['events']:
                     change.update(run_id=result['run_id'], recorded_at=stamp)
+                    stamp_notification(change, stamp)
                     events.insert(0,change)
                     risk_changes.append(change)
             for error in result.get("errors", []):

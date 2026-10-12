@@ -73,8 +73,10 @@ class Jobs:
 
 
 def signal(code="SH.600088", stage="confirmed"):
-    return {"code": code, "market": "a", "name": "样例", "frequency": "5m", "source_closed_at": 100,
-            "point": {"point_id": "point", "point_type": "3buy", "center_ordinal": 1, "status": stage, "available_at": 100}}
+    # Default evidence belongs to setup's current closed candle, not 1970.
+    cutoff = int(datetime(2026, 9, 17, 14, 55, tzinfo=CN).timestamp())
+    return {"code": code, "market": "a", "name": "样例", "frequency": "5m", "source_closed_at": cutoff,
+            "point": {"point_id": "point", "point_type": "3buy", "center_ordinal": 1, "status": stage, "available_at": cutoff}}
 
 
 def legacy_full_period_batch(service, live):
@@ -1480,6 +1482,7 @@ def test_existing_warning_sends_once_when_new_closed_data_crosses_enable_time(se
 def test_recovered_warning_requires_two_distinct_closed_checks_but_confirmation_is_immediate(setup,monkeypatch):
     service,live,cutoff,warning=_preview_service(setup,monkeypatch)
     def finish(rows,stamp):
+        setup[3][0] = max(setup[3][0], datetime.fromtimestamp(stamp, CN))
         service.check_now();service.tick();live.consolidation=rows;live.finish(stamp);service.tick()
     finish([],cutoff)
     finish([warning],cutoff)

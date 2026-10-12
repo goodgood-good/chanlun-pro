@@ -79,7 +79,7 @@ def test_queued_minute_notice_with_empty_current_state_waits_for_real_recheck(li
     with box._connect() as db:
         receipt = dict(db.execute('SELECT status,expires,error FROM outbox').fetchone())
     assert receipt['status'] == 'retry' and receipt['error'] == '等待信号有效性复核'
-    assert receipt['expires'] == event['recorded_at'] + 1800
+    assert receipt['expires'] == event['available_at'] + 1800
     assert (key, '1m') in service._notification_rechecks
     assert service._pending_notification_symbols(state, clock[0].timestamp()) == {key}
     assert state['signals'] == {}  # A queued event must never fabricate a live point.
@@ -93,7 +93,7 @@ def test_queued_minute_notice_with_empty_current_state_waits_for_real_recheck(li
     clock[0] += timedelta(seconds=5)
     box.deliver_one()
     with box._connect() as db:
-        assert db.execute('SELECT status,expires FROM outbox').fetchone()[:] == ('sent', event['recorded_at'] + 1800)
+        assert db.execute('SELECT status,expires FROM outbox').fetchone()[:] == ('sent', event['available_at'] + 1800)
     assert (transport.send.call_count, transport.send_markdown.call_count) == ((1, 0) if kind == 'text' else (0, 1))
     assert service._pending_notification_symbols(state, clock[0].timestamp()) == set()
 

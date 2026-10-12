@@ -16,6 +16,7 @@ import time
 from decimal import Decimal
 
 from .notification_text import public_base, queued_priority
+from .notification_freshness import notification_deadline, notification_is_live
 
 
 class _ChartExpired(Exception):
@@ -337,6 +338,15 @@ class NotificationCharts:
 
     def enqueue(self, events, sent_at):
         from .dingtalk_notifications import signal_key
+        current = []
+        for event in events:
+            if notification_is_live(event, self.outbox.now()):
+                current.append(event)
+            else:
+                self.outbox.finish_inline_chart(event,'expired','行情或信号已过期，未补发旧图表')
+        events = current
+        if not events:
+            return
         if not public_base():
             for event in events:
                 self.outbox.finish_inline_chart(event,'failed','未配置可访问的图表图片地址')
@@ -489,7 +499,7 @@ class NotificationCharts:
             return True
 
         def check_deadline():
-            if not 0<=self.outbox.now()-event['recorded_at']<1800:
+            if not notification_is_live(event, self.outbox.now()):
                 raise _ChartExpired()
 
         missing = json.loads(row['missing_periods'] or '[]')
@@ -524,7 +534,7 @@ class NotificationCharts:
             if selected and history.get(selected, {}).get('state') == 'source_error':
                 delay = history[selected].get('next_retry', 30)
                 if type(delay) in (int, float) and math.isfinite(delay):
-                    retry_delay = min(max(30, delay), max(0, event['recorded_at'] + 1800 - self.outbox.now()))
+                    retry_delay = min(max(30, delay), max(0, notification_deadline(event) - self.outbox.now()))
                 return ('failed' if row['attempts'] >= 2 else 'pending'), '历史来源请求失败，等待有界重试'
             signature = hashlib.sha256(json.dumps({p: history.get(p, {}).get('progress_token')
                 for p in ('1m', '5m', '30m')}, sort_keys=True).encode()).hexdigest()
@@ -537,7 +547,7 @@ class NotificationCharts:
             retry_delay = 5 if advanced else min(300, 15 * 2 ** stalls)
             return 'pending', '历史范围正在补齐：' + '、'.join(outstanding)
 
-        if now-event.get('recorded_at',0)>=1800:
+        if not notification_is_live(event, now):
             status,error='expired','图表任务已过期'
         else:
             phase='信号复核'
@@ -619,7 +629,7 @@ class NotificationCharts:
                 else:
                     status,error='ready',''
             except ChartHistoryPending as exc:
-                if 0 <= self.outbox.now() - event['recorded_at'] < 1800:
+                if notification_is_live(event, self.outbox.now()):
                     status, error = history_outcome(exc.coverage)
                 else:
                     status, error = 'expired', '图表任务已过期'
@@ -630,7 +640,7 @@ class NotificationCharts:
                 error=phase+'失败（'+type(exc).__name__+'）'
         with self._db() as db:
             finished=self.outbox.now()
-            next_try = min(finished + retry_delay, event['recorded_at'] + 1800) if status == 'pending' else finished + retry_delay
+            next_try = min(finished + retry_delay, notification_deadline(event)) if status == 'pending' else finished + retry_delay
             db.execute("UPDATE jobs SET status=?,error=?,next_try=?,updated=?,missing_periods=?,present_periods=?,initial_image_hash=?,"
                        "history_coverage=?,missing_history_periods=?,history_progress=?,history_turn=?,history_stalls=?,attempts=? "
                        "WHERE id=? AND status='running'",

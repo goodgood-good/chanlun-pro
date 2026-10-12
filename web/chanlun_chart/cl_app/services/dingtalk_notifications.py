@@ -25,6 +25,7 @@ import requests
 
 from chanlun.screening.rules import CN
 from .notification_text import signal_content, signal_status_lines as formatted_status_lines, heading, illustrated_signal, event_priority, queued_priority
+from .notification_freshness import notification_deadline, notification_is_live
 
 
 POINTS = {"1buy": "一买", "2buy": "二买", "3buy": "三买", "1sell": "一卖", "2sell": "二卖", "3sell": "三卖"}
@@ -64,13 +65,12 @@ def eligible_signal_events(events, *, since, stamp):
     return {signal_key(row):row for row in events
             if row.get('recorded_at',0)>=since and row.get('change') in {'discovered','changed'}
             and row.get('external_notifications',True)
-            and 0<=stamp-row.get('recorded_at',0)<1800 and row.get('stage') in STAGES}
+            and notification_is_live(row, stamp) and row.get('stage') in STAGES}
 
 
 def live_signal_events(events, stamp):
-    """Each queued signal keeps its own original thirty-minute deadline."""
-    return [row for row in events if type(row.get('recorded_at')) in (int,float)
-            and math.isfinite(row['recorded_at']) and 0<=stamp-row['recorded_at']<1800]
+    """Every signal keeps the deadline of its original market evidence."""
+    return [row for row in events if notification_is_live(row, stamp)]
 
 
 def _retain_recorded_times(updated, originals):
@@ -80,7 +80,8 @@ def _retain_recorded_times(updated, originals):
     for row in updated:
         original=sources.get(row.get('id')) or sources.get(row.get('legacy_id'))
         if original is not None:
-            result.append({**row,'recorded_at':original['recorded_at']})
+            result.append({**row,'recorded_at':original['recorded_at'],
+                           'notification_expires_at':notification_deadline(original)})
     return result
 
 
@@ -230,10 +231,21 @@ class DingTalkOutbox:
                                    or not math.isfinite(e['recorded_at']) for e in events):
                                 continue
                             db.execute('UPDATE outbox SET expires=? WHERE id=?',
-                                       (max(e['recorded_at']+1800 for e in events),identity))
+                                       (max(notification_deadline(e) for e in events),identity))
                         except (ValueError,TypeError):
                             continue
                     db.execute("INSERT OR IGNORE INTO delivery_settings VALUES ('per_signal_deadlines',1)")
+                if db.execute("SELECT 1 FROM delivery_settings WHERE key='market_event_deadlines_v1'").fetchone() is None:
+                    rows = db.execute("SELECT o.id,p.events FROM outbox o JOIN signal_payloads p ON p.outbox_id=o.id "
+                                      "WHERE o.kind IN ('signals','chart') AND o.status IN ('pending','retry','sending')").fetchall()
+                    for identity, payload in rows:
+                        try:
+                            events = json.loads(payload)
+                            deadline = max(notification_deadline(e) for e in events)
+                        except (ValueError, TypeError, AttributeError):
+                            deadline = 0
+                        db.execute('UPDATE outbox SET expires=MIN(expires,?) WHERE id=?', (deadline, identity))
+                    db.execute("INSERT OR IGNORE INTO delivery_settings VALUES ('market_event_deadlines_v1',1)")
                 yield db
         finally:
             db.close()
@@ -431,7 +443,7 @@ class DingTalkOutbox:
                             # subset from colliding with this stable batch id.
                             identity = BATCH_PREFIX + hashlib.sha256(json.dumps([key]).encode()).hexdigest()
                             self._insert(db, identity, 'signals', self._signal_content([event], stamp),
-                                         stamp, event['recorded_at'] + 1800 - stamp)
+                                         stamp, notification_deadline(event) - stamp)
                             db.execute('INSERT OR IGNORE INTO signal_payloads VALUES (?,?)',
                                        (identity, json.dumps([event], ensure_ascii=False, allow_nan=False)))
                         db.execute('INSERT OR IGNORE INTO markers VALUES (?,?)', (key, stamp))
@@ -440,7 +452,7 @@ class DingTalkOutbox:
                 payload = [row for _, row in group]
                 # Individual members are pruned on every dispatch/retry. A
                 # recent signal must not inherit an older member's deadline.
-                lifetime = max(row["recorded_at"] + 1800 for _, row in group) - stamp
+                lifetime = max(notification_deadline(row) for _, row in group) - stamp
                 self._insert(db, identity, "signals", self._signal_content(payload, stamp), stamp, lifetime)
                 db.execute("INSERT OR IGNORE INTO signal_payloads VALUES (?,?)",
                            (identity, json.dumps(payload, ensure_ascii=False, allow_nan=False)))
@@ -477,13 +489,13 @@ class DingTalkOutbox:
         identity = ("chart-complete:" if complete else "chart:") + signal_key(event)
         stamp = self.now()
         content = {"title": ("原信号附图补全 · " if complete else "信号图表 · ") + heading(event),
-                   "text": ("原通知附图补全\n\n" if complete else "") + "### " + re.sub(r"([\\`*_{}\[\]()#+.!|>])", r"\\\1", heading(event)) + "\n\n行情截止：" + date(event.get("source_closed_at"))
+                   "text": (("原通知附图补全 · 消息生成：" + date(event.get('recorded_at')) + "\n\n") if complete else "") + "### " + re.sub(r"([\\`*_{}\[\]()#+.!|>])", r"\\\1", heading(event)) + "\n\n行情截止：" + date(event.get("source_closed_at"))
                             + "（北京时间）\n\n![信号快照](" + url + ")"}
         with self._lock, self._connect() as db:
             if event['recorded_at'] < self._window_start(db):
                 return False
             self._insert(db, identity, "chart", json.dumps(content, ensure_ascii=False), stamp,
-                         max(0, event["recorded_at"] + 1800 - stamp))
+                         max(0, notification_deadline(event) - stamp))
             db.execute("INSERT OR IGNORE INTO signal_payloads VALUES (?,?)", (identity, json.dumps([event], ensure_ascii=False)))
         self._wake.set()
         return True
@@ -715,7 +727,7 @@ class DingTalkOutbox:
                                 "等待信号有效性复核" if pending else "信号已过期、退出或缺少可核验身份，未补发", row["id"]))
                     if pending:
                         db.execute('UPDATE outbox SET expires=? WHERE id=?',
-                                   (max(e['recorded_at']+1800 for e in pending),row['id']))
+                                   (max(notification_deadline(e) for e in pending),row['id']))
                     db.execute("UPDATE signal_payloads SET events=? WHERE outbox_id=?",
                                (json.dumps(pending, ensure_ascii=False, allow_nan=False), row["id"]))
                     # No provider request consumed the shared send budget.
@@ -744,13 +756,13 @@ class DingTalkOutbox:
                 if pending:
                     pending_id = "signals:" + hashlib.sha256(json.dumps(sorted(signal_key(event) for event in pending)).encode()).hexdigest()
                     self._insert(db, pending_id, "signals", self._signal_content(pending, stamp),
-                                 row["created"], max(e['recorded_at']+1800 for e in pending) - row["created"])
+                                 row["created"], max(notification_deadline(e) for e in pending) - row["created"])
                     db.execute("INSERT OR IGNORE INTO signal_payloads VALUES (?,?)",
                                (pending_id, json.dumps(pending, ensure_ascii=False, allow_nan=False)))
                 db.execute("UPDATE signal_payloads SET events=? WHERE outbox_id=?",
                            (json.dumps(events if row["kind"] == "chart" else valid, ensure_ascii=False, allow_nan=False), row["id"]))
                 db.execute("UPDATE outbox SET content=?,expires=? WHERE id=?",
-                           (content,max(e['recorded_at']+1800 for e in dispatch_events),row["id"]))
+                           (content,max(notification_deadline(e) for e in dispatch_events),row["id"]))
         if inline:
             image_waiting = False
             with self._lock,self._connect() as db:

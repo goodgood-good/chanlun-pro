@@ -25,7 +25,7 @@ EVENT_FIELDS = frozenset({
     "selection_available_at", "first_detected_at", "first_warned_at", "state_changed_at", "holding",
     "macd_area_ratio", "core_position", "comparison_form", "invalidation_reason", "exit_reasons",
     "stop_price", "trigger_price", "reference_point_type", "reverse_point_type", "reverse_price",
-    "notification_suppressed_reason", "external_notifications",
+    "notification_suppressed_reason", "notification_expires_at", "external_notifications",
     "evidence_codes", "confirmation_delay_bars", "invalidation_price", "center_ordinal",
     "macd_area_a", "macd_area_c", "center_zd_price", "center_zg_price",
 })
@@ -365,8 +365,11 @@ class RecentNotifications:
         event['recorded_at'] = row['recorded']
         event['external_notifications'] = False
         item = self._item('s.' + row['id'], 'suppressed', 'signals', [event], row['recorded'], None, '')
+        reason = event.get('notification_suppressed_reason') or '事件未授权外发'
+        if reason == 'MARKET_EVENT_EXPIRED':
+            reason = '行情或信号已超过30分钟有效期，保留记录，未补发实时提醒'
         item.update(_source_id=row['id'], body='', message='', error='',
-                    suppression_reason=event.get('notification_suppressed_reason') or '事件未授权外发',
+                    suppression_reason=reason,
                     metadata_complete=bool(event.get('code')))
         return item
 

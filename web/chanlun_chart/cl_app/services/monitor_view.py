@@ -33,6 +33,7 @@ ROW_FIELDS = {
     "point_confirmed_at",
     "external_notifications",
     "notification_suppressed_reason",
+    "notification_expires_at",
     "change",
     "anchor_price",
     "signal_type",

@@ -27,6 +27,7 @@ def test_saved_reader_upgrade_preserves_live_provenance_until_recheck(
     live.finish(cutoff)
     service._consume_monitor()
     original = deepcopy(next(iter(service._load()["signals"].values())))
+    original['recorded_at'] = clock[0].timestamp()
     identity = original["id"]
     original["notification_timeline"] = {
         "detected_at": int(clock[0].timestamp()),

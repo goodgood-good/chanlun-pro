@@ -49,7 +49,8 @@ def test_failed_prior_candidate_stays_in_pool_without_publishing_stale_signal(se
     view = service.snapshot(page_options={})
     assert view["seed"]["screening_count"] == 1
     assert view["seed"]["screening_recheck_count"] == 1
-    assert service._validate_notification_events([old]) == ([], [old])
+    queued = {**old, 'recorded_at':old['first_detected_at']}
+    assert service._validate_notification_events([queued]) == ([], [queued])
 
 
 def test_recovered_positive_rejoins_candidates_without_duplicate_discovery(setup):

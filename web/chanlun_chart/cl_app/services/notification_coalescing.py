@@ -2,6 +2,7 @@
 import json
 
 from .notification_text import event_priority
+from .notification_freshness import notification_deadline, notification_is_live
 
 
 WINDOW_SECONDS = .250
@@ -38,7 +39,7 @@ def append_pending(db, event, stamp, render):
             events = json.loads(row['events'])
             if (not isinstance(events, list) or not 0 < len(events) < MAX_EVENTS
                     or any(not isinstance(item, dict) or bucket(item) != identity
-                           or not 0 <= stamp - item.get('recorded_at', 0) < 1800 for item in events)):
+                           or not notification_is_live(item, stamp) for item in events)):
                 continue
             combined = [*events, event]
             content = render(combined, stamp)
@@ -49,7 +50,7 @@ def append_pending(db, event, stamp, render):
             continue
         changed = db.execute(
             "UPDATE outbox SET content=?,expires=? WHERE id=? AND status='pending' AND attempts=0 "
-            "AND send_started IS NULL", (content, max(item['recorded_at'] + 1800 for item in combined), row['id'])).rowcount
+            "AND send_started IS NULL", (content, max(notification_deadline(item) for item in combined), row['id'])).rowcount
         if changed:
             db.execute('UPDATE signal_payloads SET events=? WHERE outbox_id=?', (payload, row['id']))
             return row['id']

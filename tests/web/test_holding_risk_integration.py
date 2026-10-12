@@ -22,7 +22,8 @@ def test_risk_facts_survive_selection_exit_but_stop_after_unbinding_or_holding_r
     jobs = Jobs(tmp_path / "runs")
     jobs.state = {"status": "completed", "source_current": True}
     monitor = SignalMonitor(
-        tmp_path, screening=jobs, monitor=jobs, notifications=Mock()
+        tmp_path, screening=jobs, monitor=jobs, notifications=Mock(),
+        now=lambda:datetime.fromtimestamp(310, CN),
     )
     state = monitor._load()
     state.update(holding_source_current=True, holding_symbols=["a:SH.600000"])

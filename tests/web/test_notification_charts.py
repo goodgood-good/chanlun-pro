@@ -84,6 +84,7 @@ def test_waiting_image_checks_yield_to_a_ready_new_image(tmp_path):
     box.charts.renderer=lambda row,_:rendered.append(row['id']) or PNG
     box.charts.check_public=False
     for index,identity in enumerate(['waiting-1','waiting-2','waiting-3','ready-new']):
+        clock[0]=1000+index*.1
         box.charts.enqueue([image_event(stamp=1000+index*.1,identity=identity)],1000+index*.1)
     for index in range(4):
         clock[0]=1001+index*2;box.charts.process_one()
@@ -144,7 +145,7 @@ def test_already_inflight_delivery_keeps_its_actual_provider_receipt(tmp_path):
 def test_image_revalidation_keeps_the_delivered_snapshot_cutoff(tmp_path):
     row=image_event()
     transport=ImageTransport()
-    box=DingTalkOutbox(tmp_path/'outbox.sqlite',transport=transport,now=lambda:1000,
+    box=DingTalkOutbox(tmp_path/'outbox.sqlite',transport=transport,now=lambda:2000,
                       signal_validator=lambda rows:([{**rows[0],'source_closed_at':2000,'evidence_run_id':'b'*32}],[]))
     box.enqueue_chart(row,'https://example.test/snapshot.png')
     box.deliver_one()
