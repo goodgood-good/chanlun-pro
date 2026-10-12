@@ -1,5 +1,7 @@
 """Authenticated manual stock-screening page and progress endpoints."""
 
+import gzip
+
 from flask import Blueprint, jsonify, redirect, render_template, request, url_for
 from flask_login import current_user, login_required
 
@@ -7,6 +9,27 @@ from ..services.screening import manager
 from ..services import screening_workbench as workbench
 
 screening_bp = Blueprint("screening", __name__)
+
+
+@screening_bp.after_request
+def compress_result_json(response):
+    # Candidate lists include all rows so local filters and counts stay exact.
+    # Compress that read-only payload, including partial (202) results. Keep the
+    # normal identity representation for clients that do not accept gzip.
+    if request.endpoint != "screening.dashboard":
+        return response
+    response.vary.add("Accept-Encoding")
+    if (response.status_code not in {200, 202} or not response.is_json
+            or response.headers.get("Content-Encoding")
+            or request.accept_encodings.best_match(("gzip", "identity")) != "gzip"):
+        return response
+    raw = response.get_data()
+    if len(raw) >= 4096:
+        encoded = gzip.compress(raw, compresslevel=3, mtime=0)
+        if len(encoded) < len(raw):
+            response.set_data(encoded)
+            response.headers["Content-Encoding"] = "gzip"
+    return response
 
 
 @screening_bp.get("/screening")

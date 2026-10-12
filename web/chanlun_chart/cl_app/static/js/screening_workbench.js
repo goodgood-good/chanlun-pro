@@ -68,10 +68,27 @@
     '30M_CUTOFF_NOT_ALIGNED':'30m 与 5m 截止时刻不一致',DATA_GAPS:'30m 行情缺失',
     STALE_DATA:'30m 行情未更新',SESSION_CALENDAR_UNAVAILABLE:'交易日历未覆盖',
     CALENDAR_COVERAGE_UNKNOWN:'交易日历待核验',INVALID_SESSION:'30m 时段待核验'};
+  const PERIOD_LINK_HELP = {
+    aligned:{label:'联动支持',short:'其他周期提供同向依据',meaning:'较大周期背景或相关小周期信号支持当前买卖方向，且未触发冲突条件。不要求三个周期同时出现买卖点。'},
+    turning:{label:'转折候选',short:'较大周期出现转折迹象',meaning:'较大周期尚未明确转为同向，但已出现同向信号或越过参考中枢边界。仍需后续结构确认，不能视为已经反转。'},
+    independent:{label:'本周期信号',short:'暂无额外支持或明确冲突',meaning:'其他周期已经核验，但既没有提供额外同向支持，也没有形成明确冲突。当前只依据所选周期的信号。'},
+    mixed:{label:'信号分歧',short:'周期之间存在冲突',meaning:'相关周期出现反向信号，或原有支持条件已被当前价格破坏。需要结合下方各周期说明判断冲突来自哪里。'},
+    countertrend:{label:'逆向风险',short:'与较大周期方向相反',meaning:'最高参考周期仍与当前买卖方向相反，且尚未满足转折候选条件。例如 5m 出现买点，但 30m 中枢仍向下移动。'},
+    unverified:{label:'联动待核验',short:'部分周期证据尚不完整',meaning:'至少一个周期还在计算、结构证据不足，或数据时点和价格口径未通过核对。这不等于当前周期没有买卖点。'}
+  };
+  function higherContextMeaning(context) {
+    return PERIOD_LINK_HELP[context?.category]?.meaning||'等待对应周期的证据核验。';
+  }
+  function periodLinkPlan(period) {
+    return {'1m':'当前筛选 1m：参考 5m、30m 背景。',
+      '5m':'当前筛选 5m：参考 30m 背景，用 1m 细化时机。',
+      '30m':'当前筛选 30m：以 30m 为最高参考周期，用 5m、1m 细化时机。'}[period]||'';
+  }
   function higherContextText(context) {
     if(context?.schema==='native-period-link-v1') {
       const peers=(context.periods||[]).filter(p=>p.role!=='main').slice().reverse();
-      return [context.label||'联动待核验',...peers.map(p=>p.frequency+' '+p.label)].join(' · ');
+      const definition=PERIOD_LINK_HELP[context.category];
+      return [(definition?.label||context.label||'联动待核验')+(definition?'：'+definition.short:''),...peers.map(p=>p.frequency+' '+p.label)].join(' · ');
     }
     if (!context || context.category === 'unknown') {
       if (context?.reason === 'PENDING') return '30m 背景计算中';
@@ -85,7 +102,7 @@
       const roles={main:'操作周期',background:'背景',timing:'细化定位'};
       const periods=(context.periods||[]).slice().reverse().map(p=>
         p.frequency+' '+roles[p.role]+'：'+p.label+(p.anchor_aligned?'（一类拐点已对齐）':'')+(p.source_closed_at?'，截止 '+date(p.source_closed_at):''));
-      return [context.label,...periods,...(context.notes||[])].join('；');
+      return [context.label,higherContextMeaning(context),...periods,...(context.notes||[])].join('；');
     }
     if (!context) return '30m 背景尚未计算';
     const summary=higherContextText(context);
@@ -1297,8 +1314,12 @@
       if(f.higher!=='all')parts.push({aligned:'联动支持',turning:'转折候选',countertrend:'逆向风险',mixed:'信号分歧',independent:'本周期信号',unverified:'联动待核验'}[f.higher]);
       if(f.sort==='distance')parts.push('按靠近拐点排序');
       $('active-filter-summary').textContent=parts.filter(Boolean).join(' · ');
+      const help=$('period-link-selected-help');
+      if(help)help.textContent=f.higher==='all'?'当前保留全部联动情况；选择某一项，只过滤已有结果。':higherContextMeaning({category:f.higher});
     }
     function renderSignalSelection() {
+      const linkPlan=$('period-link-plan');
+      if(linkPlan)linkPlan.textContent=periodLinkPlan(state.filters.signal_period);
       const conditions=periodPointConditions(state.filters);
       const watchOnly=state.filters.origin==='watchlist';
       for(const input of document.querySelectorAll('[data-signal-period]')){
@@ -1498,11 +1519,15 @@
       ['age-filter','age'],['gain-filter','gain'],['sort-filter','sort'],['point-status-filter','point_status'],['higher-context-filter','higher']])$(id).value=state.filters[key];
     $('signal-search').value=state.filters.query;
     $('include-previous').checked=state.filters.include_previous;
+    const linkGlossary=$('period-link-glossary');
+    if(linkGlossary)for(const definition of Object.values(PERIOD_LINK_HELP))
+      linkGlossary.append(node('dt',definition.label),node('dd',definition.meaning));
+    $('higher-context-filter')?.setAttribute('aria-describedby','period-link-selected-help');
     renderSignalSelection();renderActiveFilters();
     void refresh(true);void initWatch();
     const poll=async()=>{if(!document.hidden)await refresh(false);setTimeout(poll,5000);};setTimeout(poll,5000);
     const quotes=()=>{void refreshQuotes();setTimeout(quotes,15000);};setTimeout(quotes,15000);
     document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshQuotes();});
   }
-  return {boot,filterRows,periodPointConditions,normalizeSignalFilter,applySignalPreset,setSignalPeriod,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows,sectorLevel,sectorSummary,higherContextText,higherContextDetail};
+  return {boot,filterRows,periodPointConditions,normalizeSignalFilter,applySignalPreset,setSignalPeriod,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows,sectorLevel,sectorSummary,higherContextText,higherContextDetail,higherContextMeaning,periodLinkPlan};
 });

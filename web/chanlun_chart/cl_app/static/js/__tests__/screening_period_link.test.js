@@ -52,3 +52,17 @@ test('period text states background and timing without inventing a larger confir
   assert.match(higherContextDetail(context),/1m 细化定位/);
   assert.match(higherContextDetail(context),/5m 操作周期/);
 });
+
+test('visible linkage meanings distinguish support, reversal and missing evidence',()=>{
+  const {higherContextMeaning,periodLinkPlan}=require('../screening_workbench.js');
+  for(const category of Object.keys(priorities)) {
+    const context={schema,category,periods:[]};
+    assert.ok(higherContextMeaning(context).length>20);
+    assert.match(higherContextText(context),/：/);
+  }
+  assert.match(higherContextMeaning({category:'aligned'}),/不要求三个周期/);
+  assert.match(higherContextMeaning({category:'turning'}),/不能视为已经反转/);
+  assert.match(higherContextMeaning({category:'unverified'}),/不等于当前周期没有买卖点/);
+  assert.match(periodLinkPlan('1m'),/5m、30m 背景/);
+  assert.match(periodLinkPlan('30m'),/30m 为最高参考周期/);
+});

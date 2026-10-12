@@ -117,14 +117,20 @@ _POINT_INDEX_FIELDS = (
 )
 
 
-def _compact_rows(rows, compact):
+def _compact_rows(rows, compact, *, context=False):
     if compact:
         fields = {"id", "code", "name", "market", "frequency", "origin", "stage", "latest_price", "candidate_evidence_version",
                   "source_closed_at", "gain_pct", "confirmation_age_sessions", "selection_available_at",
                   "evidence_available", "evidence_chart_available", "operational_macd_risk", "nested_confirmation", "exit_plan",
                   "latest_recheck_at", "latest_recheck_closed_at", "selection_check_version", "refresh_state", "result_source"}
+        point_fields = _POINT_INDEX_FIELDS
+        if context:
+            # Retain the identity, clocks and leg boundaries required by linkage,
+            # without copying full structural proof into a list response.
+            fields |= {"input_fingerprint"}
+            point_fields += ("price_basis_revision", "terminal_start_at")
         rows = [{**{key: value for key, value in row.items() if key in fields and value is not None},
-                 "point": {key: row["point"][key] for key in _POINT_INDEX_FIELDS if row["point"].get(key) is not None},
+                 "point": {key: row["point"][key] for key in point_fields if row["point"].get(key) is not None},
                  "detail_loaded": bool(row.get('refresh_state'))} for row in rows]
         for row in rows:
             if row.get("exit_plan"):
@@ -137,11 +143,23 @@ def _compact_rows(rows, compact):
     return rows
 
 
+def _index_rows(payload, source, *, compact):
+    return _compact_rows(_current_rows(payload, source), compact, context=True)
+
+
+def _compact_context(context):
+    """The list needs explanations; complete peer evidence belongs in detail."""
+    return {**{key: value for key, value in context.items() if key != "periods"},
+            "periods": [{key: value for key, value in period.items() if key in {
+                "frequency", "role", "state", "label", "source_closed_at", "anchor_aligned",
+            }} for period in context.get("periods", [])]}
+
+
 def _dashboard_projection(payload, compact):
     return {**{key: value for key, value in payload.items() if key not in {
         "selected", "observations", "entry_waiting", "consolidation_alerts", "processed_symbols", "processed_periods",
         "u295_lower_structural_witnesses", "recent_rejections", "verified_periods",
-    }}, "_workbench_rows": _current_rows(payload, payload.get('run_id', 'idle')),
+    }}, "_workbench_rows": _index_rows(payload, payload.get('run_id', 'idle'), compact=compact),
         '_workbench_verified': [(r.get('market','a'),r['code'],r['frequency']) for r in payload.get('verified_periods',[])],
         '_workbench_processed': [(r.get('market','a'),r['code']) for r in payload.get('processed_symbols',[])],
         '_workbench_processed_periods': [(r.get('market','a'),r['code'],r['frequency']) for r in payload.get('processed_periods',[])]}
@@ -214,11 +232,14 @@ def live_recheck_version(source, revision):
 def dashboard(*, background=False, compact=False):
     result = manager.results(background=background, project=lambda payload: _dashboard_projection(payload, compact))
     source = result.get("run_id", "idle")
-    rows, removed, live_version, unverified = _live_rows(result.get("_workbench_rows", _current_rows(result, source)),
+    projected_rows = result.get("_workbench_rows")
+    if projected_rows is None:
+        projected_rows = _current_rows(result, source)
+    rows, removed, live_version, unverified = _live_rows(projected_rows,
                                             source, result.get("current_source_revision"))
     from .screening_rollover import display_for
     display = display_for(str(manager.root))
-    rows, previous_count = display.merge(result, rows, project=_current_rows,
+    rows, previous_count = display.merge(result, rows, project=partial(_index_rows, compact=compact),
         live_filter=partial(_live_rows, preserve_unverified=True))
     context = higher_context.snapshot(manager, source, result.get('source_revision'),candidates=rows,
                                       source_current=result.get('source_current') is True)
@@ -243,6 +264,8 @@ def dashboard(*, background=False, compact=False):
             'schema':'native-period-link-v1','primary_frequency':row['frequency'],'category':'unverified',
             'label':'联动待核验','quality':'pending','priority':5,'periods':[],
             'notes':['等待对应周期的已核验计算结果。']}
+        if compact:
+            row['higher_context'] = _compact_context(row['higher_context'])
     sectors, members, catalog_at = _sector_catalog()
     membership = {}
     for sector_id, codes in members.items():
