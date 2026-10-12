@@ -492,6 +492,17 @@ class ExchangeQMT(Exchange):
             self.g_all_stocks = all_stocks
             return self.g_all_stocks
 
+    def screening_stocks(self, *, full_market_authorized: bool = False):
+        """Read the A-share universe without enumerating every quote instrument."""
+        if full_market_authorized is not True:
+            raise PermissionError('QMT full-market catalog enumeration requires explicit authorization')
+        from chanlun import config
+        from chanlun.exchange.qmt_screening_catalog import read_stocks
+        with _XTDATA_NATIVE_LOCK:
+            rows, diagnostics = read_stocks(xtdata, root=config.get_data_path())
+        self.screening_catalog_diagnostics = diagnostics
+        return rows
+
     def get_start_date_by_frequency(
         self, frequency: str, req_counts: int = None, *, as_of: datetime.datetime | None = None
     ) -> str:

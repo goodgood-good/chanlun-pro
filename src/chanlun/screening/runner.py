@@ -924,8 +924,13 @@ def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,
 def _catalog_worker(connection, settings, _run_dir):
     try:
         requested = set(settings.get("codes", []))
+        catalog_diagnostics = None
         if settings.get("scope") in {"all_a", "all_a_watchlist"}:
-            stocks = _exchange().all_stocks(full_market_authorized=True)
+            exchange = _exchange()
+            reader = getattr(type(exchange), 'screening_stocks', None)
+            stocks = (exchange.screening_stocks(full_market_authorized=True) if callable(reader)
+                      else exchange.all_stocks(full_market_authorized=True))
+            catalog_diagnostics = getattr(exchange, 'screening_catalog_diagnostics', None) if callable(reader) else None
         elif settings.get("scope") in {"watchlist", "symbols"}:
             stocks = []
         elif settings.get("scope") == "codes" and requested:
@@ -960,7 +965,8 @@ def _catalog_worker(connection, settings, _run_dir):
         stocks = [{**stock, "holding": True} if (stock.get("market", "a"), stock["code"]) in held
                   else {**stock, "holding_lookup_failed": True} if holding_lookup_failed else stock for stock in stocks]
         connection.send({"stocks": stocks,
-                         "excluded_requested_codes": sorted(requested - {s["code"] for s in stocks})})
+                         "excluded_requested_codes": sorted(requested - {s["code"] for s in stocks}),
+                         **({'catalog_diagnostics': catalog_diagnostics} if isinstance(catalog_diagnostics, dict) else {})})
     except Exception as exc:
         connection.send({"error": f"{type(exc).__name__}: {exc}"})
     finally:
@@ -1070,6 +1076,8 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
             raise ScreeningTimeBudget()
         stocks = catalog["stocks"]
         state["excluded_requested_codes"] = catalog["excluded_requested_codes"]
+        if isinstance(catalog.get('catalog_diagnostics'), dict):
+            state['catalog_diagnostics'] = catalog['catalog_diagnostics']
         contexts = {}
         if any(stock.get('market', 'a') == 'a' for stock in stocks):
             contexts = {frequency: _a_calendar_context(observed, frequency, settings['recent_sessions'],
