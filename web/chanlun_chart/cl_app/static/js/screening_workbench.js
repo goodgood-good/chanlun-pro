@@ -33,6 +33,7 @@
   const activeRun = status => ['starting','running'].includes(status);
   const EVIDENCE = {formal_center:'正式中枢成立',complete_leave:'离开段完成',complete_first_return:'首次回试完成',core_boundary_held:'回试未返回中枢区间',trend_divergence:'趋势背驰证据',consolidation_divergence:'盘整背驰证据',lower_extreme_retested:'破前极值后的完成回试',first_rebound:'首次反弹',first_retest:'首次回试',lower_level_confirmation:'次级别确认',internal_first_retest:'首次回试位于一买比较组合内部；二买可用时刻不早于一买确认。'};
   Object.assign(EVIDENCE,{
+    macd_first_contraction:'已收盘 MACD 同向柱首次缩短',
     live_first_return:'首次回试正在形成',core_boundary_currently_held:'当前回试仍在中枢区间外',
     temporary_consolidation_divergence:'暂现盘整背驰，末段尚未完成',temporary_trend_divergence:'暂现趋势背驰，末段尚未完成',
     forming_third_class_departure:'离开段尚在形成',provisional_macd_area_margin:'当前 MACD 面积满足预警余量',first_unfinished_retest_held:'首次回试尚未结束，暂未突破一类点极值',first_unfinished_return_holds_core:'首次返回尚未结束，暂未回到中枢',closed_local_turn:'已收盘K线出现局部转折',conditional_point_preview:'末段尚未确认，当前仅为条件预警',confirmed_first_class_parent:'对应一类点已确认',complete_adjacent_rebound:'相邻反弹段已完成',live_first_pullback:'首次回试正在形成',
@@ -68,6 +69,10 @@
     STALE_DATA:'30m 行情未更新',SESSION_CALENDAR_UNAVAILABLE:'交易日历未覆盖',
     CALENDAR_COVERAGE_UNKNOWN:'交易日历待核验',INVALID_SESSION:'30m 时段待核验'};
   function higherContextText(context) {
+    if(context?.schema==='native-period-link-v1') {
+      const peers=(context.periods||[]).filter(p=>p.role!=='main').slice().reverse();
+      return [context.label||'联动待核验',...peers.map(p=>p.frequency+' '+p.label)].join(' · ');
+    }
     if (!context || context.category === 'unknown') {
       if (context?.reason === 'PENDING') return '30m 背景计算中';
       if (context?.reason === 'NOT_COMPUTED') return '30m 背景尚未计算';
@@ -76,6 +81,12 @@
     return `30m ${HIGHER_CONTEXT[context.category] || context.category} · 截止 ${date(context.source_closed_at)} · 证据 ${date(context.evidence_available_at)}`;
   }
   function higherContextDetail(context) {
+    if(context?.schema==='native-period-link-v1') {
+      const roles={main:'操作周期',background:'背景',timing:'细化定位'};
+      const periods=(context.periods||[]).slice().reverse().map(p=>
+        p.frequency+' '+roles[p.role]+'：'+p.label+(p.anchor_aligned?'（一类拐点已对齐）':'')+(p.source_closed_at?'，截止 '+date(p.source_closed_at):''));
+      return [context.label,...periods,...(context.notes||[])].join('；');
+    }
     if (!context) return '30m 背景尚未计算';
     const summary=higherContextText(context);
     const trend=context.trend;
@@ -173,7 +184,8 @@
       if (filters.origin === 'watchlist' && row.origin !== 'watchlist') return false;
       const higher = row.higher_context?.category || 'unknown';
       if (filters.higher && filters.higher !== 'all') {
-        if (filters.higher === 'up' && !['up_trend_forming','up_segment'].includes(higher)) return false;
+        if(filters.higher==='unverified'&&['unknown','unverified'].includes(higher)) { /* Missing evidence stays explicit. */ }
+        else if (filters.higher === 'up' && !['up_trend_forming','up_segment'].includes(higher)) return false;
         else if (filters.higher === 'down' && !['down_trend_forming','down_segment'].includes(higher)) return false;
         else if (!['up','down'].includes(filters.higher) && higher !== filters.higher) return false;
       }
@@ -206,6 +218,10 @@
       (typeof a.gain_pct === 'number'?Math.abs(a.gain_pct):Infinity) -
       (typeof b.gain_pct === 'number'?Math.abs(b.gain_pct):Infinity) ||
       (b.selection_available_at||b.point?.available_at||0) - (a.selection_available_at||a.point?.available_at||0));
+    const rowGroup=row=>row.origin==='watchlist'?2:row.refresh_state?1:0;
+    if(filters.sort==='linkage')visible.sort((a,b)=>rowGroup(a)-rowGroup(b)||
+      (a.higher_context?.priority??5)-(b.higher_context?.priority??5)||
+      (b.selection_available_at||b.point?.available_at||0)-(a.selection_available_at||a.point?.available_at||0));
     return visible;
   }
   function pageRows(rows, page=1, size=50) {
@@ -254,16 +270,17 @@
   }
   function defaultFilters(origin='screening') {
     return {query:'',market:'all',origin,review:'all',stage:'all',risk:'all',sector:'',
-      point_status:'all',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent',
+      point_status:'all',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'linkage',
       ...normalizeSignalFilter(),include_previous:true};
   }
   function normalizeViewState(saved) {
     const result={filters:defaultFilters(),watch_group:''};
-    if(!saved||![1,2,3].includes(saved.version)||!saved.filters||typeof saved.filters!=='object'||Array.isArray(saved.filters))return result;
+    if(!saved||![1,2,3,4].includes(saved.version)||!saved.filters||typeof saved.filters!=='object'||Array.isArray(saved.filters))return result;
     const input=saved.filters,filters=result.filters;
     const enums={market:['all',...Object.keys(MARKET_NAMES)],origin:['screening','all','watchlist'],review:['all','pending','reviewed'],
-      center_order:['all','first'],age:['all','0','1','3','5'],gain:['all','1','3','5'],sort:['recent','distance']};
-    for(const [key,values] of Object.entries(enums))if(values.includes(input[key]))filters[key]=input[key];
+      center_order:['all','first'],age:['all','0','1','3','5'],gain:['all','1','3','5'],sort:['linkage','recent','distance']};
+    for(const [key,values] of Object.entries(enums))if(values.includes(input[key])&&!(key==='sort'&&saved.version<4&&input[key]==='recent'))filters[key]=input[key];
+    if(saved.version===4&&['all','aligned','turning','countertrend','mixed','independent','unverified'].includes(input.higher))filters.higher=input.higher;
     if(saved.version>=2)Object.assign(filters,normalizeSignalFilter(input));
     else if(input.signal_selection&&typeof input.signal_selection==='object'&&!Array.isArray(input.signal_selection)){
       // Previous views may contain several periods; restore exactly one.
@@ -273,7 +290,7 @@
       Object.assign(filters,{signal_period:period,signal_points:points(period)});
     }
     if(typeof input.include_previous==='boolean')filters.include_previous=input.include_previous;
-    if(saved.version===3&&['all','forming','confirmed'].includes(input.point_status))filters.point_status=input.point_status;
+    if(saved.version>=3&&['all','forming','confirmed'].includes(input.point_status))filters.point_status=input.point_status;
     for(const [key,limit] of [['query',200],['sector',200]])
       if(typeof input[key]==='string')filters[key]=input[key].trim().slice(0,limit);
     if(typeof saved.watch_group==='string')result.watch_group=saved.watch_group.trim().slice(0,100);
@@ -287,7 +304,7 @@
   }
   function advancedFilterCount(filters) {
     const defaults=defaultFilters();
-    return ['market','origin','sector','review','center_order','age','gain','sort','include_previous']
+    return ['market','origin','sector','review','center_order','age','gain','sort','higher','include_previous']
       .filter(key=>filters[key]!==defaults[key]).length;
   }
   function boot() {
@@ -296,12 +313,13 @@
     const phone=!!globalThis.WorkspaceDevice?.isPhone;
     const periodButtons=Array.from(document.querySelectorAll('[data-frequency]'));
     const viewUser=document.querySelector('main')?.dataset.user||'';
-    const viewKey=viewUser?`screening-view:v3:${encodeURIComponent(viewUser)}`:null;
+    const viewKey=viewUser?`screening-view:v4:${encodeURIComponent(viewUser)}`:null;
     let savedView=normalizeViewState(null);
     if(viewKey)try{
       const current=sessionStorage.getItem(viewKey);
-      const previous=current==null?sessionStorage.getItem(`screening-view:v2:${encodeURIComponent(viewUser)}`):null;
-      const raw=current==null?(previous==null?sessionStorage.getItem(`screening-view:v1:${encodeURIComponent(viewUser)}`):previous):current;
+      const previous=current==null?sessionStorage.getItem(`screening-view:v3:${encodeURIComponent(viewUser)}`):null;
+      const older=current==null&&previous==null?sessionStorage.getItem(`screening-view:v2:${encodeURIComponent(viewUser)}`):null;
+      const raw=current??previous??older??sessionStorage.getItem(`screening-view:v1:${encodeURIComponent(viewUser)}`);
       if(raw&&raw.length<=10000)savedView=normalizeViewState(JSON.parse(raw));
     }catch(_){/* A private or unavailable browser store must not block filtering. */}
     const state = {data:null,serial:0,version:'',rows:[],selected:null,watch:[],quotes:new Map(),
@@ -317,8 +335,8 @@
     function persistView() {
       if(!viewKey)return;
       try {
-        const view=normalizeViewState({version:3,filters:state.filters,watch_group:state.watchGroup||state.preferredWatchGroup});
-        sessionStorage.setItem(viewKey,JSON.stringify({version:3,...view}));
+        const view=normalizeViewState({version:4,filters:state.filters,watch_group:state.watchGroup||state.preferredWatchGroup});
+        sessionStorage.setItem(viewKey,JSON.stringify({version:4,...view}));
       }catch(_){/* Filtering remains usable when browser storage is full or disabled. */}
     }
     try {
@@ -482,12 +500,9 @@
       $('signal-count').textContent=initialLoading?'—':currentCandidates.length;
       const waiting=currentCandidates.filter(isWaiting).length;
       const higher=state.data.higher_context||{};
-      $('higher-context-status').textContent=higher.status==='disabled'?'递归 30m 走势背景已停用；请直接选择 30m 中枢提醒。':higher.status==='completed'?
-        `30m 独立背景已完成 ${higher.completed}/${higher.total} 只；按本轮 5m 截止时刻核对。方向筛选只影响页面，不改变买卖点、监听或通知。`:
-        higher.status==='running'||higher.status==='starting'?
-        `30m 独立背景计算中 ${higher.completed||0}/${higher.total||0} 只；缺少的证据暂列“未知”。`:
-        higher.status==='failed'?`30m 背景计算失败：${higher.error||'请查看任务日志'}`:
-        status.source_current===false?'本轮为旧版选股结果；30m 独立背景将在新一轮选股完成后计算。':'30m 独立背景等待本轮选股完成。';
+      $('higher-context-status').textContent=status.source_current===false?
+        '本轮保留历史结果；周期联动等待新规则核验。':
+        `1m / 5m / 30m 周期联动：${higher.completed||0} / ${higher.total||0} 条证据已齐；其余标为待核验。`;
       $('stage-counts').textContent=initialLoading?'正在读取候选…':nativeSignals?
         `${status.frozen_native_review?'原截止时刻已确认买卖点':'本轮正式买卖点提醒'} ${currentCandidates.length-waiting} 条${waiting?` · 未确认预警 ${waiting} 条`:''}`:
         `本轮筛选已通过 ${currentCandidates.length-waiting} · 条件待齐 ${waiting}`;
@@ -1260,7 +1275,7 @@
       $('advanced-filters').open=false;$('include-previous').checked=true;
       $('signal-search').value='';$('sector-search').value='';
       for(const id of ['market-filter','review-filter','stage-filter','risk-filter','lower-status-filter','higher-context-filter','center-order-filter','age-filter','gain-filter'])$(id).value='all';
-      $('point-status-filter').value='all';$('sort-filter').value='recent';$('origin-filter').value=origin;
+      $('point-status-filter').value='all';$('sort-filter').value='linkage';$('origin-filter').value=origin;
       persistView();
     }
     function signalFilterText() {
@@ -1279,6 +1294,7 @@
       if(f.age!=='all')parts.push(f.age==='0'?'本轮交易日':`距本轮截止 ≤ ${f.age} 个交易日`);
       if(f.gain!=='all')parts.push(`本轮收盘距拐点 ≤ ${f.gain}%`);
       if(f.review!=='all')parts.push(f.review==='reviewed'?'已复核':'待复核');
+      if(f.higher!=='all')parts.push({aligned:'联动支持',turning:'转折候选',countertrend:'逆向风险',mixed:'信号分歧',independent:'本周期信号',unverified:'联动待核验'}[f.higher]);
       if(f.sort==='distance')parts.push('按靠近拐点排序');
       $('active-filter-summary').textContent=parts.filter(Boolean).join(' · ');
     }
@@ -1479,7 +1495,7 @@
       const option=node('option',MARKET_NAMES[state.filters.market]);option.value=state.filters.market;$('market-filter').append(option);
     }
     for(const [id,key] of [['market-filter','market'],['origin-filter','origin'],['review-filter','review'],['center-order-filter','center_order'],
-      ['age-filter','age'],['gain-filter','gain'],['sort-filter','sort'],['point-status-filter','point_status']])$(id).value=state.filters[key];
+      ['age-filter','age'],['gain-filter','gain'],['sort-filter','sort'],['point-status-filter','point_status'],['higher-context-filter','higher']])$(id).value=state.filters[key];
     $('signal-search').value=state.filters.query;
     $('include-previous').checked=state.filters.include_previous;
     renderSignalSelection();renderActiveFilters();
@@ -1488,5 +1504,5 @@
     const quotes=()=>{void refreshQuotes();setTimeout(quotes,15000);};setTimeout(quotes,15000);
     document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshQuotes();});
   }
-  return {boot,filterRows,periodPointConditions,normalizeSignalFilter,applySignalPreset,setSignalPeriod,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows,sectorLevel,sectorSummary};
+  return {boot,filterRows,periodPointConditions,normalizeSignalFilter,applySignalPreset,setSignalPeriod,normalizeViewState,hasFilterChanges,advancedFilterCount,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows,sectorLevel,sectorSummary,higherContextText,higherContextDetail};
 });

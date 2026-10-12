@@ -45,7 +45,8 @@ class _StrictChartCD:
         return [SimpleNamespace(date=self.evidence.source_closed_at)]
 
     def get_native_centers(self):
-        return SimpleNamespace(centers=(), previews=())
+        from chanlun.core.strict_structure.native_center_view import calculate_native_center_views
+        return calculate_native_center_views((), 0)
 
     def get_segment_units(self):
         return ()

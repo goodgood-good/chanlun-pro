@@ -2012,9 +2012,9 @@ test('a saved watchlist selection excluded by default scope cannot block a runni
   assert.equal(session.getItem('screening-selection:tester:a'),'n0');
 });
 
-const viewKey=user=>'screening-view:v3:'+encodeURIComponent(user);
+const viewKey=user=>'screening-view:v4:'+encodeURIComponent(user);
 function saveView(session,filters={},watch_group='',user='tester'){
-  session.setItem(viewKey(user),JSON.stringify({version:3,filters,watch_group}));
+  session.setItem(viewKey(user),JSON.stringify({version:4,filters,watch_group}));
 }
 const readView=(session,user='tester')=>JSON.parse(session.getItem(viewKey(user)));
 
@@ -2069,7 +2069,7 @@ test('view persistence is account scoped and background refresh does not rewrite
   chooseSignal(first,'1m',['1buy']);choose(first,'market-filter','a');
   first.get('include-previous').click();
   assert.deepEqual(signalFields(readView(session,alice).filters),{signal_period:'1m',signal_points:['1buy']});
-  assert.equal(readView(session,alice).version,3);
+  assert.equal(readView(session,alice).version,4);
   const saved=session.getItem(viewKey(alice)),writes=session.writes.filter(write=>write.key===viewKey(alice)).length;
   await first.timers[0]();await settle();first.get('refresh').click();await settle();
   assert.equal(session.getItem(viewKey(alice)),saved);
@@ -2096,7 +2096,7 @@ for(const [label,legacy,expected,ids] of [
   assert.deepEqual(selectedSignals(ui),expected);assert.deepEqual(displayedIds(ui),ids);
   assert.equal(ui.get('market-filter').value,'a');assert.equal(ui.get('include-previous').checked,false);
   assert.equal(session.reads.filter(key=>key===oldKey).length,1);assert.equal(session.getItem(viewKey('tester')),null,'background restoration never rewrites preferences');
-  ui.get('include-previous').click();assert.equal(readView(session).version,3);
+  ui.get('include-previous').click();assert.equal(readView(session).version,4);
   assert.deepEqual(signalFields(readView(session).filters),expected);assert.equal('signal_selection' in readView(session).filters,false);
   assert.equal(session.getItem(oldKey),old,'migration must not destroy the old snapshot');
   session.reads.length=0;
@@ -2184,10 +2184,10 @@ test('reset clears visible and hidden refinements, closes advanced conditions, a
   const session=sessionFixture(),data=crossPeriodCandidates();
   const ui=page(async url=>dispatch(data,url),undefined,false,true,false,session);await settle();
   for(const [id,value] of [['market-filter','us'],['origin-filter','all'],['review-filter','reviewed'],['center-order-filter','first'],
-    ['age-filter','3'],['gain-filter','3'],['sort-filter','distance'],['risk-filter','blocked'],['point-status-filter','all'],['lower-status-filter','missing'],['higher-context-filter','missing']])choose(ui,id,value);
+    ['age-filter','3'],['gain-filter','3'],['sort-filter','distance'],['risk-filter','blocked'],['point-status-filter','all'],['lower-status-filter','missing'],['higher-context-filter','unverified']])choose(ui,id,value);
   ui.get('signal-search').value='missing';ui.get('signal-search').listeners.input();ui.get('include-previous').click();
   ui.get('signal-clear').click();ui.get('advanced-filters').open=true;
-  assert.equal(ui.get('advanced-filter-summary').textContent,'更多条件 · 8','exposed search, hidden legacy predicates and matrix do not inflate the advanced count');
+  assert.equal(ui.get('advanced-filter-summary').textContent,'更多条件 · 9','the visible linkage condition counts; hidden legacy predicates do not');
   ui.get('reset').click();
   assert.equal(ui.get('advanced-filters').open,false);
   assert.equal(ui.get('reset').disabled,true);assert.equal(ui.get('advanced-filter-summary').textContent,'更多条件');
@@ -2431,7 +2431,7 @@ test('slow reviewed membership keeps sector loading explicit until the source-sp
   assert.doesNotMatch(ui.get('sector-status').textContent,/0 个匹配|0 个板块/);
   release(response({latest:{'5m-3':{decision:'watch'},'5m-18':{decision:'watch'}},history:[]}));await settle();
   assert.deepEqual(sectorIds(ui),[industryId(18),industryId(3)]);
-  assert.deepEqual(displayedIds(ui),['5m-3','5m-18'],'board priority must not reorder the candidate queue');
+  assert.deepEqual(displayedIds(ui),['5m-18','5m-3'],'equal linkage verdicts retain the newest signal first, independently of board priority');
 });
 
 test('sector ordering uses current time and distinct market symbols before retained watch and empty sectors',async()=>{

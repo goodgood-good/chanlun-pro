@@ -84,6 +84,7 @@ def _current_rows(result, source, *, candidate_id=None):
             "frequency": item["frequency"], "point": point,
             "exit_plan": item.get("exit_plan"), "confirmation_exit_plan": item.get("confirmation_exit_plan"),
             "latest_price": item.get("latest_price"), "source_closed_at": item.get("source_closed_at"),
+            "input_fingerprint":item.get('input_fingerprint') or (item.get('evidence') or {}).get('input_fingerprint'),
             "gain_pct": item.get("distance_from_anchor_pct"),
             "anchor_age_sessions": item.get("anchor_age_sessions"),
             "confirmation_age_sessions": item.get("confirmation_age_sessions"),
@@ -161,7 +162,9 @@ def candidate_detail(source, candidate_id):
         if unverified:
             raise ValueError("该候选正在复核或最新行情复核失败，核验通过后再显示")
         raise ValueError("最新复核已确认该候选退出，请刷新结果")
-    return {"source": source, "candidate": {**result["candidate"], "detail_loaded": True},
+    context=higher_context.event_context(manager,result['candidate'],result.get('source_revision')) if result.get('source_current') else None
+    return {"source": source, "candidate": {**result["candidate"], "detail_loaded": True,
+                                              **({'higher_context':context} if context else {})},
             "live_recheck_version": version,
             "evidence_version": result.get("evidence_version"),
             "result_reader_revision": result.get("result_reader_revision")}
@@ -217,6 +220,8 @@ def dashboard(*, background=False, compact=False):
     display = display_for(str(manager.root))
     rows, previous_count = display.merge(result, rows, project=_current_rows,
         live_filter=partial(_live_rows, preserve_unverified=True))
+    context = higher_context.snapshot(manager, source, result.get('source_revision'),candidates=rows,
+                                      source_current=result.get('source_current') is True)
     rows = _compact_rows(rows, compact)
     status = {k: v for k, v in result.items() if k not in (
         "selected", "observations", "entry_waiting", "consolidation_alerts", "recent_rejections", "rejection_counts", "reason_labels", "errors",
@@ -225,7 +230,6 @@ def dashboard(*, background=False, compact=False):
     )}
     status["error_count"] = (result.get("error_count") if result.get("results_loading")
                              else len(result.get("errors", [])))
-    context = higher_context.snapshot(manager, source, result.get("source_revision"))
     status["higher_context_version"] = higher_context.status_version(manager, source)
     status["live_exclusion_count"] = removed
     status["live_unverified_count"] = unverified
@@ -235,13 +239,10 @@ def dashboard(*, background=False, compact=False):
     status['previous_results_loading'] = bool(source != 'idle' and (result.get('status') != 'completed' or result.get('results_loading'))
                                              and display.waiting_for_baseline(source))
     for row in rows:
-        key = (row["market"], row["code"], row.get("source_closed_at"))
-        row["higher_context"] = context["rows"].get(key) or {
-            "frequency": "30m", "source_closed_at": row.get("source_closed_at"),
-            "category": "unknown", "quality": "unknown",
-            "reason": "DISABLED" if context["status"] == "disabled" else
-                      "NOT_COMPUTED" if context["status"] in {"not_started", "failed"} else "PENDING",
-        }
+        row['higher_context']=context['rows'].get(row['id']) or {
+            'schema':'native-period-link-v1','primary_frequency':row['frequency'],'category':'unverified',
+            'label':'联动待核验','quality':'pending','priority':5,'periods':[],
+            'notes':['等待对应周期的已核验计算结果。']}
     sectors, members, catalog_at = _sector_catalog()
     membership = {}
     for sector_id, codes in members.items():

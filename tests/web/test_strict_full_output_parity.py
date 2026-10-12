@@ -10,6 +10,7 @@ import pytest
 from chanlun.cl_utils.strict_chart_runtime import build_strict_chart_cd
 from chanlun.core.strict_structure.center_relation import classify_center_relation
 from chanlun.core.strict_structure.models import CenterRelation
+from chanlun.core.strict_structure.native_point_preview import is_point_preview, preview_source_valid
 from chanlun.screening.runner import snapshot_for
 
 
@@ -49,7 +50,7 @@ def test_native_chart_and_screening_keep_center_and_reminder_source_ids(path):
     assert snapshot["native_member_policy"]["member_basis"] == "native_locked_segment"
     assert snapshot["native_member_policy"]["recursive_type_proven"] is False
     assert snapshot["declared_30m_fixed_view"] is None
-    assert snapshot["formal_point_issued"] is bool(snapshot["levels"][0]["points"])
+    assert snapshot["formal_point_issued"] is any(p.get('formal_point_issued') is True for p in snapshot['levels'][0]['points'])
     assert len(snapshot["levels"]) == 1
     level = snapshot["levels"][0]
     assert level["trend_types"] == level["trend_shapes"] == level["divergences"] == []
@@ -70,6 +71,11 @@ def test_native_chart_and_screening_keep_center_and_reminder_source_ids(path):
         assert item["center_id"] in actual
         assert item["source_kind"] == "segment"
         assert item["evidence_scope"] == "native_center_signal"
+        if is_point_preview(item):
+            assert item['formal_point_issued'] is False and item['confirmed_at'] is None
+            assert item['available_at']==snapshot['source_closed_at']
+            assert preview_source_valid(snapshot,item,{c['center_id']:c for c in level['centers']},snapshot['screening_segments'])
+            continue
         assert item["status"] == "confirmed"
         assert item["formal_point_issued"] is True
         assert item["available_at"] <= snapshot["source_closed_at"]

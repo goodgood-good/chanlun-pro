@@ -222,17 +222,29 @@ def signal_body(row):
     if phase == "invalidated":
         lines.append("失效复核：" + date(row.get("invalidation_checked_at", row.get("source_closed_at"))))
     lines.append("行情截止：" + date(row.get("source_closed_at")) + "（北京时间）")
+    context=row.get('higher_context') or {}
+    if context.get('schema')=='native-period-link-v1':
+        lines.append('周期联动：'+context.get('label','联动待核验'))
+        peers=[item['frequency']+' '+item['label'] for item in context.get('periods',[]) if item.get('role')!='main']
+        if peers:lines.append('；'.join(peers))
+        if context.get('notes'):lines.append(context['notes'][0])
     return lines
 
 
-def signal_content(events, stamp):
+def signal_content(events, stamp, *, _compact_context=False):
     group = '我的持仓' if events and all(event_priority([row]) for row in events) else '监听更新'
     title = heading(events[0]) if len(events) == 1 else f"【{group}】{len(events)} 条信号"
     lines = [title]
     for row in events:
         lines += ["", *([heading(row)] if len(events) > 1 else []), *signal_body(row)]
     lines.append("消息生成：" + date(stamp))
-    return "\n".join(lines)
+    content="\n".join(lines)
+    if not _compact_context and len(content.encode('utf-8'))>3800 and any(row.get('higher_context') for row in events):
+        # A peer period may finish after enqueue/coalescing. Keep every signal
+        # and its linkage verdict without overflowing the provider text limit.
+        compact=[{**row,'higher_context':{**(row.get('higher_context') or {}),'periods':[],'notes':[]}} for row in events]
+        return signal_content(compact,stamp,_compact_context=True)
+    return content
 
 
 def illustrated_signal(event, url, stamp):

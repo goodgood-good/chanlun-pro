@@ -489,9 +489,22 @@ class SignalMonitor:
                 return [], DeferredEvents(events)
             # Dependency workers never mutate signals or request rechecks.
             # Re-read the live state here after all dependency I/O completes.
-            return self._validate_notification_state(events, revision, version_known, fresh_holdings, expected_cutoffs)
+            validated = self._validate_notification_state(events, revision, version_known, fresh_holdings, expected_cutoffs)
         finally:
             self._lock.release()
+        # Context is auxiliary and asynchronous. It cannot hold the monitor
+        # lock or delay a current primary warning while peer periods load.
+        from .higher_context import event_context
+        valid, pending = validated
+        for event in valid:
+            if (event.get('stage') in {'approaching','confirmed'} and event.get('point_type') in POINT_TYPES
+                    and event.get('evidence_scope')=='native_center_signal'):
+                try:
+                    context=event_context(self.screening,event,revision)
+                    if context:event['higher_context']=context
+                except (OSError,ValueError,TypeError,KeyError):
+                    pass
+        return valid, pending
 
     def _read_notification_dependencies(self, events, scan_types):
         """Read-only phase; only its original request can resume a recent result."""
@@ -3548,6 +3561,11 @@ class SignalMonitor:
                 self._wake.set()
         if pool_changed:
             self._sync_watchlist()
+        try:
+            from .higher_context import prefetch
+            prefetch(self.screening,result)
+        except (OSError,ValueError,TypeError,KeyError):
+            pass  # Secondary context never invalidates the primary result.
         if notifications_enabled and time.monotonic() >= self._notification_retry_at:
             try:
                 self._enqueue_pending_notifications()

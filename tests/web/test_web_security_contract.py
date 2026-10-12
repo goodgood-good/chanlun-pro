@@ -55,4 +55,5 @@ def test_chart_uses_same_origin_iframe_under_nonce_csp():
     assert enabled is not None
     assert '"iframe_loading_same_origin"' in enabled.group(1)
     assert "enabled_features: viewportOptions.enabledFeatures" in source
-    assert 'location.assign("/?market="' in source
+    assert 'const target = "/?market=" + encodeURIComponent(market) + "&code=" + encodeURIComponent(code)' in source
+    assert 'location.assign(target)' in source
