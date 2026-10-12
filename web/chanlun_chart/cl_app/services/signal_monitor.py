@@ -238,6 +238,7 @@ def _clear_period_retries(state, key, periods):
 
 def _signal(row):
     point = row["point"]
+    from chanlun.core.strict_structure.native_point_preview import is_point_preview
     nested = row.get("nested_confirmation") or {}
     following = row.get("confirmation_segment") or {}
     identity = json.dumps([row.get("market", "a"), row["code"], row["frequency"], point["point_id"]])
@@ -246,6 +247,8 @@ def _signal(row):
         "code": row["code"], "market": row.get("market", "a"), "name": row.get("name", row["code"]),
         "frequency": row["frequency"], "point_type": point["point_type"],
         "point_id": point["point_id"],
+        **({'preview_key':point['preview_key']} if point.get('preview_key') else {}),
+        **({'signal_type':'native_point_preview','formal_point_issued':False} if is_point_preview(point) else {}),
         'price_basis_revision': point.get('price_basis_revision'),
         'confirmation_delay_bars': row.get('confirmation_delay_bars'),
         "evidence_scope": point.get("evidence_scope"),
@@ -550,7 +553,8 @@ class SignalMonitor:
                 continue
             if key not in seed.get("codes", []) or frequency not in seed.get("settings", {}).get("frequencies", []):
                 continue
-            if (event.get('available_at') or 0) < max(
+            admission_at = event.get('recorded_at') if event.get('signal_type') == 'native_point_preview' else event.get('available_at')
+            if (admission_at or 0) < max(
                     state.get('notification_frequency_since', {}).get(frequency, 0),
                     state.get('notification_symbol_since', {}).get(key, 0)):
                 continue
@@ -591,8 +595,9 @@ class SignalMonitor:
                 # current negative proof, and must never become a new signal.
                 from .dingtalk_notifications import eligible_signal_events, live_signal_events
                 stamp = self.now().timestamp()
-                if (event.get('stage') != 'confirmed'
-                        or event.get('point_status', event.get('stage')) != 'confirmed'
+                stages = {'approaching','invalidated'} if event.get('signal_type') == 'native_point_preview' else {'confirmed'}
+                if (event.get('stage') not in stages
+                        or event.get('point_status', event.get('stage')) not in stages
                         or not live_signal_events([event], stamp)
                         or not eligible_signal_events([event], since=state.get('notification_since', 0), stamp=stamp)):
                     continue
@@ -604,7 +609,7 @@ class SignalMonitor:
                             and isinstance(check.get('identities'), list) and event['id'] not in check['identities'])
                 known = state['known'].get(event['id'], {})
                 newer = (known.get('updated_at') or 0) >= event['recorded_at']
-                superseded = newer and (known.get('stage') not in (None, 'confirmed')
+                superseded = newer and (known.get('stage') not in (None, event.get('stage'))
                     or known.get('notification_authorized') is False
                     or known.get('notification_state') not in (None, signal_status_key(event)))
                 if negative or superseded:
@@ -613,7 +618,8 @@ class SignalMonitor:
                     self._request_notification_recheck(event, expected, revision)
                 pending.append(event)
                 continue
-            allowed = {"warning", "confirmed", "invalidated"} if consolidation else {"confirmed"}
+            allowed = ({'approaching','invalidated'} if event.get('signal_type') == 'native_point_preview' else
+                       {"warning", "confirmed", "invalidated"} if consolidation else {"confirmed"})
             legacy_confirmation = (consolidation and "hypothesis_id" not in event and "lifecycle_cycle" not in event
                                    and event.get("stage") == "confirmed" and item is not None
                                    and item.get("stage") == "confirmed")
@@ -1922,12 +1928,14 @@ class SignalMonitor:
             daily = self._load().get("daily") or {}
             for phase in ("morning", "afternoon"):
                 record = daily.get(phase) or {}
-                if record.get("run_id") != manual.get("run_id") or record.get("status") != "started":
+                updating = manual.get('status') == 'cancelled' and manual.get('stop_reason') == 'policy_update'
+                if record.get("run_id") != manual.get("run_id") or (record.get("status") != "started"
+                        and not (updating and record.get('status') == 'failed')):
                     continue
                 healthy = manual["status"] == "completed" and not all_periods_failed(manual)
                 budget_stopped = manual.get('stop_reason') == 'time_budget'
                 record["status"] = ('partial' if manual.get('completed', 0) else 'timed_out') if budget_stopped else (
-                    'completed' if healthy else 'failed')
+                    'updating' if updating else 'completed' if healthy else 'failed')
                 record["finished_at"] = manual.get("finished_at")
                 if manual.get('stop_reason') == 'time_budget':
                     record.update(completed=manual.get('completed', 0), total=manual.get('total', 0))
@@ -2029,10 +2037,11 @@ class SignalMonitor:
             if manual["status"] in ACTIVE:
                 return
             revision=manual.get('current_source_revision')
-            if (manual.get('status') in {'failed','interrupted'}
+            if (manual.get('status') in {'failed','interrupted','cancelled'}
                     and phase_state.get('run_id')==manual.get('run_id')
                     and revision and manual.get('source_revision') and manual['source_revision']!=revision
-                    and str(manual.get('error','')).startswith('RuntimeError: Screening source changed')
+                    and (str(manual.get('error','')).startswith('RuntimeError: Screening source changed')
+                         or manual.get('status') == 'cancelled' and manual.get('stop_reason') == 'policy_update')
                     and phase_state.get('source_recovery_revision')!=revision):
                 # A deployment interruption is not a failed data attempt. Give
                 # the new code one normal retry budget, once per revision.
@@ -3171,7 +3180,32 @@ class SignalMonitor:
                 historical_period = bool(period_since and (item.get('available_at') or 0) < period_since)
                 symbol_since = state.get('notification_symbol_since', {}).get(_symbol_key(item), 0)
                 historical_member = bool(symbol_since and (item.get('available_at') or 0) < symbol_since)
+                if item.get('signal_type') == 'native_point_preview' and _recent_clock(
+                        self.now(), item['source_closed_at'], item['frequency']):
+                    # A newly watched, still-unconfirmed structure can warn on
+                    # the current closed bar. Do not wait another 30m candle
+                    # merely because admission occurred after that bar closed.
+                    historical_period = historical_member = False
+                    if previous is None:
+                        reclassified = False
                 notification_authorized = not reclassified and not historical_period and not historical_member
+                if item.get('signal_type') == 'native_point_preview':
+                    item['lifecycle_cycle'] = (previous or {}).get('lifecycle_cycle', 0)
+                    if previous and previous.get('stage') in {'invalidated','left'}:
+                        item['lifecycle_cycle'] += 1
+                    prior_preview = previous_signals.get(identity, {})
+                    old_stop = ((prior_preview.get('exit_plan') or {}).get('stop_loss') or {}).get('price')
+                    new_anchor = item.get('anchor_price')
+                    if (prior_preview.get('stage') == 'approaching' and item['point_type'][0] in {'1','2'}
+                            and item.get('price_basis_revision') == prior_preview.get('price_basis_revision')
+                            and all(type(value) in (int,float) and math.isfinite(value) for value in (old_stop,new_anchor))
+                            and (new_anchor < old_stop if item['point_type'].endswith('buy') else new_anchor > old_stop)):
+                        item['lifecycle_cycle'] += 1
+                        item['preview_repriced'] = True
+                linked_preview = next((old for old in previous_signals.values()
+                    if old.get('signal_type') == 'native_point_preview' and old.get('preview_key')
+                    and old['preview_key'] == item.get('preview_key') and _symbol_key(old) == _symbol_key(item)
+                    and old['frequency'] == item['frequency']), None) if item['stage'] == 'confirmed' else None
                 if item.get("signal_type") == "consolidation_divergence":
                     cycle = (previous or {}).get("lifecycle_cycle", 0)
                     if item["stage"] == "warning" and previous and previous.get("stage") in {"invalidated", "left"}:
@@ -3204,7 +3238,10 @@ class SignalMonitor:
                 item["state_changed_at"] = stamp if changed else ((previous or {}).get("state_changed_at")
                                                                   or previous_item.get("state_changed_at"))
                 item["first_warned_at"] = (previous or {}).get("first_warned_at") or previous_item.get("first_warned_at")
-                if item["stage"] == "warning" and (previous is None or previous.get("stage") in {"invalidated", "left"}):
+                if linked_preview:
+                    item['first_warned_at'] = linked_preview.get('first_warned_at')
+                    item['confirmed_preview_id'] = linked_preview['id']
+                if item["stage"] in {"warning", "approaching"} and (previous is None or previous.get("stage") in {"invalidated", "left"} or item.get('preview_repriced')):
                     item["first_warned_at"] = stamp
                 if not item["first_warned_at"] and item.get("signal_type") == "consolidation_divergence":
                     prior_warnings = [e for e in events if e.get("id") in {identity, legacy}
@@ -3215,7 +3252,7 @@ class SignalMonitor:
                     previous["notification_state"] != notification_state if "notification_state" in previous
                     else previous["stage"] != item["stage"] or (
                         item["point_status"] == "confirmed" and item["stage"] != "confirmed")
-                ) or (item["stage"] == "warning" and previous.get("notification_authorized") is False
+                ) or (item["stage"] in {"warning", "approaching"} and previous.get("notification_authorized") is False
                       and notification_authorized):
                     event = {**item, "recorded_at": stamp, "run_id": result["run_id"],
                              "change": "discovered" if previous is None else "changed"}
@@ -3235,6 +3272,7 @@ class SignalMonitor:
                                    "notification_authorized": notification_authorized,
                                    "warning_recovery_cutoff": item.get('warning_recovery_cutoff'),
                                    **{k: item.get(k) for k in ("first_detected_at", "first_warned_at", "state_changed_at")}}
+            pending_point_previews = set()
             for identity, previous in previous_signals.items():
                 if (touched(previous,checked) and identity not in signals
                         and (previous.get("market", "a"), previous["code"]) not in failed_all_periods
@@ -3242,6 +3280,36 @@ class SignalMonitor:
                         and not (previous.get("signal_type") == "consolidation_divergence" and (
                             (previous.get("market", "a"), previous["code"], previous["frequency"]) in failed_consolidation
                             or (previous.get("market", "a"), previous["code"], None) in failed_consolidation))):
+                    if previous.get('signal_type') == 'native_point_preview' and previous.get('stage') in {'approaching','invalidated'}:
+                        period = next((p for p in result.get('verified_periods', [])
+                            if _symbol_key(p) == _symbol_key(previous) and p['frequency'] == previous['frequency']), None)
+                        completed_preview = any(item.get('confirmed_preview_id') == identity for item in signals.values())
+                        if completed_preview:
+                            known[identity] = {**known.get(identity,{}), 'stage':'confirmed','updated_at':stamp}
+                            continue
+                        if not period or period.get('point_preview_checked') is not True:
+                            pending_point_previews.add(identity)
+                            continue
+                        cutoff = period['source_closed_at']
+                        if previous['stage'] == 'approaching':
+                            item = {**previous,'stage':'invalidated','point_status':'invalidated','selection_status':'invalidated',
+                                'source_closed_at':cutoff,'available_at':cutoff,'invalidated_at':stamp,'state_changed_at':stamp,
+                                'latest_close':period.get('latest_close'),'invalidation_reason':'本轮已完成结构核验，原未确认买卖点条件不再满足',
+                                'invalidation_reference':deepcopy(previous),'evidence_run_id':result['run_id'],'evidence':None}
+                            authorized = known.get(identity,{}).get('notification_authorized',False)
+                            authorized &= not self._historical_reclassification(state['selection_checks'].get(
+                                f"{_symbol_key(previous)}:{previous['frequency']}",{}),result.get('source_revision'),cutoff)
+                            event = {**item,'change':'changed','recorded_at':stamp,'run_id':result['run_id'],
+                                     'external_notifications':authorized}
+                            events.insert(0,event)
+                            if authorized:
+                                changed_events.append(event)
+                            known[identity] = {**known.get(identity,{}),'stage':'invalidated','notification_state':signal_status_key(item),
+                                'updated_at':stamp,'lifecycle_cycle':item.get('lifecycle_cycle',0)}
+                            signals[identity] = item
+                        elif stamp-previous.get('invalidated_at',0)<1800:
+                            signals[identity] = {**previous,'source_closed_at':cutoff,'latest_close':period.get('latest_close')}
+                        continue
                     if previous.get("signal_type") == "consolidation_divergence" and previous.get("stage") in {"warning", "invalidated"}:
                         period = next((period for period in result.get("verified_periods", [])
                                        if _symbol_key(period) == _symbol_key(previous)
@@ -3294,7 +3362,7 @@ class SignalMonitor:
             state["unverified_signals"] = {
                 identity: item for identity, item in previous_signals.items()
                 if _symbol_key(item) in pool and identity not in signals
-                and (not touched(item,checked) and identity in state["unverified_signals"]
+                and (identity in pending_point_previews or not touched(item,checked) and identity in state["unverified_signals"]
                      or touched(item,checked) and (
                          (item.get("market", "a"), item["code"]) in failed_all_periods
                          or (item.get("market", "a"), item["code"], item["frequency"]) in failed_periods

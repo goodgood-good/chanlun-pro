@@ -35,6 +35,8 @@
   min-height: 44px;
 }
 .signal-presets { display: flex; align-items: center; gap: 6px; }
+.signal-status-filter { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.cp-content-page.cp-screening .signal-status-filter select { min-height: 44px; max-width: 100%; }
 .signal-presets-label { flex: 0 0 auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .signal-presets button { min-width: 52px; min-height: 44px; padding: 6px 12px; }
 .signal-presets button[aria-pressed="true"] {

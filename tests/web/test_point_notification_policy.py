@@ -144,15 +144,22 @@ def test_real_validator_reads_holdings_for_a_sell_even_without_a_holding_hint(re
 
 
 def test_policy_change_during_dependency_read_cannot_use_old_authorization(ready_event, monkeypatch):
+    from threading import Event
     service, live, row = ready_event
     epoch = state_epoch(service._load(), 0, [row])
     original = live.status
+    committed = Event()
+    # A status hook mutates policy only to reproduce this race. Do not have
+    # configure's response projection recursively call the same status hook.
+    monkeypatch.setattr(service, '_control_snapshot', lambda page_options: {})
 
     def changed():
         service.configure_point_notifications({'frequencies': [], 'holdings': [], 'others': []})
+        committed.set()
         return original()
 
     monkeypatch.setattr(live, 'status', changed)
     assert service._validate_notification_events([row])[0] == []
+    assert committed.wait(2), 'the bounded dependency read did not finish its policy update'
     assert state_epoch(service._load(), 0, [row]) != epoch
     assert service._validate_notification_events([row]) == ([], [])

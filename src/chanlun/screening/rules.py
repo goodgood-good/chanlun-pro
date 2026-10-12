@@ -779,6 +779,10 @@ def _native_comparison_entry_id(center, units, by_id, positions, direction):
 def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
     """Check the saved source graph before accepting a current signal."""
 
+    from chanlun.core.strict_structure.native_point_preview import is_point_preview, preview_source_valid
+    if is_point_preview(point):
+        return preview_source_valid(snapshot, point, centers, units)
+
     if (point.get("structural_level") != 0
             or point.get("price_basis_revision") != snapshot.get("price_basis_revision")
             or point.get("point_type") not in POINT_TYPES
@@ -948,7 +952,7 @@ def _native_center_signal_source_valid(snapshot, point, centers, units) -> bool:
 
 def audit_native_center_signals(snapshot: dict, frame: pd.DataFrame, context: dict,
                                 point_types=POINT_TYPES, max_anchor_gain_pct=10) -> dict:
-    """Select confirmed native-center-policy points without recursive types."""
+    """Select verified native-period points and explicitly unconfirmed previews."""
 
     if snapshot.get("analysis_scope") != "native_centers":
         raise ValueError("native center signal audit requires a native snapshot")
@@ -1001,10 +1005,13 @@ def audit_native_center_signals(snapshot: dict, frame: pd.DataFrame, context: di
     for point in all_points:
         if point.get("point_type") not in point_types:
             continue
+        from chanlun.core.strict_structure.native_point_preview import is_point_preview
+        preview = is_point_preview(point)
+        if preview:
+            source_checks[id(point)] = _native_center_signal_source_valid(snapshot, point, centers, units)
         if (point.get("evidence_scope") != "native_center_signal"
-                or point.get("rule_basis") != NATIVE_SIGNAL_RULE_BASIS
-                or point.get("formal_point_issued") is not True
-                or point.get("status") != "confirmed"
+                or not preview and (point.get("rule_basis") != NATIVE_SIGNAL_RULE_BASIS
+                    or point.get("formal_point_issued") is not True or point.get("status") != "confirmed")
                 or point.get("source_kind") != "segment"):
             raise ValueError("native center signal proof mismatch")
         if not source_checks.get(id(point), False):
@@ -1012,7 +1019,8 @@ def audit_native_center_signals(snapshot: dict, frame: pd.DataFrame, context: di
         available = point["available_at"]
         anchor = point["anchor_at"]
         confirmed = point.get("confirmed_at")
-        if not (type(confirmed) is int and anchor <= confirmed <= available <= snapshot["source_closed_at"]):
+        if not (anchor <= available <= snapshot['source_closed_at'] if preview else
+                type(confirmed) is int and anchor <= confirmed <= available <= snapshot["source_closed_at"]):
             raise ValueError("native center signal time mismatch")
         anchor_day = datetime.fromtimestamp(anchor, session_tz).date().isoformat()
         confirm_day = datetime.fromtimestamp(available, session_tz).date().isoformat()
@@ -1048,11 +1056,11 @@ def audit_native_center_signals(snapshot: dict, frame: pd.DataFrame, context: di
                 if trading_days else None,
             "confirmation_delay_sessions": bisect_left(trading_days, confirm_day)
                 - bisect_left(trading_days, anchor_day) if trading_days else None,
-            "confirmation_delay_bars": int(np.searchsorted(dates, confirmed)) - position,
+            "confirmation_delay_bars": None if preview else int(np.searchsorted(dates, confirmed)) - position,
         }
         if item["center"] is None:
             raise ValueError("native center signal center is missing")
-        lifetime = native_selection_lifetime_reasons(
+        lifetime = [] if preview else native_selection_lifetime_reasons(
             point, all_points, following,
             {candidate["point_id"]: source_checks.get(id(candidate), False) for candidate in all_points})
         item["reasons"] = lifetime
@@ -1063,8 +1071,13 @@ def audit_native_center_signals(snapshot: dict, frame: pd.DataFrame, context: di
         if item["reasons"]:
             result["rejected"].append(item)
             continue
-        result["selected"].append(item)
-        result["confirmed_buys" if buy else "confirmed_sells"] += 1
+        if preview:
+            item.update(reasons=['NOT_CONFIRMED'], observation_validation='checked')
+            result['observations'].append(item)
+            result['unconfirmed_buys' if buy else 'unconfirmed_sells'] += 1
+        else:
+            result["selected"].append(item)
+            result["confirmed_buys" if buy else "confirmed_sells"] += 1
     return result
 
 

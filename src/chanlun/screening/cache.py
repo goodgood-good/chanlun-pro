@@ -77,7 +77,7 @@ def read_calculation(path: Path, key: str):
         if not isinstance(value["snapshot"], dict) or not isinstance(value["snapshot"]["levels"], list):
             return None
         for identity, checks in value["reviewed"].items():
-            required = ("cold_rebuild", "closed_bar_replay") if identity.startswith("consolidation-preview:") else REPLAY_CHECKS
+            required = ("cold_rebuild", "closed_bar_replay") if identity.startswith(("consolidation-preview:", "point-preview:")) else REPLAY_CHECKS
             if not all(checks.get(k) is True for k in required):
                 return None
         source = value.get("source_input")
@@ -115,7 +115,7 @@ def read_append_proofs(path, frame, code, frequency, revision):
         if input_fingerprint(frame.iloc[:count],code,frequency)!=source['fingerprint']:
             return {}
         return {key:dict(checks) for key,checks in value['reviewed'].items()
-                if not key.startswith('consolidation-preview:') and all(checks.get(k) is True for k in REPLAY_CHECKS)}
+                if not key.startswith(('consolidation-preview:', 'point-preview:')) and all(checks.get(k) is True for k in REPLAY_CHECKS)}
     except (OSError,ValueError,KeyError,TypeError,AttributeError,EOFError,zlib.error):
         return {}
 

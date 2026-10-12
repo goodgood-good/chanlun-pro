@@ -58,11 +58,13 @@ def _alert(
         if value is not None
     )
     available_at = max(unit.available_at, confirmed_at)
+    from .native_point_preview import preview_key
     return {
         "schema": "chanlun-chart-point",
         "render_kind": "point_confirmed",
         "render_id": stable_structure_id("native-point-render-v2", point_id, anchor_at, anchor_tick, available_at),
         "point_id": point_id,
+        "preview_key": preview_key(kind, center.center_id, center.price_basis_revision, unit, related_unit_ids, parent_point_id),
         "point_type": kind,
         "side": side,
         "status": "confirmed",

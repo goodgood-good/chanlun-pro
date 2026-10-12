@@ -990,7 +990,7 @@ test('third-class counts distinguish confirmed points from incomplete lower conf
   data.candidates=[first,forming,complete,laterSell];
   const ui=page(async url=>dispatch(data,url));await settle();
   assert.match(ui.get('third-breakdown').textContent,/三类点线索 4 条：5m 与 1m 均确认 2 · 5m 已确认、1m 待齐 1 · 5m 尚在形成 1/);
-  assert.equal(ui.get('visible-count').textContent,'3 条');
+  assert.equal(ui.get('visible-count').textContent,'4 条');
   ui.get('lower-status-filter').value='confirmed';ui.get('lower-status-filter').listeners.change();
   assert.equal(ui.get('visible-count').textContent,'2 条');
   ui.get('center-order-filter').value='first';ui.get('center-order-filter').listeners.change();
@@ -1219,14 +1219,14 @@ test('waiting candidates use the shared analysis chart and never claim confirmat
   row.stage='approaching'; row.observation_validation='legacy_not_rechecked'; row.evidence_chart_available=false;
   row.point.confirmed_at=null; row.point.missing_conditions=['terminal_unit_locked'];
   const ui=page(async url=>dispatch(data,url));await settle();
-  assert.equal(ui.get('selected-detail').hidden,true); // The default list is primary-confirmed only.
+  assert.equal(ui.get('selected-detail').hidden,false); // Unconfirmed candidates are included by default.
   ui.get('point-status-filter').value='all';ui.get('point-status-filter').listeners.change();
   const chart=new URL(ui.get('chart-frame').src,'http://local');
   assert.equal(chart.pathname,'/');assert.equal(chart.searchParams.get('code'),row.code);
   assert.equal(chart.searchParams.get('layout'),'single');assert.equal(chart.searchParams.get('intervals'),'5');
   assert.equal(ui.get('chart-source').value,'live');assert.equal(ui.get('chart-source').disabled,true);
-  assert.match(ui.get('decision-title').textContent,/买点尚未确认/);
-  assert.match(ui.get('decision-detail').textContent,/观测/);
+  assert.match(ui.get('decision-title').textContent,/未确认预警.*三买尚未确认/);
+  assert.match(ui.get('decision-detail').textContent,/预警/);
   assert.doesNotMatch(ui.get('decision-detail').textContent,/确认间隔/);
   assert.match(ui.get('stage-counts').textContent,/筛选已通过 0 · 条件待齐 1/);
   assert.ok(ui.get('evidence-missing').children.some(e=>e.textContent==='等待末段完成并锁定'));
@@ -1573,7 +1573,7 @@ test('watchlist navigation clears stale age gain lower-confirmation and point-st
   assert.equal(ui.get('signal-list').children.length,0);
   ui.get('watch-list').children[0].click();await settle();
   for(const id of ['age-filter','gain-filter','lower-status-filter'])assert.equal(ui.get(id).value,'all');
-  assert.equal(ui.get('point-status-filter').value,'confirmed');
+  assert.equal(ui.get('point-status-filter').value,'all');
   assert.equal(ui.get('origin-filter').value,'all');
   assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
   assert.equal(ui.get('signal-list').children.find(row=>row.dataset.id==='watch:us:AAPL.US').classList.contains('active'),true);
@@ -2012,11 +2012,38 @@ test('a saved watchlist selection excluded by default scope cannot block a runni
   assert.equal(session.getItem('screening-selection:tester:a'),'n0');
 });
 
-const viewKey=user=>'screening-view:v2:'+encodeURIComponent(user);
+const viewKey=user=>'screening-view:v3:'+encodeURIComponent(user);
 function saveView(session,filters={},watch_group='',user='tester'){
-  session.setItem(viewKey(user),JSON.stringify({version:2,filters,watch_group}));
+  session.setItem(viewKey(user),JSON.stringify({version:3,filters,watch_group}));
 }
 const readView=(session,user='tester')=>JSON.parse(session.getItem(viewKey(user)));
+
+test('unconfirmed native signals are visible by default and their status filter survives reload',async()=>{
+  const latest=withCandidate(),preview=JSON.parse(JSON.stringify(latest.candidates[0]));
+  preview.id='native-preview';preview.stage='approaching';preview.point.status='approaching';
+  preview.point.confirmed_at=null;preview.point.formal_point_issued=false;preview.observation_validation='checked';
+  preview.point.evidence_scope='native_center_signal';
+  latest.candidates.push(preview);
+  latest.status.settings={alert_mode:'native_center_signals',frequencies:['5m']};
+  const session=sessionFixture(),ui=page(async url=>dispatch(latest,url),undefined,false,true,false,session);
+  await settle();assert.equal(ui.get('point-status-filter').value,'all');
+  assert.equal(displayedIds(ui).length,2);assert.match(ui.get('stage-counts').textContent,/未确认预警 1 条/);
+  choose(ui,'point-status-filter','forming');
+  assert.deepEqual(displayedIds(ui),['native-preview']);assert.match(ui.get('active-filter-summary').textContent,/仅未确认/);
+  const restored=page(async url=>dispatch(latest,url),undefined,false,true,false,session);await settle();
+  assert.equal(restored.get('point-status-filter').value,'forming');
+  assert.deepEqual(displayedIds(restored),['native-preview']);
+  restored.get('reset').click();assert.equal(restored.get('point-status-filter').value,'all');
+  assert.equal(displayedIds(restored).length,2);
+});
+
+test('the old hidden confirmation-only default migrates to all while preserving period and point types',()=>{
+  const migrated=normalizeViewState({version:2,filters:{signal_period:'30m',signal_points:['3buy'],point_status:'confirmed'}});
+  assert.equal(migrated.filters.point_status,'all');
+  assert.deepEqual(signalFields(migrated.filters),{signal_period:'30m',signal_points:['3buy']});
+  const explicit=normalizeViewState({version:3,filters:{point_status:'confirmed'}});
+  assert.equal(explicit.filters.point_status,'confirmed');
+});
 
 test('stored views normalize only visible filters and distinguish an empty selection from a missing one',()=>{
   const defaults=normalizeViewState(null);
@@ -2042,7 +2069,7 @@ test('view persistence is account scoped and background refresh does not rewrite
   chooseSignal(first,'1m',['1buy']);choose(first,'market-filter','a');
   first.get('include-previous').click();
   assert.deepEqual(signalFields(readView(session,alice).filters),{signal_period:'1m',signal_points:['1buy']});
-  assert.equal(readView(session,alice).version,2);
+  assert.equal(readView(session,alice).version,3);
   const saved=session.getItem(viewKey(alice)),writes=session.writes.filter(write=>write.key===viewKey(alice)).length;
   await first.timers[0]();await settle();first.get('refresh').click();await settle();
   assert.equal(session.getItem(viewKey(alice)),saved);
@@ -2069,7 +2096,7 @@ for(const [label,legacy,expected,ids] of [
   assert.deepEqual(selectedSignals(ui),expected);assert.deepEqual(displayedIds(ui),ids);
   assert.equal(ui.get('market-filter').value,'a');assert.equal(ui.get('include-previous').checked,false);
   assert.equal(session.reads.filter(key=>key===oldKey).length,1);assert.equal(session.getItem(viewKey('tester')),null,'background restoration never rewrites preferences');
-  ui.get('include-previous').click();assert.equal(readView(session).version,2);
+  ui.get('include-previous').click();assert.equal(readView(session).version,3);
   assert.deepEqual(signalFields(readView(session).filters),expected);assert.equal('signal_selection' in readView(session).filters,false);
   assert.equal(session.getItem(oldKey),old,'migration must not destroy the old snapshot');
   session.reads.length=0;

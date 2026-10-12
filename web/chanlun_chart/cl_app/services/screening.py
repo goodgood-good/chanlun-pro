@@ -261,6 +261,19 @@ class ScreeningManager:
         state["selection_policy_version"] = POLICY_VERSION
         state["result_reader_revision"] = _RESULT_READER_REVISION
         state["cancel_requested"] = (directory / "cancel").exists()
+        if state.get('status') == 'cancelled':
+            try:
+                handoff = read_state_json(directory / 'policy_handoff.json')
+                requested = handoff.get('requested_at')
+                if (handoff.get('schema') == 'screening-policy-handoff-v1'
+                        and handoff.get('run_id') == state.get('run_id')
+                        and handoff.get('source_revision') == state.get('source_revision')
+                        and state.get('source_revision')
+                        and type(requested) in (int,float) and math.isfinite(requested)
+                        and state.get('started_at',0) <= requested <= time.time()):
+                    state['stop_reason'] = 'policy_update'
+            except (OSError,ValueError,TypeError,AttributeError):
+                pass
         state["evidence_version"] = evidence_version(directory)
         checked = time.monotonic()
         if self._revision_checked is None or checked - self._revision_checked >= 5:
@@ -544,6 +557,7 @@ class ScreeningManager:
                              'timings_ms':row.get('timings_ms',{}),'replays_reused':row.get('replays_reused',0),
                              'processing_timeline':row.get('processing_timeline',{}),
                             'evidence':row.get('evidence'), 'price_basis_revision':row.get('price_basis_revision'),
+                            'point_preview_checked': row.get('point_preview_checked') is True,
                             "consolidation_checked": row.get("consolidation_checked") is True
                                 and not row.get("consolidation_error") and not row.get("consolidation_rejections")})
                     nested = state.get("settings", {}).get("strategy") == STRATEGY
@@ -606,7 +620,9 @@ class ScreeningManager:
                             errors.append({**header,
                                            "reasons": ["U295_WITNESS_EVIDENCE_MISMATCH"]})
                     if not item.get("error") and not row.get("data_errors") and not row.get("error"):
-                        native_signals = row.get("selected", [])
+                        from chanlun.core.strict_structure.native_point_preview import is_point_preview, PREVIEW_AUDIT
+                        native_signals = [*row.get('selected', []), *([] if frozen_native_review else
+                            [candidate for candidate in row.get('observations', []) if is_point_preview(candidate.get('point', {}))])]
                         if frozen_native_review and native_signals:
                             from .historical_native_pool import historical_native_period
                             try:
@@ -644,21 +660,22 @@ class ScreeningManager:
                                 if not health["complete"] or not health["verified"]:
                                     raise ValueError("native center signal evidence is incomplete")
                                 exit_plans = evidence_exit_catalog(directory, row["code"], row["frequency"], manifest)
-                                eligible_native = []
+                                eligible_native, eligible_previews = [], []
                                 following = evidence_confirmation_catalog(directory, row["code"], row["frequency"], manifest)
                                 for candidate in native_signals:
                                     point = candidate["point"]
-                                    if (point.get("status") != "confirmed"
+                                    preview = is_point_preview(point)
+                                    if (not preview and (point.get("status") != "confirmed"
                                             or point.get("formal_point_issued") is not True
-                                            or point.get("rule_basis") != NATIVE_SIGNAL_RULE_BASIS
-                                            or candidate.get("reasons") != []
+                                            or point.get("rule_basis") != NATIVE_SIGNAL_RULE_BASIS)
+                                            or candidate.get("reasons") != (['NOT_CONFIRMED'] if preview else [])
                                             or not all(candidate.get("audit", {}).get(key) is True
-                                                       for key in REPLAY_CHECKS)
+                                                       for key in (PREVIEW_AUDIT if preview else REPLAY_CHECKS))
                                              or point_catalog.get(point.get("point_id")) != point
                                              or source_valid.get(point.get("point_id")) is not True
                                             or center_catalog.get(point.get("center_id")) != candidate.get("center")):
                                         raise ValueError("native center signal proof mismatch")
-                                    lifetime = native_selection_lifetime_reasons(
+                                    lifetime = [] if preview else native_selection_lifetime_reasons(
                                         point, point_catalog.values(), following, source_valid)
                                     if lifetime:
                                         lifetime_exclusions += 1
@@ -666,7 +683,7 @@ class ScreeningManager:
                                         for reason in lifetime:
                                             counts[reason] = counts.get(reason, 0) + 1
                                         continue
-                                    eligible_native.append({
+                                    (eligible_previews if preview else eligible_native).append({
                                         **header, **candidate,
                                         "strategy": "native_center_signals",
                                         "evidence": manifest,
@@ -674,10 +691,11 @@ class ScreeningManager:
                                         "evidence_available": True,
                                         "evidence_chart_available": manifest.get("chart_saved") is True,
                                         "frozen_native_review": frozen_native_review,
-                                        "confirmation_segment": following[point["point_id"]],
+                                        "confirmation_segment": following.get(point['point_id'], {'state':'pending_confirmation'}) if preview else following[point["point_id"]],
                                         "exit_plan": exit_plans.get(point["point_id"]),
                                     })
                                 selected.extend(eligible_native)
+                                observations.extend(eligible_previews)
                             except (OSError, ValueError, KeyError, TypeError):
                                 errors.append({**header, "reasons": ["EVIDENCE_MISSING"]})
                             recent_rejections.extend({**header, **candidate}

@@ -121,7 +121,8 @@ def native_point_exit_plans(points, source_valid, base_plans, *, source_closed_a
             earliest[position] = best
         index[key] = [p["anchor_at"] for p in values], earliest
 
-    plans = {}
+    plans = {key: value for key,value in base_plans.items()
+             if points.get(key,{}).get('status') != 'confirmed' and source_valid.get(key) is True}
     for identity, point in usable.items():
         base = base_plans.get(identity)
         if base is None:

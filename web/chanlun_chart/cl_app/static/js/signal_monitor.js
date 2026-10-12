@@ -6,7 +6,7 @@
   const notificationWorkspaceEnabled=notificationWorkspace?.dataset?.view==='notifications';
   const points = {'1buy':'一买','2buy':'二买','3buy':'三买','1sell':'一卖','2sell':'二卖','3sell':'三卖',
     consolidation_up:'向上盘整背驰',consolidation_down:'向下盘整背驰',risk_stop:'结构止损触发',risk_reverse:'反向信号确认'};
-  const stages = {warning:'提前预警（未确认）',invalidated:'预警已失效',confirmed:'已确认',approaching:'形成等待',formed:'形成等待',observed:'形成等待',left:'退出本轮候选',triggered:'持仓风险触发'};
+  const stages = {warning:'提前预警（未确认）',invalidated:'预警已失效',confirmed:'已确认',approaching:'提前预警（未确认）',formed:'形成等待',observed:'形成等待',left:'退出本轮候选',triggered:'持仓风险触发'};
   const active = job => ['starting','running'].includes(job?.status);
   const date = value => value ? new Date(value * 1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}) : '—';
   let data, busy = false, polling = false, initialized = false, serial = 0;

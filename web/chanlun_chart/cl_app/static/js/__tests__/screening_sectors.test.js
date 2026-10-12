@@ -96,13 +96,13 @@ test('market search review and other independent refinements remain effective',(
   assert.equal(summary([sector()],rows,{query:'missing'}).totals.current_symbols,0);
 });
 
-test('current summary requires confirmed evidence even if an advanced status filter allows forming',()=>{
+test('current summary includes verified unconfirmed points when the status filter allows them',()=>{
   const forming=candidate('forming','SH.600002','3buy',{stage:'approaching'});forming.point.status='approaching';
   const closed=candidate('closed','SH.600003','3buy',{stage:'closed'});
   const rows=[candidate('good'),forming,closed,candidate('bad','SH.600004','3buy',{evidence_available:false}),
     candidate('stale-source','SH.600005','3buy',{result_source:'other'})];
   assert.deepEqual(counts(summary([sector()],rows,{point_status:'all'}).totals),
-    expected({current_symbols:1,current_signals:1,buy_symbols:1,latest_at:100}));
+    expected({current_symbols:2,current_signals:2,buy_symbols:2,latest_at:100}));
 });
 
 test('retained and watch rows are separate context and never inflate current signals or latest time',()=>{

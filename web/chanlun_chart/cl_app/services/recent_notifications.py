@@ -15,10 +15,11 @@ import time
 
 from .monitor_view import LABELS
 
-STAGES = {"confirmed": "确认", "warning": "预警", "invalidated": "失效", "triggered": "触发", "left": "退出"}
+STAGES = {"confirmed": "确认", "warning": "预警", "approaching": "未确认预警", "invalidated": "失效", "triggered": "触发", "left": "退出"}
 STATUSES = {"sent": "已发送", "pending": "待发送", "failed": "发送失败", "expired": "已过期", "suppressed": "静默", "unknown": "状态未知"}
 KINDS = {"signal": "买卖点", "consolidation": "盘整背驰", "risk": "持仓风控", "screening": "选股摘要", "chart": "通知图表"}
 EVENT_FIELDS = frozenset({
+    'preview_repriced','preview_key','confirmed_preview_id',
     "id", "market", "code", "name", "frequency", "point_type", "signal_type", "stage", "point_status",
     "recorded_at", "available_at", "point_confirmed_at", "source_closed_at", "anchor_at", "anchor_price",
     "selection_available_at", "first_detected_at", "first_warned_at", "state_changed_at", "holding",

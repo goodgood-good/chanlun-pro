@@ -232,8 +232,11 @@ def load_chart_evidence(event, runs_root):
         matches = [a for a in snapshot.get("native_consolidation_alerts", [])
                    if a.get("hypothesis_id") == event.get("hypothesis_id") and a.get("status") == event.get("stage")]
     else:
+        from chanlun.core.strict_structure.native_point_preview import is_point_preview
+        preview = event.get('signal_type') == 'native_point_preview' and event.get('stage') == 'approaching'
         matches = [p for level in snapshot["levels"] for p in level.get("points", [])
-                   if p.get("point_id") == event.get("point_id") and p.get("status") == "confirmed"]
+                   if p.get("point_id") == event.get("point_id") and
+                   (is_point_preview(p) if preview else p.get("status") == "confirmed")]
     if len(matches) != 1:
         raise ValueError("chart signal does not match frozen evidence")
     signal = matches[0]
@@ -348,6 +351,7 @@ class NotificationCharts:
                     self.outbox.finish_inline_chart(event,'failed','缺少可核验的图表证据')
                     continue
                 if (not (event.get("stage") in {"warning","confirmed"}
+                          or event.get('stage') == 'approaching' and event.get('signal_type') == 'native_point_preview'
                          or event.get('stage') == 'invalidated' and event.get('signal_type') == 'consolidation_divergence' and event.get('inline_chart')
                          or event.get('stage') == 'triggered' and event.get('signal_type') == 'holding_risk')
                         or event.get('recorded_at', 0) < enabled_at and not event.get('inline_chart')

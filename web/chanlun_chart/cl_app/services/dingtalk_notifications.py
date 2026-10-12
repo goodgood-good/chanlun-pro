@@ -42,7 +42,7 @@ def _clean(value, limit=100):
 
 def signal_status_key(row):
     """Track point confirmation independently from the strategy's extra gates."""
-    if row.get("signal_type") == "consolidation_divergence" and (
+    if row.get("signal_type") in {"consolidation_divergence", "native_point_preview"} and (
             "hypothesis_id" in row or "lifecycle_cycle" in row):
         return json.dumps([row.get("point_status", row["stage"]), row.get("lifecycle_cycle", 0)], separators=(",", ":"))
     if "point_status" not in row:

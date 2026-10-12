@@ -5,7 +5,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const POINTS = {'1buy':'一买','2buy':'二买','3buy':'三买','1sell':'一卖','2sell':'二卖','3sell':'三卖'};
-  const STAGES = {confirmed:'已确认',entry_pending:'正式三买已确认 · 入场证待核',triggered:'正式点确认',executable:'历史执行条件成立',approaching:'形成与等待',formed:'形成待确认',observed:'结构观察',monitoring:'关注观察',active:'结构跟踪',invalidated:'已失效',closed:'已结束'};
+  const STAGES = {confirmed:'已确认',entry_pending:'正式三买已确认 · 入场证待核',triggered:'正式点确认',executable:'历史执行条件成立',approaching:'未确认预警',formed:'形成待确认',observed:'结构观察',monitoring:'关注观察',active:'结构跟踪',invalidated:'已失效',closed:'已结束'};
   const STATES = {idle:'尚未运行选股',starting:'准备选股',running:'正在选股',completed:'本次筛选完成',cancelled:'已取消 · 保留部分结果',interrupted:'任务中断',failed:'任务失败'};
   const RESULTS_LOADING = '正在读取并校验本轮选股结果，完成后会自动显示，无需重新选股。';
   function resultVersionMessage(status) {
@@ -31,7 +31,7 @@
   Object.assign(EVIDENCE,{
     live_first_return:'首次回试正在形成',core_boundary_currently_held:'当前回试仍在中枢区间外',
     temporary_consolidation_divergence:'暂现盘整背驰，末段尚未完成',temporary_trend_divergence:'暂现趋势背驰，末段尚未完成',
-    confirmed_first_class_parent:'对应一类点已确认',complete_adjacent_rebound:'相邻反弹段已完成',live_first_pullback:'首次回试正在形成',
+    forming_third_class_departure:'离开段尚在形成',provisional_macd_area_margin:'当前 MACD 面积满足预警余量',first_unfinished_retest_held:'首次回试尚未结束，暂未突破一类点极值',first_unfinished_return_holds_core:'首次返回尚未结束，暂未回到中枢',closed_local_turn:'已收盘K线出现局部转折',conditional_point_preview:'末段尚未确认，当前仅为条件预警',confirmed_first_class_parent:'对应一类点已确认',complete_adjacent_rebound:'相邻反弹段已完成',live_first_pullback:'首次回试正在形成',
     prior_extreme_currently_held:'当前仍守住前一极值',live_width_matched_departure_leg:'正在形成的离开组合与比较组合段数一致',
     live_complete_departure_leg:'完整离开走势的末段仍在形成',complete_entry_departure_legs:'按完整进入段与离开走势比较力度',
     formal_consolidation_prefix:'前序盘整结构已成立',single_center_consolidation:'单中枢盘整结构',formal_trend_prefix:'前序趋势结构已成立',two_separated_centers:'存在两个分离中枢',
@@ -222,7 +222,7 @@
     const matched=filterRows(rows,{...filters,sector:'',sort:'recent'},reviewed,names,source);
     for(const row of matched){
       const kind=row.origin==='watchlist'?'watch':row.refresh_state?'retained':'current';
-      if(kind==='current'&&pointStage(row)!=='confirmed')continue;
+      if(kind==='current'&&!['confirmed','approaching'].includes(pointStage(row)))continue;
       const identity=row.id||JSON.stringify([row.market,row.code,row.frequency,row.origin,row.refresh_state,
         row.point?.point_id||row.point?.point_type,row.point?.available_at]);
       if(seen.has(identity))continue;
@@ -250,17 +250,17 @@
   }
   function defaultFilters(origin='screening') {
     return {query:'',market:'all',origin,review:'all',stage:'all',risk:'all',sector:'',
-      point_status:'confirmed',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent',
+      point_status:'all',lower_status:'all',higher:'all',center_order:'all',age:'all',gain:'all',sort:'recent',
       ...normalizeSignalFilter(),include_previous:true};
   }
   function normalizeViewState(saved) {
     const result={filters:defaultFilters(),watch_group:''};
-    if(!saved||![1,2].includes(saved.version)||!saved.filters||typeof saved.filters!=='object'||Array.isArray(saved.filters))return result;
+    if(!saved||![1,2,3].includes(saved.version)||!saved.filters||typeof saved.filters!=='object'||Array.isArray(saved.filters))return result;
     const input=saved.filters,filters=result.filters;
     const enums={market:['all',...Object.keys(MARKET_NAMES)],origin:['screening','all','watchlist'],review:['all','pending','reviewed'],
       center_order:['all','first'],age:['all','0','1','3','5'],gain:['all','1','3','5'],sort:['recent','distance']};
     for(const [key,values] of Object.entries(enums))if(values.includes(input[key]))filters[key]=input[key];
-    if(saved.version===2)Object.assign(filters,normalizeSignalFilter(input));
+    if(saved.version>=2)Object.assign(filters,normalizeSignalFilter(input));
     else if(input.signal_selection&&typeof input.signal_selection==='object'&&!Array.isArray(input.signal_selection)){
       // Previous views may contain several periods; restore exactly one.
       const legacy=input.signal_selection;
@@ -269,6 +269,7 @@
       Object.assign(filters,{signal_period:period,signal_points:points(period)});
     }
     if(typeof input.include_previous==='boolean')filters.include_previous=input.include_previous;
+    if(saved.version===3&&['all','forming','confirmed'].includes(input.point_status))filters.point_status=input.point_status;
     for(const [key,limit] of [['query',200],['sector',200]])
       if(typeof input[key]==='string')filters[key]=input[key].trim().slice(0,limit);
     if(typeof saved.watch_group==='string')result.watch_group=saved.watch_group.trim().slice(0,100);
@@ -291,11 +292,12 @@
     const phone=!!globalThis.WorkspaceDevice?.isPhone;
     const periodButtons=Array.from(document.querySelectorAll('[data-frequency]'));
     const viewUser=document.querySelector('main')?.dataset.user||'';
-    const viewKey=viewUser?`screening-view:v2:${encodeURIComponent(viewUser)}`:null;
+    const viewKey=viewUser?`screening-view:v3:${encodeURIComponent(viewUser)}`:null;
     let savedView=normalizeViewState(null);
     if(viewKey)try{
       const current=sessionStorage.getItem(viewKey);
-      const raw=current==null?sessionStorage.getItem(`screening-view:v1:${encodeURIComponent(viewUser)}`):current;
+      const previous=current==null?sessionStorage.getItem(`screening-view:v2:${encodeURIComponent(viewUser)}`):null;
+      const raw=current==null?(previous==null?sessionStorage.getItem(`screening-view:v1:${encodeURIComponent(viewUser)}`):previous):current;
       if(raw&&raw.length<=10000)savedView=normalizeViewState(JSON.parse(raw));
     }catch(_){/* A private or unavailable browser store must not block filtering. */}
     const state = {data:null,serial:0,version:'',rows:[],selected:null,watch:[],quotes:new Map(),
@@ -311,8 +313,8 @@
     function persistView() {
       if(!viewKey)return;
       try {
-        const view=normalizeViewState({version:2,filters:state.filters,watch_group:state.watchGroup||state.preferredWatchGroup});
-        sessionStorage.setItem(viewKey,JSON.stringify({version:2,...view}));
+        const view=normalizeViewState({version:3,filters:state.filters,watch_group:state.watchGroup||state.preferredWatchGroup});
+        sessionStorage.setItem(viewKey,JSON.stringify({version:3,...view}));
       }catch(_){/* Filtering remains usable when browser storage is full or disabled. */}
     }
     try {
@@ -483,9 +485,9 @@
         higher.status==='failed'?`30m 背景计算失败：${higher.error||'请查看任务日志'}`:
         status.source_current===false?'本轮为旧版选股结果；30m 独立背景将在新一轮选股完成后计算。':'30m 独立背景等待本轮选股完成。';
       $('stage-counts').textContent=initialLoading?'正在读取候选…':nativeSignals?
-        `${status.frozen_native_review?'原截止时刻已确认买卖点':'本轮正式买卖点提醒'} ${currentCandidates.length-waiting} 条`:
+        `${status.frozen_native_review?'原截止时刻已确认买卖点':'本轮正式买卖点提醒'} ${currentCandidates.length-waiting} 条${waiting?` · 未确认预警 ${waiting} 条`:''}`:
         `本轮筛选已通过 ${currentCandidates.length-waiting} · 条件待齐 ${waiting}`;
-      $('signal-breakdown').textContent=initialLoading?'正在读取候选…':status.previous_result_count?`另有 ${status.previous_result_count} 条上次结果待更新`:nativeSignals?`本周期中枢信号 ${currentCandidates.length-waiting} 条`:`筛选通过 ${currentCandidates.length-waiting} · 待齐 ${waiting}`;
+      $('signal-breakdown').textContent=initialLoading?'正在读取候选…':status.previous_result_count?`另有 ${status.previous_result_count} 条上次结果待更新`:nativeSignals?`已确认 ${currentCandidates.length-waiting} 条 · 未确认预警 ${waiting} 条`:`筛选通过 ${currentCandidates.length-waiting} · 待齐 ${waiting}`;
       $('sector-count').textContent=sectors.filter(s=>s.signal_count>0).length;
       $('review-count').textContent=Object.keys(state.reviews.latest).length;
       $('error-count').textContent=status.error_count ?? '—';
@@ -611,7 +613,7 @@
         const quote=state.quotes.get(`${row.market}:${row.code}`);
         b.append(title,node('small',`${row.code} · ${row.frequency} · ${row.stage==='entry_pending'?STAGES.entry_pending:STAGES[pointStage(row)]||pointStage(row)}`,'queue-identity'),
           node('small',row.origin==='watchlist'?'人工关注 · 点击查看图表':`拐点 ${date(row.point.anchor_at)}`,'queue-anchor'),
-          node('small',row.origin==='watchlist'?'':`${pointStage(row)==='confirmed'?'确认':'观测'} ${date(row.point.available_at)}`,'queue-confirmation'),
+          node('small',row.origin==='watchlist'?'':`${pointStage(row)==='confirmed'?'确认':'预警'} ${date(row.point.available_at)}`,'queue-confirmation'),
           node('small',(row.sectors||[]).map(id=>names[id]).filter(Boolean).slice(-2).join(' / ')||'板块暂缺','queue-sectors'),
           node('small',quote?quoteText(quote):`截止收盘 ${price(row.latest_price)}`,'queue-quote'),
           node('small',state.reviews.latest[row.id]?'已保存人工复核':'','badge'));
@@ -757,11 +759,11 @@
       const periodFreshness=status.market_freshness?.[row.market]?.[row.frequency];
       const current=status.source_current===true&&(periodFreshness
         ?periodFreshness.state==='cutoff_current':status.cutoff_current===true);
-      $('decision-title').textContent=row.origin==='watchlist'?'人工关注 · 查看当前结构':row.stage==='entry_pending'?'正式第三买已确认 · 次次级入场证待核':isWaiting(row)?(pointStage(row)==='confirmed'?'5m 买卖点已确认 · 区间内 1m 结构确认待齐':'形成与等待 · 5m 买点尚未确认'):current?(nested?'5m 买卖点与区间内 1m 结构确认通过':'本次筛选通过 · 待人工判断'):'本次结果待更新';
+      $('decision-title').textContent=row.origin==='watchlist'?'人工关注 · 查看当前结构':row.stage==='entry_pending'?'正式第三买已确认 · 次次级入场证待核':isWaiting(row)?(pointStage(row)==='confirmed'?'5m 买卖点已确认 · 区间内 1m 结构确认待齐':`未确认预警 · ${row.frequency} ${POINTS[p.point_type]||'买卖点'}尚未确认`):current?(nested?'5m 买卖点与区间内 1m 结构确认通过':'本次筛选通过 · 待人工判断'):'本次结果待更新';
       if(row.operational_macd_risk?.risk_filter_state==='basic_avoid_on_selected_period')
         $('decision-title').textContent+=' · MACD基础避险';
       $('decision-detail').textContent=row.origin==='watchlist'?'关注组不代表买卖点确认。':
-        `拐点 ${date(p.anchor_at)}；${pointStage(row)==='confirmed'?'确认':'观测'} ${date(p.available_at)}。${!isWaiting(row)&&row.confirmation_delay_sessions!==undefined?`确认间隔 ${row.confirmation_delay_sessions} 个交易日。`:''}`+
+        `拐点 ${date(p.anchor_at)}；${pointStage(row)==='confirmed'?'确认':'预警'} ${date(p.available_at)}。${!isWaiting(row)&&row.confirmation_delay_sessions!==undefined?`确认间隔 ${row.confirmation_delay_sessions} 个交易日。`:''}`+
         (nested?` 5m ${p.status==='confirmed'?'已确认':'待确认'}；1m ${nested.state==='confirmed'?'已确认':'等待确认'}。`:'')+
         (isWaiting(row)&&row.stage!=='entry_pending'?` 待满足：${missing.map(c=>MISSING[c]||c).join('；')}。`:'')+
         (row.stage==='entry_pending'?' 这条正式第三买尚未取得当次筛选所需的次次级入场证，不能列为已选入场候选。':'');
@@ -1254,7 +1256,7 @@
       $('advanced-filters').open=false;$('include-previous').checked=true;
       $('signal-search').value='';$('sector-search').value='';
       for(const id of ['market-filter','review-filter','stage-filter','risk-filter','lower-status-filter','higher-context-filter','center-order-filter','age-filter','gain-filter'])$(id).value='all';
-      $('point-status-filter').value='confirmed';$('sort-filter').value='recent';$('origin-filter').value=origin;
+      $('point-status-filter').value='all';$('sort-filter').value='recent';$('origin-filter').value=origin;
       persistView();
     }
     function signalFilterText() {
@@ -1266,6 +1268,7 @@
       const f=state.filters,parts=f.origin==='watchlist'?['当前关注组图表']:[signalFilterText(),
         !f.include_previous?'仅本轮结果':'',f.origin==='all'?'含当前关注组图表':''];
       if(f.market!=='all')parts.push(`市场：${MARKET_NAMES[f.market]||f.market}`);
+      if(f.point_status!=='all')parts.push(f.point_status==='forming'?'仅未确认':'仅已确认');
       if(f.query.trim())parts.push(`搜索：${f.query.trim()}`);
       if(f.sector)parts.push(`板块：${sectorNames()[f.sector]||'所选板块'}`);
       if(f.center_order==='first')parts.push('三类点仅首中枢');
@@ -1472,7 +1475,7 @@
       const option=node('option',MARKET_NAMES[state.filters.market]);option.value=state.filters.market;$('market-filter').append(option);
     }
     for(const [id,key] of [['market-filter','market'],['origin-filter','origin'],['review-filter','review'],['center-order-filter','center_order'],
-      ['age-filter','age'],['gain-filter','gain'],['sort-filter','sort']])$(id).value=state.filters[key];
+      ['age-filter','age'],['gain-filter','gain'],['sort-filter','sort'],['point-status-filter','point_status']])$(id).value=state.filters[key];
     $('signal-search').value=state.filters.query;
     $('include-previous').checked=state.filters.include_previous;
     renderSignalSelection();renderActiveFilters();

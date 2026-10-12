@@ -64,16 +64,19 @@ def audited_members(result):
                 for p in result.get('verified_periods', [])
                 if type(p.get('source_closed_at')) is int}
     members, periods = {}, {}
-    for row in result.get('selected', []):
+    from chanlun.core.strict_structure.native_point_preview import is_point_preview, PREVIEW_AUDIT
+    for row in [*result.get('selected', []), *result.get('observations', [])]:
         identity = (row.get('market', 'a'), row['code'])
         period = (*identity, row.get('frequency'))
         point = row.get('point') or {}
+        preview = is_point_preview(point)
         if (identity not in processed or period not in verified
                 or period in failed or (*identity, None) in failed
                 or row.get('evidence_verified') is not True or not row.get('evidence')
-                or row.get('reasons') != [] or not row.get('audit')
+                or row.get('reasons') != (['NOT_CONFIRMED'] if preview else []) or not row.get('audit')
                 or any(value is not True for value in row['audit'].values())
-                or point.get('status') != 'confirmed'):
+                or preview and not all(row['audit'].get(key) is True for key in PREVIEW_AUDIT)
+                or not preview and point.get('status') != 'confirmed'):
             continue
         members[':'.join(identity)] = {'market': identity[0], 'code': identity[1],
                                       'name': row.get('name', identity[1])}

@@ -1277,6 +1277,19 @@ def build_native_center_snapshot(
             segment_units, tuple(center_result.signal_centers), strength, as_of=as_of,
         )
     ]
+    from chanlun.core.strict_structure.native_point_preview import build_point_previews
+    construction = cd.get_segment_construction_state() if hasattr(cd, 'get_segment_construction_state') else {}
+    preview_complete = strength is not None and construction.get('status') != 'unresolved' and not center_result.unprocessed_unit_ids
+    preview_error = None
+    if preview_complete:
+        try:
+            pending_points = build_point_previews(
+                segment_units, tuple(center_result.signal_centers), strength, bars, cd.get_idx()['macd']['hist'],
+                as_of=as_of, serialize_center=lambda center: _with_prices(strict_center_to_chart_dict(center), quantum))
+            alerts.extend(_with_prices(item, quantum) for item in pending_points)
+        except (ValueError, ArithmeticError) as exc:
+            preview_complete = False
+            preview_error = type(exc).__name__
     stroke_construction = (
         cd.get_stroke_construction_state()
         if hasattr(cd, "get_stroke_construction_state") else {}
@@ -1337,6 +1350,8 @@ def build_native_center_snapshot(
             "affected_center_id": center_result.centers[-1].center_id if center_result.unprocessed_unit_ids else None,
         },
         "center_view_selections": [dict(item) for item in center_result.view_selections],
+        "point_preview_checked": preview_complete,
+        "point_preview_error": preview_error,
         "symbol": cd.get_code(),
         "source_frequency": interval,
         "display_frequency": interval,
@@ -1365,8 +1380,8 @@ def build_native_center_snapshot(
         "stroke_connection_pending": bool(stroke_construction.get("unresolved_regions")),
         "segment_construction": segment_construction,
         "point_exit_plans": {},
-        "formal_point_issued": bool(alerts),
-        "tradable": bool(alerts),
+        "formal_point_issued": any(point['formal_point_issued'] for point in alerts),
+        "tradable": any(point['formal_point_issued'] for point in alerts),
     }, native_source_valid={point["point_id"]: True for point in alerts})
 
 

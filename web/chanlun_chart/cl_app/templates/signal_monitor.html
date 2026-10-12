@@ -121,10 +121,10 @@
   <details class="panel" id="dingtalk-panel"><summary>通知设置 <span class="muted">钉钉推送</span></summary>
     <header><h2>钉钉通知</h2><label><input id="dingtalk-enabled" type="checkbox" disabled> 推送选股完成与监听新信号</label></header>
     <strong id="dingtalk-status">正在读取通知状态…</strong><p id="dingtalk-detail" class="muted"></p>
-    <p class="muted">选股完成发送任务回执；实时监听按下方条件发送已确认买卖点，并保留持仓盘整背驰及风险提醒。上方开关控制全部钉钉推送，单次静默选股不影响后续实时提醒。同一信号的相同状态去重，发送失败会重试，过期的实时提醒不补发。</p>
+    <p class="muted">选股完成发送任务回执；实时监听按下方条件发送未确认预警、确认及失效更新，并保留持仓盘整背驰及风险提醒。上方开关控制全部钉钉推送，单次静默选股不影响后续实时提醒。同一信号的相同状态去重，发送失败会重试，过期的实时提醒不补发。</p>
     <form id="notification-policy-form" class="notification-policy" aria-labelledby="notification-policy-title">
       <h3 id="notification-policy-title">买卖点通知条件</h3>
-      <p id="notification-policy-help" class="muted">仅控制钉钉买卖点通知，不改变选股和图表中的信号；持仓盘整背驰及风险提醒沿用现有设置。</p>
+      <p id="notification-policy-help" class="muted">所选买卖点类型包含未确认预警、确认及失效更新；持仓盘整背驰及风险提醒沿用现有设置。</p>
       <fieldset id="notification-policy-fields" aria-describedby="notification-policy-help notification-policy-empty-help" disabled>
         <fieldset class="notification-policy-periods">
           <legend>通知周期</legend>

@@ -373,11 +373,21 @@ def _review_native_center_signals(snapshot, frame, candidates, code, frequency):
             candidate["reasons"].append("REBUILD_MISMATCH")
         known_at = point["available_at"]
         if known_at not in prefixes:
-            prefix = frame.loc[frame.date <= datetime.fromtimestamp(known_at, CN)].copy()
-            prefixes[known_at] = snapshot_for(prefix, code, frequency)
+            if (known_at == snapshot['source_closed_at'] == rebuilt.get('source_closed_at')
+                    and not frame.empty and int(frame.date.iloc[-1].timestamp()) == known_at):
+                prefixes[known_at] = rebuilt
+            else:
+                prefix = frame.loc[frame.date <= datetime.fromtimestamp(known_at, CN)].copy()
+                prefixes[known_at] = snapshot_for(prefix, code, frequency)
         prefix_matches = matches(candidate, prefixes[known_at])
         if not prefix_matches:
             candidate["reasons"].append("CONFIRMATION_REPLAY_FAILED")
+        from chanlun.core.strict_structure.native_point_preview import is_point_preview
+        if is_point_preview(point):
+            candidate['audit'] = {'cold_rebuild': 'REBUILD_MISMATCH' not in candidate['reasons'],
+                                  'closed_bar_replay': prefix_matches}
+            (selected if set(candidate['reasons']) == {'NOT_CONFIRMED'} else rejected).append(candidate)
+            continue
         earlier = frame.loc[frame.date < datetime.fromtimestamp(known_at, CN)]
         before_at = None if earlier.empty else int(earlier.date.iloc[-1].timestamp())
         if before_at is not None and before_at not in prefixes:
@@ -553,6 +563,22 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
                     reviewed[candidate_signature(candidate)] = candidate["audit"]
             selected = result["selected"] if _confirmation_only else reused + selected
             rejected = result["rejected"] + audit_rejected
+            preview_reused, preview_pending = [], []
+            if snapshot.get('analysis_scope') == 'native_centers' and result['observations'] and not _confirmation_only:
+                from chanlun.core.strict_structure.native_point_preview import PREVIEW_AUDIT
+                for candidate in result['observations']:
+                    checks = reviewed.get('point-preview:' + candidate_signature(candidate))
+                    if checks and all(checks.get(key) is True for key in PREVIEW_AUDIT):
+                        candidate['audit'] = dict(checks)
+                        preview_reused.append(candidate)
+                    else:
+                        preview_pending.append(candidate)
+                previews, preview_rejected = _review_native_center_signals(
+                    snapshot, frame, preview_pending, code, frequency)
+                for candidate in previews:
+                    reviewed['point-preview:' + candidate_signature(candidate)] = candidate['audit']
+                result['observations'] = preview_reused + previews
+                rejected.extend(preview_rejected)
             consolidation_selected, consolidation_pending = [], False
             if include_consolidation:
                 consolidation_rejected = []
@@ -575,6 +601,7 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
                 input_fingerprint=input_fingerprint(frame, code, frequency),
                 latest_close=float(frame.close.iloc[-1]),
                 structure_price_quantum=snapshot["structure_price_quantum"],
+                point_preview_checked=snapshot.get('point_preview_checked') is True,
             )
             if include_consolidation:
                 row["consolidation_checks"] = snapshot.get("native_consolidation_checks", {})
@@ -633,11 +660,11 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             row["selected"] = selected
             row["observations"] = observations
             row["calculation_reused"] = cached is not None
-            row["replays_reused"] = len(reused)
+            row["replays_reused"] = len(reused) + len(preview_reused)
             if _inputs is not None:
                 _inputs[frequency] = {"frame": frame, "snapshot": snapshot, "reviewed": reviewed,
                                       "cache_path": cache_path, "key": key}
-            if cache_path is not None and (cached is None or pending or consolidation_pending or not cached.get('source_input')):
+            if cache_path is not None and (cached is None or pending or preview_pending or consolidation_pending or not cached.get('source_input')):
                 try:
                     write_calculation(cache_path, key, row, snapshot, reviewed, source_frame=frame,
                                       calculation_revision=calculation_revision)

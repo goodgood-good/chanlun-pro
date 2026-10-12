@@ -14,7 +14,7 @@ from chanlun.screening.rules import CN
 MARKETS = {"a": "A股", "us": "美股", "currency_spot": "现货", "fx": "外汇", "ny_futures": "期货"}
 POINTS = {"1buy": "一买", "2buy": "二买", "3buy": "三买", "1sell": "一卖", "2sell": "二卖", "3sell": "三卖"}
 STAGES = {"warning": "提前预警（未确认）", "invalidated": "预警已失效", "confirmed": "已确认",
-          "approaching": "形成等待（未确认）", "formed": "形成等待（未确认）", "observed": "形成等待（未确认）"}
+          "approaching": "提前预警（未确认）", "formed": "形成等待（未确认）", "observed": "形成等待（未确认）"}
 REASONS = {
     "PRICE_EXTREME_BROKEN": "价格突破了原候选极值，原局部转折不再成立",
     "LOCAL_TURN_PENDING": "当前端点尚未形成已收盘行情支持的局部转折",
@@ -112,6 +112,8 @@ def heading(row):
     tag = {"warning": "提前预警", "invalidated": "预警失效", "confirmed": "已确认"}.get(state, STAGES.get(state, "监听更新"))
     if state == 'warning' and row.get('warning_reactivated'):
         tag = '预警恢复'
+    if state == 'approaching' and row.get('preview_repriced'):
+        tag = '预警更新（未确认）'
     code = clean(row.get("code", ""), 80)
     name = clean(row.get("name") or code, 28)
     label = name if name == code else f"{name} {code}"
@@ -124,6 +126,13 @@ def signal_status_lines(row):
     status = row.get("point_status")
     label = STAGES.get(status, status) if status is not None else ("已确认" if row["stage"] == "confirmed" else "筛选条件待齐")
     lines = [f"{row['frequency']} {POINTS.get(row['point_type'], row['point_type'])} · {label}"]
+    if row.get('signal_type') == 'native_point_preview':
+        if row.get('stage') == 'invalidated':
+            lines.append('失效原因：'+row.get('invalidation_reason','原未确认条件已不成立'))
+        else:
+            lines += ['等待：末段线段确认', '当前为未确认预警，后续走势可能使其失效。']
+            if row.get('preview_repriced'):
+                lines.append('上次预警的价格极值已被突破，当前局部转折重新满足预警条件。')
     if row.get("signal_type") == "consolidation_divergence":
         direction = "向上" if row["point_type"] == "consolidation_up" else "向下"
         lines = [f"{row['frequency']} {direction}盘整背驰 · {label} · 持仓标的"]
@@ -166,7 +175,7 @@ def signal_body(row):
         return lines
     quantum = row.get("structure_price_quantum")
     phase = row.get("stage")
-    anchor_label = "候选拐点" if phase == "warning" else "原预警参考价" if phase == "invalidated" else "结构拐点"
+    anchor_label = "候选拐点" if phase in {"warning", "approaching"} else "原预警参考价" if phase == "invalidated" else "结构拐点"
     lines = [MARKETS.get(row.get("market", "a"), row.get("market", "")) + (" · 我的持仓" if row.get("holding") else ""),
              *signal_status_lines(row), f"{anchor_label}：{price(row.get('anchor_price'), quantum)}"]
     last, anchor = number(row.get("latest_close")), number(row.get("anchor_price"))
@@ -180,9 +189,10 @@ def signal_body(row):
     if row.get("signal_type") != "consolidation_divergence":
         plan = row.get("exit_plan") or {}
         stop, target = plan.get("stop_loss") or {}, plan.get("take_profit") or {}
-        if number(stop.get("price")) is not None and stop.get("status") == "reference":
+        if number(stop.get("price")) is not None and stop.get("status") in {"reference", "provisional"}:
             trigger = {"lt": "跌破", "gt": "突破"}.get(stop.get("trigger"), "")
-            lines.append(f"结构止损参考：{trigger}{price(stop['price'], quantum)}")
+            label = '预警失效参考' if stop.get('status') == 'provisional' else '结构止损参考'
+            lines.append(f"{label}：{trigger}{price(stop['price'], quantum)}")
         else:
             lines.append("结构止损参考：当前无可核验价格")
         if target.get("status") == "exit_confirmed" and number(target.get("price")) is not None:
@@ -192,7 +202,7 @@ def signal_body(row):
     first = row.get("first_warned_at")
     changed = row.get("state_changed_at") or row.get("recorded_at")
     if first:
-        prefix = "首次预警" if phase == "warning" else "对应预警"
+        prefix = "首次预警" if phase in {"warning", "approaching"} else "对应预警"
         suffix = f"（历时{elapsed(first, changed)}）" if phase != "warning" and changed and changed >= first else ""
         lines.append(f"{prefix}：{date(first)}{suffix}")
     if phase == "confirmed" and row.get("point_confirmed_at"):

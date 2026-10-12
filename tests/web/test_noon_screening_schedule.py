@@ -97,3 +97,21 @@ def test_noon_phase_is_valid_when_manual_settings_use_one_period_macd_filter(set
     service.tick()
     assert validate_settings(manual.started[0])['frequencies']==['5m','30m']
     assert original['minimum_operating_frequency']=='5m'
+
+
+def test_requested_policy_handoff_restarts_daily_scan_once_after_source_revision_changes(setup):
+    service,manual,_,clock=setup
+    clock[0]=clock[0].replace(hour=15,minute=11)
+    service.tick()
+    manual.state.update(status='cancelled',stop_reason='policy_update',source_current=False,
+                        source_revision='old',current_source_revision='new')
+    service._load()['daily']['afternoon']['attempts']=3
+    service.tick()
+    assert len(manual.started)==2
+    assert service._load()['daily']['afternoon']['status']=='started'
+    assert service._load()['daily']['afternoon']['source_recovery_revision']=='new'
+    manual.state.update(status='cancelled',stop_reason='policy_update',source_current=False,
+                        source_revision='old',current_source_revision='new')
+    service._load()['daily']['afternoon']['attempts']=3
+    service.tick()
+    assert len(manual.started)==2

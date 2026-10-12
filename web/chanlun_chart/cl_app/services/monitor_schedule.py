@@ -76,6 +76,8 @@ def describe(state, manual, observed_at):
         phase_status = phase.get("status")
         if phase_status == "completed":
             text = "已完成"
+        elif phase_status == 'updating':
+            text = '规则更新，等待新任务接续'
         elif phase_status in {'partial', 'timed_out'}:
             text = f"已达午间时间上限，完成 {phase.get('completed', 0)} / {phase.get('total', '—')} 个计算项"
         elif phase_status == "started":
