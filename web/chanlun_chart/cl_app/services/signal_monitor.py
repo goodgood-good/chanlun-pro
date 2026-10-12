@@ -7,6 +7,7 @@ in its detached, bounded worker processes, with a separate results directory.
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from collections import Counter
 from datetime import datetime
 import hashlib
@@ -31,6 +32,10 @@ from .dingtalk_notifications import signal_status_key, signal_reference
 from .notification_handoff import retain as retain_notifications, pending_events, evidence_references
 from .notification_text import REASONS, price as notification_price
 from .monitor_view import validate_page_options
+from .notification_policy import (
+    default_point_notifications, normalize_point_notifications,
+    next_point_notification_since, point_notification_decision,
+)
 from .screening_pool_recovery import independent_members, pending_members, suspend_pending, resolve_pending
 from .monitor_scope import build_minute_scope_index, minute_cadence, record_minute_checkpoint
 from . import monitor_requests
@@ -48,6 +53,7 @@ MONITOR_HOLDING_WAIT_SECONDS = 5
 MORNING_AFTER_CLOSE = "11:35"
 LOG = logging.getLogger(__name__)
 _PRIVATE_SNAPSHOT_FIELDS = frozenset({
+    'point_notification_since',
     'pending_notifications', 'known', 'last_attempt_key', 'force',
     'unverified_signals', 'holding_evidence', 'holding_risk_plans', 'startup_errors', 'last_check_event_refs',
     'minute_cadence_checkpoints', 'minute_force_pending', 'active_minute_override_tokens',
@@ -438,6 +444,10 @@ class SignalMonitor:
         try:
             if self._state is None:
                 return [], events
+            events = [event for event in events
+                      if point_notification_decision(self._state, event, None) != 'deny']
+            if not events:
+                return [], []
             scan_types = set((self._state.get('seed') or {}).get('settings', {}).get('point_types', []))
             epoch = state_epoch(self._state, self._control_version, events)
         finally:
@@ -479,6 +489,7 @@ class SignalMonitor:
         source = reader() if callable(reader) else monitor.status()
         fresh_holdings = None
         if any(event.get("signal_type") in {"consolidation_divergence","holding_risk"}
+               or event.get('point_type') in POINT_TYPES
                or event.get('holding') or event.get('point_type') not in scan_types for event in events):
             try:
                 fresh_holdings = {_symbol_key(symbol) for symbol in holding_symbols()}
@@ -511,6 +522,12 @@ class SignalMonitor:
                           if state.get('active_monitor_run') != state.get('processed_run') else None)
         valid, pending = [], []
         for event in events:
+            policy_decision = point_notification_decision(state, event, fresh_holdings)
+            if policy_decision == 'deny':
+                continue
+            if policy_decision == 'pending':
+                pending.append(event)
+                continue
             key = _symbol_key(event)
             frequency = event.get("frequency")
             awaiting_commit = bool(recovering_run and event.get('run_id') == recovering_run)
@@ -717,6 +734,23 @@ class SignalMonitor:
             self._state.setdefault('holding_evidence',{})
             self._state.setdefault("selection_checks", {})
             self._state.setdefault("holding_notification_since", {})
+            self._state.setdefault('point_notifications', default_point_notifications())
+            self._state.setdefault('point_notification_since', {})
+            self._state.setdefault('point_notification_version', 0)
+            try:
+                self._state['point_notifications'] = normalize_point_notifications(self._state['point_notifications'])
+                if (not isinstance(self._state['point_notification_since'], dict)
+                        or any(not isinstance(key, str) or type(value) not in (int, float)
+                               or not math.isfinite(value) or value < 0
+                               for key, value in self._state['point_notification_since'].items())
+                        or type(self._state['point_notification_version']) is not int
+                        or self._state['point_notification_version'] < 0):
+                    raise ValueError('通知策略版本或起点无效')
+            except ValueError:
+                self._state['point_notifications'] = {'frequencies': [], 'holdings': [], 'others': []}
+                self._state['point_notification_since'] = {}
+                self._state['point_notification_version'] = 0
+                self._state['point_notification_error'] = '已暂停买卖点通知：保存的通知条件无效，请重新设置。'
             self._state.setdefault("consolidation_enabled_at", int(self.now().timestamp()))
             self._state.setdefault("consolidation_warning_enabled_at", int(self.now().timestamp()))
             self._state["settings"].setdefault("morning_after_close", MORNING_AFTER_CLOSE)
@@ -1143,6 +1177,35 @@ class SignalMonitor:
             state["dingtalk_enabled"] = body["enabled"]
             self._save()
         self.start_runtime()
+        self._wake.set()
+        return self._control_snapshot(page_options)
+
+    def configure_point_notifications(self, body, *, page_options=None):
+        validate_page_options(page_options)
+        policy = normalize_point_notifications(body)
+        with self._control_lock:
+            with self._lock:
+                state = self._load()
+                previous = state['point_notifications']
+                if policy != previous or state.get('point_notification_error'):
+                    since = next_point_notification_since(previous, policy,
+                        state['point_notification_since'], self.now().timestamp())
+                    # The sender's generation fence precedes the new state,
+                    # so a receipt authorized by the old policy cannot commit.
+                    self.notifications.invalidate_point_notification_policy()
+                    previous_fields = {key: deepcopy(state[key]) for key in (
+                        'point_notifications', 'point_notification_since', 'point_notification_version')}
+                    previous_error = state.get('point_notification_error')
+                    state.update(point_notifications=policy, point_notification_since=since,
+                                 point_notification_version=state['point_notification_version'] + 1)
+                    state.pop('point_notification_error', None)
+                    try:
+                        self._save()
+                    except (OSError, ValueError):
+                        state.update(previous_fields)
+                        if previous_error:
+                            state['point_notification_error'] = previous_error
+                        raise RuntimeError('通知设置未能保存，请稍后重试') from None
         self._wake.set()
         return self._control_snapshot(page_options)
 

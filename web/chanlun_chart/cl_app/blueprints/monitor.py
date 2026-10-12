@@ -121,6 +121,8 @@ def control(action):
             result = service.check_now(**options)
         elif action == "dingtalk":
             result = service.configure_notifications(request.get_json(silent=True), **options)
+        elif action == "notification-policy":
+            result = service.configure_point_notifications(request.get_json(silent=True), **options)
         else:
             return jsonify(error="未知监听操作"), 404
         return jsonify(result)

@@ -39,7 +39,10 @@ def state_epoch(state, control_version, events):
             state.get('notification_since'), state.get('holding_source_current'), membership,
             tuple(sorted(state.get('notification_frequency_since', {}).items())),
             tuple(sorted((state.get('seed') or {}).get('settings', {}).get('point_types', []))),
-            state.get('consolidation_enabled_at'), state.get('consolidation_warning_enabled_at'))
+            state.get('consolidation_enabled_at'), state.get('consolidation_warning_enabled_at'),
+            state.get('point_notification_version'),
+            tuple(sorted((scope, tuple(values)) for scope, values in state.get('point_notifications', {}).items())),
+            tuple(sorted(state.get('point_notification_since', {}).items())))
 
 
 class DependencyReads:

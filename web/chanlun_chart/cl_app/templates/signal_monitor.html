@@ -121,7 +121,46 @@
   <details class="panel" id="dingtalk-panel"><summary>通知设置 <span class="muted">钉钉推送</span></summary>
     <header><h2>钉钉通知</h2><label><input id="dingtalk-enabled" type="checkbox" disabled> 推送选股完成与监听新信号</label></header>
     <strong id="dingtalk-status">正在读取通知状态…</strong><p id="dingtalk-detail" class="muted"></p>
-    <p class="muted">选股完成发送汇总；实时监听发送已确认买卖点及持仓盘整背驰的新信号和状态变化。实时监听由上方通知开关控制，单次静默选股不影响后续实时提醒。同一信号的相同状态去重，发送失败会重试，过期的实时提醒不补发。</p>
+    <p class="muted">选股完成发送任务回执；实时监听按下方条件发送已确认买卖点，并保留持仓盘整背驰及风险提醒。上方开关控制全部钉钉推送，单次静默选股不影响后续实时提醒。同一信号的相同状态去重，发送失败会重试，过期的实时提醒不补发。</p>
+    <form id="notification-policy-form" class="notification-policy" aria-labelledby="notification-policy-title">
+      <h3 id="notification-policy-title">买卖点通知条件</h3>
+      <p id="notification-policy-help" class="muted">仅控制钉钉买卖点通知，不改变选股和图表中的信号；持仓盘整背驰及风险提醒沿用现有设置。</p>
+      <fieldset id="notification-policy-fields" aria-describedby="notification-policy-help notification-policy-empty-help" disabled>
+        <fieldset class="notification-policy-periods">
+          <legend>通知周期</legend>
+          <div class="notification-policy-choices">
+            <label for="notification-frequency-1m"><input id="notification-frequency-1m" type="checkbox" name="notification-frequency" value="1m">1m</label>
+            <label for="notification-frequency-5m"><input id="notification-frequency-5m" type="checkbox" name="notification-frequency" value="5m">5m</label>
+            <label for="notification-frequency-30m"><input id="notification-frequency-30m" type="checkbox" name="notification-frequency" value="30m">30m</label>
+          </div>
+        </fieldset>
+        <div class="notification-policy-groups">
+          <fieldset class="notification-policy-group">
+            <legend>我的持仓</legend>
+            <div class="notification-policy-choices">
+              <label for="notification-holding-1buy"><input id="notification-holding-1buy" type="checkbox" name="holding-point" value="1buy">一买</label>
+              <label for="notification-holding-2buy"><input id="notification-holding-2buy" type="checkbox" name="holding-point" value="2buy">二买</label>
+              <label for="notification-holding-3buy"><input id="notification-holding-3buy" type="checkbox" name="holding-point" value="3buy">三买</label>
+              <label for="notification-holding-1sell"><input id="notification-holding-1sell" type="checkbox" name="holding-point" value="1sell">一卖</label>
+              <label for="notification-holding-2sell"><input id="notification-holding-2sell" type="checkbox" name="holding-point" value="2sell">二卖</label>
+              <label for="notification-holding-3sell"><input id="notification-holding-3sell" type="checkbox" name="holding-point" value="3sell">三卖</label>
+            </div>
+          </fieldset>
+          <fieldset class="notification-policy-group">
+            <legend>其他标的</legend>
+            <div class="notification-policy-choices">
+              <label for="notification-ordinary-1buy"><input id="notification-ordinary-1buy" type="checkbox" name="ordinary-point" value="1buy">一买</label>
+              <label for="notification-ordinary-2buy"><input id="notification-ordinary-2buy" type="checkbox" name="ordinary-point" value="2buy">二买</label>
+              <label for="notification-ordinary-3buy"><input id="notification-ordinary-3buy" type="checkbox" name="ordinary-point" value="3buy">三买</label>
+            </div>
+            <p class="muted">非持仓只推送买点，卖点不推送</p>
+          </fieldset>
+        </div>
+        <p id="notification-policy-empty-help" class="muted">周期可多选；全部不选时关闭买卖点通知。任一标的分组不选类型时，关闭该组买卖点通知。</p>
+        <div class="notification-policy-actions"><button id="notification-policy-save" class="primary" type="submit">保存通知条件</button></div>
+      </fieldset>
+      <p id="notification-policy-message" class="muted" role="status" aria-live="polite">正在读取已保存的通知条件…</p>
+    </form>
     <details><summary>最近发送记录</summary><div id="dingtalk-history"></div></details>
   </details>
   <section class="monitor-stages">

@@ -56,6 +56,9 @@ ROW_FIELDS = {
 STATE_FIELDS = {
     "enabled",
     "dingtalk_enabled",
+    "point_notifications",
+    "point_notification_version",
+    "point_notification_error",
     "settings",
     "daily",
     "last_check_at",

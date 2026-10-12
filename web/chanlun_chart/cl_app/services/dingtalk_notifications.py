@@ -300,6 +300,23 @@ class DingTalkOutbox:
         row = db.execute("SELECT value FROM delivery_settings WHERE key='window_start'").fetchone()
         return row[0] if row else 0
 
+    @staticmethod
+    def _point_policy_generation(db):
+        row = db.execute("SELECT value FROM delivery_settings WHERE key='point_policy_generation'").fetchone()
+        return int(row[0]) if row else 0
+
+    def invalidate_point_notification_policy(self):
+        """Fence old validation before the monitor commits a new point policy.
+
+        Called with the monitor lock held. Dispatch reads that lock only outside
+        the queue lock, and rechecks this generation before committing a send.
+        Existing receipts keep their payloads/deadlines for the new validation.
+        """
+        with self._lock, self._connect() as db:
+            db.execute("INSERT INTO delivery_settings VALUES ('point_policy_generation',1) "
+                       "ON CONFLICT(key) DO UPDATE SET value=value+1")
+        self._wake.set()
+
     def _current_delivery(self, db, receipt):
         """Check ownership inside the transaction which will change this work."""
         current = db.execute("SELECT status,expires FROM outbox WHERE id=?", (receipt['id'],)).fetchone()
@@ -309,6 +326,12 @@ class DingTalkOutbox:
             # Also retire a deferred batch left behind by an older dispatcher.
             db.execute("UPDATE outbox SET status='expired',error='通知开关已更新，旧队列不再补发' "
                        "WHERE id=? AND status='sending'", (receipt['id'],))
+            return None
+        if (receipt['kind'] in {'signals', 'chart'}
+                and receipt.get('point_policy_generation', 0) != self._point_policy_generation(db)):
+            db.execute("UPDATE outbox SET status='retry',attempts=?,next_try=?,send_started=NULL,"
+                       "error='通知条件已更新，等待重新复核' WHERE id=? AND status='sending'",
+                       (receipt['attempts'], self.now(), receipt['id']))
             return None
         return current
 
@@ -333,22 +356,12 @@ class DingTalkOutbox:
 
     def screening_completed(self, result, baseline):
         identity = "screening:" + result["run_id"]
-        confirmed, waiting = result.get("selected", []), result.get("observations", [])
         failures = {(e.get("market", "a"), e["code"]) for e in result.get("errors", [])}
-        lines = ["缠论 Pro · 盘后选股完成", f"完成时间：{date(result.get('finished_at') or self.now())}",
+        # A task receipt is not a signal alert and has no fresh holding proof.
+        # Point details are delivered solely through the validated signal path.
+        lines = ["缠论 Pro · 选股完成", f"完成时间：{date(result.get('finished_at') or self.now())}",
                  f"检查标的：{result.get('completed_symbols',result.get('completed', 0))} / {result.get('total_symbols',result.get('total', 0))}",
-                 f"命中：{len({(r.get('market','a'),r['code']) for r in confirmed})} 个标的",
-                 f"已确认买点：{sum(r['point']['point_type'].endswith('buy') for r in confirmed)} 个；卖点：{sum(r['point']['point_type'].endswith('sell') for r in confirmed)} 个",
-                 f"数据异常：{len(failures)} 个标的", "结果摘要："]
-        for row in [*confirmed, *waiting][:8]:
-            point = row["point"]
-            stage = point["status"]
-            lines.append(f"{_clean(row.get('name', row['code']), 28)} {row.get('market','a')}:{row['code']} · "
-                         f"{POINTS.get(point['point_type'], point['point_type'])} · {STAGES.get(stage, stage)}")
-        if not confirmed and not waiting:
-            lines.append("本轮没有可展示候选；数据异常不表示无信号。")
-        if len(confirmed) + len(waiting) > 8:
-            lines.append("更多候选请查看选股工作台。")
+                 f"数据异常：{len(failures)} 个标的", "详细结果请查看选股页面。"]
         if not result.get("source_current", True):
             lines.append("计算版本已变化，请重新选股后复核。")
         lines.append("任务：" + result["run_id"][:12])
@@ -357,10 +370,20 @@ class DingTalkOutbox:
             if (result.get('finished_at') or stamp) < self._window_start(db):
                 return
             self._insert(db, identity, "screening", "\n".join(lines), stamp, 86400)
-            # The completion summary represents the initial pool. Its existing
-            # signals must not be advertised again as new intraday discoveries.
+            # Existing pool signals are a baseline, not new live discoveries.
             db.executemany("INSERT OR IGNORE INTO markers VALUES (?,?)", [(signal_key(row), stamp) for row in baseline])
         self._wake.set()
+
+    @staticmethod
+    def _screening_receipt_text(content):
+        """Also remove unvalidated point details queued by an older version."""
+        safe = re.compile(r'^(?:完成时间：[0-9 /:—-]+|检查标的：\d+ / \d+|数据异常：\d+ 个标的|任务：[a-zA-Z0-9_-]{1,12})$')
+        lines = ['缠论 Pro · 选股完成']
+        for line in content.splitlines():
+            if safe.fullmatch(line) or line == '计算版本已变化，请重新选股后复核。':
+                lines.append(line)
+        lines.append('详细结果请查看选股页面。')
+        return '\n'.join(lines)
 
     def signal_events(self, events, *, since):
         from .notification_coalescing import append_pending, bucket as coalesce_bucket, BATCH_PREFIX
@@ -637,6 +660,8 @@ class DingTalkOutbox:
                 if next_due is not None:
                     return next_due
                 return
+            row = dict(row)
+            row['point_policy_generation'] = self._point_policy_generation(db)
             db.execute("UPDATE outbox SET status='sending',attempts=attempts+1,next_try=? WHERE id=?", (stamp+30, row["id"]))
             # Bound diagnostics even when every queued event expires during
             # validation and no transport call reaches normal receipt cleanup.
@@ -647,6 +672,8 @@ class DingTalkOutbox:
                 (row['id'], stamp, stamp))
             saved = db.execute("SELECT events FROM signal_payloads WHERE outbox_id=?", (row["id"],)).fetchone()
         content, pending = row["content"], None
+        if row['kind'] == 'screening':
+            content = self._screening_receipt_text(content)
         try:
             events = json.loads(saved[0]) if saved else []
             if not isinstance(events,list) or any(not isinstance(item,dict) for item in events):

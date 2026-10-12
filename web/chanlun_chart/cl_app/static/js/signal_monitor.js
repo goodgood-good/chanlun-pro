@@ -14,6 +14,50 @@
   let refreshController, searchTimer;
   let statusCache=null;
   let riskRevision=null,riskRetryAt=0;
+  const policyForm=$('notification-policy-form');
+  const policyChoices={frequencies:['1m','5m','30m'],holdings:['1buy','2buy','3buy','1sell','2sell','3sell'],others:['1buy','2buy','3buy']};
+  const policyNames={frequencies:'notification-frequency',holdings:'holding-point',others:'ordinary-point'};
+  const policy={ready:false,available:false,saving:false,dirty:false,version:0,saved:null,error:'',notice:'正在读取买卖点通知设置…'};
+  function normalizePolicy(value){
+    if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!Object.hasOwn(policyChoices,key)))return null;
+    const result={};
+    for(const [key,allowed] of Object.entries(policyChoices)){
+      if(!Array.isArray(value[key])||value[key].some(item=>!allowed.includes(item))||new Set(value[key]).size!==value[key].length)return null;
+      result[key]=allowed.filter(item=>value[key].includes(item));
+    }
+    return result;
+  }
+  const policyInputs=key=>Array.from(document.querySelectorAll?.(`#notification-policy-form input[name="${policyNames[key]}"]`)||[]);
+  const policyDraft=()=>Object.fromEntries(Object.keys(policyChoices).map(key=>[key,
+    policyInputs(key).filter(input=>input.checked&&policyChoices[key].includes(input.value)).map(input=>input.value)]));
+  function applyPolicy(value){
+    for(const key of Object.keys(policyChoices))for(const input of policyInputs(key))input.checked=value[key].includes(input.value);
+  }
+  function policyControls(){
+    if(!policyForm)return;
+    $('notification-policy-fields').disabled=!policy.ready;
+    $('notification-policy-save').disabled=busy||policy.saving||!policy.ready||!policy.available||(!policy.dirty&&!policy.error);
+    $('notification-policy-save').textContent=policy.saving?'正在保存…':'保存买卖点通知设置';
+    $('notification-policy-message').textContent=[policy.error,policy.notice].filter(Boolean).join(' ');
+  }
+  function renderPolicy(value,error){
+    if(!policyForm)return;
+    policy.error=typeof error==='string'?error:'';
+    const normalized=normalizePolicy(value);
+    if(!normalized){
+      policy.available=false;
+      if(!policy.saving)policy.notice='买卖点通知设置暂不可读取，请刷新后重试。'+(policy.dirty?'未保存的修改已保留。':'');
+    }else{
+      const recovered=!policy.available;
+      policy.available=true;policy.saved=normalized;
+      if(!policy.ready||!policy.dirty&&!policy.saving){
+        applyPolicy(normalized);
+        if(!policy.ready||recovered)policy.notice='';
+      }
+      policy.ready=true;
+    }
+    policyControls();
+  }
   const pages = {signals:1,pool:1,events:1};
   const phone = !!globalThis.WorkspaceDevice?.isPhone;
   if (phone) {
@@ -466,6 +510,7 @@
   }
   function render(result) {
     data=result; const manual=result.screening_job||{},live=result.monitor_job||{},seed=result.seed;
+    renderPolicy(result.point_notifications,result.point_notification_error);
     const poolCount=seed?.count??seed?.codes?.length??0;
     if(!initialized){$('morning-after-close').value=result.settings.morning_after_close||'11:35';$('after-close').value=result.settings.after_close;$('daily-workers').value=String(result.settings.screening?.workers||16);if($('monitor-workers'))$('monitor-workers').value=String(result.settings.monitor_workers||16);$('interval').value=String(result.settings.interval_seconds);$('daily-scope').value=result.settings.daily_scope;initialized=true;}
     $('enabled-label').textContent=result.enabled?(result.runtime_running?'自动任务已开启':'后台服务尚未就绪'):'自动任务已暂停';
@@ -555,10 +600,13 @@
         }else{message(data?.last_error||'');refreshRisksIfNeeded();}
       }
     }
-    catch(error){if(request===serial)message(error.name==='AbortError'?'状态读取超时，稍后自动重试。':error.message);}
+    catch(error){if(request===serial){
+      message(error.name==='AbortError'?'状态读取超时，稍后自动重试。':error.message);
+      if(policyForm&&!policy.ready){policy.notice='买卖点通知设置读取失败，稍后自动重试。';policyControls();}
+    }}
     finally{if(request===serial)polling=false;}
   }
-  async function control(action,body={}) {
+  async function control(action,body={},policyVersion=null) {
     if(busy)return;
     const requestedView=query(),requestedPages={...pages};
     busy=true;refreshAfterControl=false;++serial;refreshController?.abort();polling=false;
@@ -567,16 +615,29 @@
       if(data){try{render(data);}finally{Object.assign(pages,requestedPages);}}
       message('');
       const result=await api('/monitor/'+action+requestedView,body);
+      const savedPolicy=action==='notification-policy'?normalizePolicy(result.point_notifications):null;
+      if(action==='notification-policy'&&!savedPolicy)throw Error('保存响应缺少有效通知设置，请刷新核对；未保存的修改已保留。');
       const wantedPages={...pages},viewChanged=query()!==requestedView;
       try{render(result);}finally{
         if(viewChanged){Object.assign(pages,wantedPages);refreshAfterControl=true;}
       }
+      if(savedPolicy){
+        policy.saved=savedPolicy;policy.ready=true;policy.available=true;
+        if(policy.version===policyVersion){applyPolicy(savedPolicy);policy.dirty=false;policy.notice='买卖点通知设置已保存。';}
+        else{
+          policy.dirty=JSON.stringify(policyDraft())!==JSON.stringify(savedPolicy);
+          policy.notice=policy.dirty?'已保存提交时的设置；之后的修改尚未保存。':'买卖点通知设置已保存。';
+        }
+      }
     }catch(error){
       failure=error.name==='AbortError'?'操作响应超时，请刷新核对状态。':error.message;
       message(failure);
+      if(action==='notification-policy')policy.notice='通知设置保存失败：'+failure;
       refreshAfterControl=refreshAfterControl||query()!==requestedView;
     }finally{
       busy=false;
+      if(action==='notification-policy')policy.saving=false;
+      policyControls();
       if(data){$('enable').disabled=false;$('pause').disabled=!data.enabled;$('check-now').disabled=!data.enabled||!(data.seed?.count??data.seed?.codes?.length);$('dingtalk-enabled').checked=!!data.dingtalk?.enabled;$('dingtalk-enabled').disabled=!data.dingtalk?.configured;}
       if(refreshAfterControl){
         refreshAfterControl=false;clearTimeout(searchTimer);
@@ -584,6 +645,22 @@
         if(failure)void followUp.then(()=>{if(request===serial)message(failure);});
       }
     }
+  }
+  if(policyForm){
+    for(const key of Object.keys(policyChoices))for(const input of policyInputs(key))input.addEventListener('change',()=>{
+      if(!policy.ready)return;
+      policy.version++;policy.dirty=JSON.stringify(policyDraft())!==JSON.stringify(policy.saved);
+      policy.notice=policy.saving?'正在保存提交时的设置；新的修改尚未保存。':policy.dirty?'有未保存的通知设置。':'';
+      policyControls();
+    });
+    policyForm.addEventListener('submit',event=>{
+      event.preventDefault();
+      if(busy||policy.saving||!policy.ready||!policy.available||(!policy.dirty&&!policy.error))return;
+      const draft=policyDraft(),version=policy.version;
+      policy.saving=true;policy.notice='正在保存买卖点通知设置…';policyControls();
+      void control('notification-policy',draft,version);
+    });
+    policyControls();
   }
   $('monitor-form').addEventListener('submit',event=>{event.preventDefault();void control('start',{morning_after_close:$('morning-after-close').value,after_close:$('after-close').value,screening_workers:Number($('daily-workers').value),monitor_workers:Number($('monitor-workers')?.value||16),interval_seconds:Number($('interval').value),daily_scope:$('daily-scope').value});});
   $('pause').addEventListener('click',()=>void control('pause'));
