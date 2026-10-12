@@ -11,12 +11,16 @@
   function resultVersionMessage(status) {
     if (status.source_current !== false || !status.run_id) return '';
     if (status.frozen_native_review)
-      return '源码已更新；下方显示原截止时刻经证据核验的中枢历史结果。重新选股可更新到最新行情。';
+      return '计算规则已更新；下方保留原截止时刻经证据核验的已确认历史结果。未确认预警需按新规则重新选股后显示。';
     return status.source_revision
       ? '该批次与当前规则版本不兼容，需重新选股。'
       : '本次结果的算法版本尚不可核对。';
   }
-  function emptyResultsMessage(status={}, candidateCount=0) {
+  function emptyResultsMessage(status={}, candidateCount=0, filters={}) {
+    if (filters.point_status === 'forming' && status.source_current === false && status.frozen_native_review)
+      return '预警规则已更新，原来的未确认结果需要重新计算；这不代表没有预警。重新选股后，新结果会逐步显示。';
+    if (filters.point_status === 'forming' && activeRun(status.status))
+      return '本轮仍在计算，当前筛选条件下暂未出现未确认预警；已核验的新结果会逐步显示。';
     if (status.results_loading && !status.results_available) return RESULTS_LOADING;
     if (status.results_loading && !candidateCount) return '已核验的部分暂未发现候选，正在继续读取新增结果。';
     if (status.status === 'idle') return '尚未运行选股，请在上方选择范围和周期后开始选股。';
@@ -634,7 +638,7 @@
       $('export').disabled=state.exportPending||reviewFilterPending();
       $('queue-empty').textContent=reviewFilterPending()?'正在读取复核状态，完成后自动显示筛选结果。':state.filters.origin!=='watchlist'&&!periodPointConditions(state.filters).length
         ?'尚未选择买卖点。勾选任意一格，或点击“全部”查看所有买卖点。'
-        :emptyResultsMessage(state.data?.status,state.data?.candidates?.length||0);
+        :emptyResultsMessage(state.data?.status,state.data?.candidates?.length||0,state.filters);
       if (state.selected && !page.rows.some(r=>r.id===state.selected.id)) {
         clearSelection();
       }

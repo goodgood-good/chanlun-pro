@@ -7,7 +7,6 @@ local price turn can initiate the conditional unfinished-segment preview.
 These are engineering triggers, not confirmed price/structure reversals.
 They never make the actual segment, center or point confirmed.
 """
-from copy import deepcopy
 from dataclasses import replace
 import math
 
@@ -193,13 +192,14 @@ def preview_source_valid(snapshot, point, centers, units):
                     or (trigger == 'closed_local_turn' and (len(momentum)!=3 or not momentum[0]>momentum[1]>momentum[2]>=0))
                     or (trigger == 'macd_first_contraction' and witness.get('estimated_area_c') != factor*c)):
                 return False
-        virtual = deepcopy(snapshot)
         virtual_units = [*units[:index],{**tail,'locked':True,'forming':False,'confirmed_at':cutoff,'available_at':cutoff},*units[index+1:]]
         virtual_centers = {**centers,owner['center_id']:owner}
-        virtual['screening_segments'] = virtual_units
-        level = virtual['levels'][0]
-        level['centers'] = list(virtual_centers.values())
-        level['points'] = [p for p in level['points'] if p.get('status')=='confirmed'] + [formal]
+        # Source validation only reads its input. Overlay the changed containers
+        # rather than copying every candle, indicator and historical projection
+        # for each candidate in a large screening result.
+        level = {**snapshot['levels'][0], 'centers':list(virtual_centers.values()),
+                 'points':[p for p in snapshot['levels'][0]['points'] if p.get('status')=='confirmed']+[formal]}
+        virtual = {**snapshot,'screening_segments':virtual_units,'levels':[level,*snapshot['levels'][1:]]}
         return _native_center_signal_source_valid(virtual, formal, virtual_centers, virtual_units)
     except (KeyError, TypeError, ValueError, AttributeError, ArithmeticError):
         return False

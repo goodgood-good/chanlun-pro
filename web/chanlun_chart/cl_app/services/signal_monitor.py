@@ -2011,19 +2011,45 @@ class SignalMonitor:
             if daily.get("session") != session:
                 daily = state["daily"] = {"session": session}
             phase_state = daily.get(phase, {})
+            phase_settings = deepcopy(settings['screening'])
+            if phase == 'morning' and phase_settings.get('strategy') == 'direct_structural':
+                phase_settings['frequencies'] = ['5m', '30m']
+                phase_settings.pop('minimum_operating_frequency', None)
+            compatible_completed = (
+                manual.get('status') == 'completed' and not all_periods_failed(manual)
+                and manual.get('cutoffs', {}).get('5m') == cutoff
+                and manual.get('settings') == phase_settings)
+            if compatible_completed and manual.get('source_current'):
+                # A manually refreshed run may have replaced an already
+                # completed scheduled run. Remember its actual identity.
+                updated = {**phase_state, 'run_id':manual['run_id'], 'status':'completed'}
+                cleared = self._clear_start_failure('daily',state)
+                if updated != phase_state or cleared:
+                    daily[phase] = updated
+                    self._save()
+                self._startup_retries.pop('daily',None)
+                return
+            revision = manual.get('current_source_revision')
+            refresh_budget = phase != 'morning' or now.timestamp() < (phase_state.get('deadline_at') or 0)
+            if (phase_state.get('status') == 'completed' and compatible_completed
+                    and manual.get('source_current') is False and manual.get('frozen_native_review')
+                    and revision and manual.get('source_revision') and manual['source_revision'] != revision
+                    and phase_state.get('source_recovery_revision') != revision and refresh_budget):
+                # Frozen completed results intentionally omit old-rule previews.
+                # Rebuild once under the new rules instead of leaving that view
+                # empty indefinitely. Reuse the original noon deadline.
+                phase_state = {**phase_state, 'run_id':manual['run_id'], 'status':'updating',
+                    'attempts':0, 'retry_at':0, 'source_recovery_revision':revision,
+                    'refresh_reason':'rules_updated'}
+                daily[phase] = phase_state
+                self._save()
             if phase_state.get("status") in {"completed", "partial", "timed_out"}:
                 if self._clear_start_failure('daily',state):
                     self._save()
                 self._startup_retries.pop('daily',None)
                 return
-            phase_settings = deepcopy(settings['screening'])
             deadline_at = None
             if phase == 'morning':
-                if phase_settings.get('strategy') == 'direct_structural':
-                    phase_settings['frequencies'] = ['5m', '30m']
-                    # The optional one-period MACD view cannot be carried onto
-                    # a two-period run; retain it in the saved/manual settings.
-                    phase_settings.pop('minimum_operating_frequency', None)
                 deadline_at = phase_state.get('deadline_at') or min(
                     now.timestamp() + MORNING_BUDGET_SECONDS,
                     now.replace(hour=12, minute=55, second=0, microsecond=0).timestamp())
@@ -2034,15 +2060,6 @@ class SignalMonitor:
                     daily[phase] = {**phase_state, 'status': 'timed_out', 'deadline_at': deadline_at}
                     self._save()
                     return
-            if (manual["status"] == "completed" and manual.get("source_current")
-                    and not all_periods_failed(manual)
-                    and manual.get("cutoffs", {}).get("5m") == cutoff
-                    and manual.get("settings") == phase_settings):
-                daily[phase] = {**phase_state, "run_id": manual["run_id"], "status": "completed"}
-                self._clear_start_failure('daily',state)
-                self._save()
-                self._startup_retries.pop('daily',None)
-                return
             if manual["status"] in ACTIVE:
                 return
             revision=manual.get('current_source_revision')
@@ -2083,7 +2100,10 @@ class SignalMonitor:
                 if not self._start_allowed('daily',context):
                     return
             try:
-                launched = self.screening.start(settings, **({'deadline_at': deadline_at} if deadline_at is not None else {}))
+                options = {'deadline_at':deadline_at} if deadline_at is not None else {}
+                if phase_state.get('refresh_reason') == 'rules_updated':
+                    options['external_notifications'] = False
+                launched = self.screening.start(settings, **options)
             except Exception as error:
                 self._record_start_failure('daily',context,error)
                 raise TaskStartError('daily',error) from error
@@ -2091,6 +2111,8 @@ class SignalMonitor:
                 state=self._load()
                 state['daily'][phase] = {**({'source_recovery_revision':phase_state['source_recovery_revision']}
                                            if phase_state.get('source_recovery_revision') else {}),
+                                        **({'refresh_reason':phase_state['refresh_reason']}
+                                           if phase_state.get('refresh_reason') else {}),
                                         "run_id": launched["run_id"], "status": "started",
                                                 "attempts": attempts + 1, "retry_at": now.timestamp() + (60 if phase == 'morning' else 900)}
                 if deadline_at is not None:

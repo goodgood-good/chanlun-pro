@@ -121,6 +121,24 @@ def test_source_verification_rejects_changed_price_center_and_fabricated_confirm
         assert not preview_source_valid(snapshot,broken,centers_by_id,snapshot['screening_segments'])
 
 
+def test_source_validation_does_not_copy_chart_history_or_mutate_real_structure():
+    units,centers,bars,hist=third_fixture()
+    point,=build_point_previews(units,centers,None,bars,hist,as_of=bars[-1].date,serialize_center=strict_center_to_chart_dict)
+    serialized=[strict_center_to_chart_dict(center) for center in centers]
+    real_units=[{**_unit_audit_payload(u),'source_kind':'segment','structural_level':0,
+                 'price_basis_revision':u.price_basis_revision,'forming':u.forming} for u in units]
+    class LargeHistory:
+        def __deepcopy__(self,_memo):
+            raise AssertionError('validating one point must not duplicate the chart history')
+    snapshot={'source_closed_at':int(bars[-1].date.timestamp()),'price_basis_revision':units[-1].price_basis_revision,
+              'structure_price_quantum':'1','levels':[{'centers':serialized,'points':[point]}],
+              'screening_segments':real_units,'chart':LargeHistory()}
+    before=deepcopy(snapshot['levels'])
+    assert preview_source_valid(snapshot,point,{c['center_id']:c for c in serialized},real_units)
+    assert snapshot['levels']==before and snapshot['screening_segments'] is real_units
+    assert real_units[-1]['locked'] is False and point['confirmed_at'] is None
+
+
 @pytest.mark.parametrize('forming,area,expected',[(True,29,True),(True,30,False),(True,49,False),(False,60,True)])
 def test_first_point_area_margin_distinguishes_a_forming_leg_from_a_formed_unlocked_leg(forming,area,expected):
     units,centers,bars,hist,strength=trend_fixture()

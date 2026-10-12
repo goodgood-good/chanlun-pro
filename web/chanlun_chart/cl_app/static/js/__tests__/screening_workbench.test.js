@@ -2,6 +2,15 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {filterRows,chartUrl,evidenceUrl,quoteText,cutoffSummary,resultVersionMessage,emptyResultsMessage,pageRows}=require('../screening_workbench.js');
+
+test('empty unconfirmed view explains rule refresh rather than claiming no signals',()=>{
+  const status={status:'completed',source_current:false,frozen_native_review:true};
+  const message=emptyResultsMessage(status,15,{point_status:'forming'});
+  assert.match(message,/规则已更新/);assert.match(message,/重新计算/);
+  assert.doesNotMatch(message,/当前过滤条件下没有候选/);
+  assert.match(emptyResultsMessage({status:'running',source_current:true},15,{point_status:'forming'}),/逐步显示/);
+  assert.match(emptyResultsMessage({...status,source_current:true},15,{point_status:'forming'}),/过滤条件/);
+});
 const filters={market:'all',origin:'screening',sector:'',review:'all',stage:'all'};
 const rows=[
   {id:'a',market:'a',code:'SH.600088',name:'中视传媒',frequency:'5m',point:{point_type:'3buy'},stage:'confirmed',origin:'screening',sectors:['media']},
