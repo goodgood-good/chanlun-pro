@@ -62,12 +62,6 @@
     '60m':'60','120m':'120','180m':'180','240m':'240',d:'1D','2d':'2D','3d':'3D',w:'1W',m:'1M'};
   const CHART_COUNTS = {single:1,'horizontal-2':2,'vertical-2':2,'horizontal-7-3':2,three:3,four:4};
   const STRATEGY = '5m_with_1m_confirmation';
-  const HIGHER_CONTEXT = {up_trend_forming:'上涨走势形成中',down_trend_forming:'下跌走势形成中',
-    up_segment:'向上线段',down_segment:'向下线段',consolidation:'盘整',unknown:'方向未知'};
-  const HIGHER_REASONS = {NO_CURRENT_30M_DIRECTION:'截止时刻没有当前方向证据',
-    '30M_CUTOFF_NOT_ALIGNED':'30m 与 5m 截止时刻不一致',DATA_GAPS:'30m 行情缺失',
-    STALE_DATA:'30m 行情未更新',SESSION_CALENDAR_UNAVAILABLE:'交易日历未覆盖',
-    CALENDAR_COVERAGE_UNKNOWN:'交易日历待核验',INVALID_SESSION:'30m 时段待核验'};
   const PERIOD_LINK_HELP = {
     aligned:{label:'联动支持',short:'其他周期提供同向依据',meaning:'较大周期背景或相关小周期信号支持当前买卖方向，且未触发冲突条件。不要求三个周期同时出现买卖点。'},
     turning:{label:'转折候选',short:'较大周期出现转折迹象',meaning:'较大周期尚未明确转为同向，但已出现同向信号或越过参考中枢边界。仍需后续结构确认，不能视为已经反转。'},
@@ -90,12 +84,7 @@
       const definition=PERIOD_LINK_HELP[context.category];
       return [(definition?.label||context.label||'联动待核验')+(definition?'：'+definition.short:''),...peers.map(p=>p.frequency+' '+p.label)].join(' · ');
     }
-    if (!context || context.category === 'unknown') {
-      if (context?.reason === 'PENDING') return '30m 背景计算中';
-      if (context?.reason === 'NOT_COMPUTED') return '30m 背景尚未计算';
-      return `30m 方向未知${context?.reason ? ` · ${HIGHER_REASONS[context.reason] || context.reason}` : ''}`;
-    }
-    return `30m ${HIGHER_CONTEXT[context.category] || context.category} · 截止 ${date(context.source_closed_at)} · 证据 ${date(context.evidence_available_at)}`;
+    return '联动待核验：等待对应周期的证据';
   }
   function higherContextDetail(context) {
     if(context?.schema==='native-period-link-v1') {
@@ -104,13 +93,7 @@
         p.frequency+' '+roles[p.role]+'：'+p.label+(p.anchor_aligned?'（一类拐点已对齐）':'')+(p.source_closed_at?'，截止 '+date(p.source_closed_at):''));
       return [context.label,higherContextMeaning(context),...periods,...(context.notes||[])].join('；');
     }
-    if (!context) return '30m 背景尚未计算';
-    const summary=higherContextText(context);
-    const trend=context.trend;
-    if (!trend) return summary;
-    const kind=trend.kind==='trend'?'趋势':trend.kind==='consolidation'?'盘整':'走势待判';
-    const phase=trend.state==='forming'?'形成中':trend.state==='complete'?'已完成':'已锁定';
-    return `${summary}；30m 走势类型记录：${kind} · ${phase} · ${trend.center_count} 个中枢，记录可用时间 ${date(trend.available_at)}`;
+    return higherContextText(context);
   }
   const isWaiting = row => ['approaching','formed','observed','entry_pending'].includes(row.stage);
   const pointStage = row => row.point?.status || row.stage;
@@ -199,13 +182,9 @@
       if (filters.market !== 'all' && row.market !== filters.market) return false;
       if (filters.origin === 'screening' && row.origin === 'watchlist') return false;
       if (filters.origin === 'watchlist' && row.origin !== 'watchlist') return false;
-      const higher = row.higher_context?.category || 'unknown';
-      if (filters.higher && filters.higher !== 'all') {
-        if(filters.higher==='unverified'&&['unknown','unverified'].includes(higher)) { /* Missing evidence stays explicit. */ }
-        else if (filters.higher === 'up' && !['up_trend_forming','up_segment'].includes(higher)) return false;
-        else if (filters.higher === 'down' && !['down_trend_forming','down_segment'].includes(higher)) return false;
-        else if (!['up','down'].includes(filters.higher) && higher !== filters.higher) return false;
-      }
+      const higher = Object.prototype.hasOwnProperty.call(PERIOD_LINK_HELP,row.higher_context?.category)
+        ?row.higher_context.category:'unverified';
+      if (filters.higher && filters.higher !== 'all' && higher !== filters.higher) return false;
       if (filters.sector && !(row.sectors || []).includes(filters.sector)) return false;
       if (filters.review === 'reviewed' && !reviewed[row.id]) return false;
       if (filters.review === 'pending' && (reviewed[row.id] || row.origin === 'watchlist')) return false;

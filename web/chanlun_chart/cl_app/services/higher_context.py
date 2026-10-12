@@ -196,11 +196,6 @@ def _service(screening):
         return _services[key]
 
 
-def ensure(_screening, _manual, *, monitor_runs=None):
-    # Acquisition remains owned by existing screening/monitoring workers.
-    return None
-
-
 def snapshot(screening, run_id, revision, *, candidates=(), source_current=True):
     service=_service(screening)
     rows={}

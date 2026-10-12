@@ -1580,11 +1580,11 @@ test('watchlist navigation clears stale age gain lower-confirmation and point-st
 });
 
 for(const phone of [false,true])
-for(const filters of [[['risk-filter','avoid']],[['higher-context-filter','up']],[['risk-filter','avoid'],['higher-context-filter','up']]])
+for(const filters of [[['risk-filter','avoid']],[['higher-context-filter','aligned']],[['risk-filter','avoid'],['higher-context-filter','aligned']]])
 test(`${phone?'phone':'desktop'} watchlist clicks clear ${filters.map(([id])=>id).join(' and ')} and keep the requested stock`,async()=>{
   const latest=withCandidate();
   latest.candidates[0].operational_macd_risk={risk_filter_state:'basic_avoid_on_selected_period'};
-  latest.candidates[0].higher_context={category:'up_segment'};
+  latest.candidates[0].higher_context={schema:'native-period-link-v1',category:'aligned'};
   const ui=page(async url=>{
     if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
     if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:[{market:'us',code:'AAPL.US',name:'Apple'}]});

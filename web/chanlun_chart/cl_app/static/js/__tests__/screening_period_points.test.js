@@ -123,7 +123,8 @@ test('watchlist context follows origin independently of selected period or empty
 
 test('nested confirmation and higher context cannot substitute for the selected physical period',()=>{
   const main=row('five','5m','3buy',{nested_confirmation:{frequency:'1m',state:'confirmed',point:{point_type:'3buy',status:'confirmed'}},
-    higher_context:{frequency:'30m',category:'up_segment',point_type:'3sell'}});
+    higher_context:{schema:'native-period-link-v1',category:'mixed',periods:[
+      {frequency:'30m',role:'background',label:'三卖预警'}]}});
   assert.deepEqual(ids([main],pick('1m',['3buy'])),[]);
   assert.deepEqual(ids([main],pick('30m',['3sell'])),[]);
 });

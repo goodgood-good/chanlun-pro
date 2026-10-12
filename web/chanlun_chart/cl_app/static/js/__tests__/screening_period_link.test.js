@@ -65,4 +65,7 @@ test('visible linkage meanings distinguish support, reversal and missing evidenc
   assert.match(higherContextMeaning({category:'unverified'}),/不等于当前周期没有买卖点/);
   assert.match(periodLinkPlan('1m'),/5m、30m 背景/);
   assert.match(periodLinkPlan('30m'),/30m 为最高参考周期/);
+  assert.match(higherContextText(null),/联动待核验/);
+  assert.equal(higherContextDetail({category:'retired',trend:{kind:'trend'}}),higherContextText(null));
+  assert.equal(filterRows([row('missing',undefined)],{...normalizeViewState(null).filters,higher:'unverified'}).length,1);
 });

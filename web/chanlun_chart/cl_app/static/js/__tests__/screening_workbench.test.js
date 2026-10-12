@@ -93,19 +93,6 @@ test('operational MACD risk filters only the view and keeps formal point rows',(
   assert.deepEqual(filterRows(candidates,{...filters,risk:'pending'}).map(r=>r.id),['pending']);
   assert.equal(candidates[0].stage,'confirmed');
 });
-test('30m context is an optional page filter and preserves unknown evidence',()=>{
-  const candidates=[
-    {...rows[0],id:'trend',higher_context:{category:'up_trend_forming'}},
-    {...rows[0],id:'early',higher_context:{category:'up_segment'}},
-    {...rows[0],id:'opposing',higher_context:{category:'down_segment'}},
-    {...rows[0],id:'unknown',higher_context:{category:'unknown',reason:'DATA_GAPS'}},
-  ];
-  assert.deepEqual(filterRows(candidates,{...filters,higher:'all'}).map(r=>r.id),
-    ['trend','early','opposing','unknown']);
-  assert.deepEqual(filterRows(candidates,{...filters,higher:'up'}).map(r=>r.id),['trend','early']);
-  assert.deepEqual(filterRows(candidates,{...filters,higher:'up_trend_forming'}).map(r=>r.id),['trend']);
-  assert.deepEqual(filterRows(candidates,{...filters,higher:'unknown'}).map(r=>r.id),['unknown']);
-});
 test('chart URLs explicitly pin exact market, symbol and physical layout periods',()=>{
   const single=new URL(chartUrl(rows[0],'1m'),'http://local');
   assert.equal(single.searchParams.get('code'),'SH.600088');
