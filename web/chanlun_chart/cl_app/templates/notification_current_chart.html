@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <base href="/">
+  <title>{{ chart_settings.name if chart_settings else '通知' }} · 行情图表</title>
+  <style>
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#fff}
+    #tv_chart_container_notification{width:100%;height:100%}
+    #notification-current-status{position:absolute;z-index:2;left:12px;bottom:36px;max-width:calc(100% - 24px);margin:0;padding:6px 10px;background:#fffffff2;color:#64748b;border-radius:4px;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
+    #notification-current-status[hidden]{display:none}
+  </style>
+</head>
+<body>
+  <p id="notification-current-status" role="status" aria-live="polite">{{ chart_error or '正在加载行情…' }}</p>
+  {% if chart_settings %}
+  <div id="tv_chart_container_notification" aria-label="当前行情与通知标记"></div>
+  <script nonce="{{ csp_nonce }}">window.__notificationCurrentChart={{ chart_settings|tojson }};window.__CHANLUN_SSE_ENABLED={{ enable_sse|tojson }};</script>
+  <script src="/static/charting_library/charting_library.standalone.js?asset={{ static_asset_token }}"></script>
+  <script src="/static/datafeeds/udf/dist/bundle.js?asset={{ static_asset_token }}"></script>
+  <script src="/static/js/chart_structure_reconcile.js?asset={{ static_asset_token }}"></script>
+  <script src="/static/js/chart_colors.js?asset={{ static_asset_token }}"></script>
+  <script src="/static/js/tv_indicators/chart_idx_macd_backend.js?asset={{ static_asset_token }}"></script>
+  <script src="/static/js/charts.js?asset={{ static_asset_token }}"></script>
+  <script src="/static/js/chart_line_states.js?asset={{ static_asset_token }}"></script>
+  <script src="/static/js/notification_current_chart.js?asset={{ static_asset_token }}"></script>
+  {% endif %}
+</body>
+</html>

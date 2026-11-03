@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <base href="/">
+  <title>{{ chart_title }}</title>
+  <style>
+    *{box-sizing:border-box}html,body{height:100%;margin:0}body{display:flex;flex-direction:column;font:14px/1.5 system-ui,sans-serif;color:#263447;background:#f6f8fb}
+    header{padding:12px 20px;background:white;border-bottom:1px solid #dce2ea;display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    h1{font-size:17px;margin:0}p{margin:4px 0;color:#64748b}nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}button,a{font:inherit;padding:7px 12px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#244c80;text-decoration:none;cursor:pointer}button:disabled{color:#94a3b8;cursor:wait}a:hover,button:hover{background:#edf4ff}
+    #notification-view-status{padding:6px 20px;margin:0;background:#eef4fc}#notification-view-status[data-error=true]{color:#b42318;background:#fff1f0}
+    #tv_chart_container_notification{flex:1;min-height:340px;width:100%}.chart-error{padding:28px;max-width:760px}.chart-error h2{font-size:18px}
+    @media(max-width:600px){header{padding:10px 12px;gap:8px}h1{font-size:15px}nav{gap:6px}button,a{padding:7px 9px}#notification-view-status{padding:6px 12px}}
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>{{ chart_title }}</h1><p>{{ chart_settings.caption.split('\n')[0] if chart_settings else '通知当时的行情' }}</p></div>
+    <nav aria-label="图表操作">
+      {% if chart_settings %}<button id="notification-focus" disabled>定位信号</button><button id="notification-all-history" disabled>全部历史</button>{% endif %}
+      {% if not embedded %}
+        {% if current_chart_url %}<a href="{{ current_chart_url }}" target="_blank" rel="noopener">打开当前行情 ↗</a>{% endif %}
+        <a href="/monitor">通知记录</a>
+      {% endif %}
+    </nav>
+  </header>
+  {% if chart_settings %}
+  {% if chart_settings.invalidation_reason %}<p class="chart-error">失效原因：{{ chart_settings.invalidation_reason }}</p>{% endif %}
+  <p id="notification-view-status" role="status" aria-live="polite">正在加载通知图表…</p>
+  <div id="tv_chart_container_notification" aria-label="通知K线和MACD图表"></div>
+  <script nonce="{{ csp_nonce }}">window.__notificationChart={{ chart_settings|tojson }};</script>
+  <script src="/static/js/notification_viewer.js?asset={{ static_asset_token|default('viewer') }}"></script>
+  <script src="/static/charting_library/charting_library.standalone.js?asset={{ static_asset_token|default('viewer') }}"></script>
+  <script src="/static/datafeeds/udf/dist/bundle.js?asset={{ static_asset_token|default('viewer') }}"></script>
+  <script src="/static/js/chart_structure_reconcile.js?asset={{ static_asset_token|default('viewer') }}"></script>
+  <script src="/static/js/chart_colors.js?asset={{ static_asset_token|default('viewer') }}"></script>
+  <script src="/static/js/tv_indicators/chart_idx_macd_backend.js?asset={{ static_asset_token|default('viewer') }}"></script>
+  <script src="/static/js/charts.js?asset={{ static_asset_token|default('viewer') }}"></script>
+  <script src="/static/js/chart_line_states.js?asset={{ static_asset_token|default('viewer') }}"></script>
+  <script src="/static/js/notification_chart.js?asset={{ static_asset_token|default('viewer') }}"></script>
+  {% else %}
+  <section class="chart-error" role="status"><h2>当时图表暂不可用</h2><p>{{ chart_error }}</p></section>
+  {% endif %}
+</body>
+</html>
