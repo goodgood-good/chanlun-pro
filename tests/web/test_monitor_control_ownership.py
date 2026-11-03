@@ -16,6 +16,7 @@ from cl_app.services.screening import validate_settings
 @pytest.fixture
 def monitor(tmp_path, monkeypatch):
     manual, live, notifications = Mock(), Mock(), Mock()
+    manual._automatic_recovery = None
     manual.root, live.root = tmp_path / "manual", tmp_path / "runs"
     manual.status.return_value = {"status": "idle"}
     live.status.return_value = {"status": "idle"}

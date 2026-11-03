@@ -829,8 +829,12 @@ def create_app(test_config=None):
             _ensure_start_is_current()
             if not app.testing:
                 from .services.signal_monitor import service as signal_monitor
-                signal_monitor.start_runtime()
                 runtime_state['signal_monitor']=signal_monitor
+                from .services.screening_recovery import ScreeningRecovery
+                recovery = ScreeningRecovery(signal_monitor.screening)
+                runtime_state['screening_recovery'] = recovery
+                recovery.start()
+                signal_monitor.start_runtime()
             _ensure_start_is_current()
             app.extensions["metadata_warmup_thread"] = metadata_warmup_thread
             with runtime_lock:
@@ -889,6 +893,8 @@ def create_app(test_config=None):
 
             if not app.testing:
                 from .services.signal_monitor import service as signal_monitor
+                if runtime_state.get('screening_recovery'):
+                    _cleanup('screening-recovery', runtime_state['screening_recovery'].stop)
                 _cleanup("signal-monitor", signal_monitor.stop_runtime)
             _cleanup("chart-initial-build", chart_initial_build_service.shutdown_initial_build_runtime)
             def _handles_for(key):

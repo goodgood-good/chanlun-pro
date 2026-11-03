@@ -201,6 +201,7 @@ _TV_VALUE_COLUMNS = (
     "c", "o", "h", "l", "v",
     "macd_dif", "macd_dea", "macd_hist", "macd_area",
     "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
+    "higher_macd_raw_dif", "higher_macd_raw_dea", "higher_macd_raw_hist",
 )
 
 _MACD_DELTA_SCALE = 1_000_000
@@ -317,6 +318,7 @@ def _history_indicator_payload(
         key: cl_chart_data.get(key, [])
         for key in _MACD_COLUMNS
     }
+    raw_htf={key:cl_chart_data.get(key,[]) for key in ('higher_macd_raw_dif','higher_macd_raw_dea','higher_macd_raw_hist')}
     if delta_encoded:
         encoded = {
             key: _delta_encode_numeric_column(
@@ -328,11 +330,12 @@ def _history_indicator_payload(
         if all(value is not None for value in encoded.values()):
             return {
                 **encoded,
+                **raw_htf,
                 "macd_delta_scale": _MACD_DELTA_SCALE,
             }
     if not delta_encoded:
         payload["macd_area"] = cl_chart_data.get("macd_area", [])
-    return payload
+    return {**payload,**raw_htf}
 
 from ..services.user_activity import _mark_user_request  # noqa: E402
 # stock_list 服务：symbols 预加载、缓存、读取

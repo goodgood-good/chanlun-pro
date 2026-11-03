@@ -73,6 +73,20 @@ def test_latest_day_is_delivery_receipts_not_detection_events(records):
     assert hidden['suppression_reason']=='ALGORITHM_RECLASSIFICATION'
 
 
+def test_silent_filter_merges_semantic_suppression_receipts_with_detection_history(records):
+    root,reader=records
+    for i in range(22):
+        add(root,'suppressed:'+str(i),[event('AAA.US')],status='suppressed',created=NOW-100-i*2)
+        silent(root,event('AAA.US',recorded_at=NOW-101-i*2),identity=f'{i:064x}')
+    first=reader.list({'status':'suppressed','size':15})
+    assert first['pagination']['total']==44 and len(first['items'])==15
+    assert first['summary']['suppressed']==44
+    assert {row['status'] for row in first['items']}=={'suppressed'}
+    second=reader.list({'status':'suppressed','size':15,'page':2})
+    assert len(second['items'])==15
+    assert not {r['id'] for r in first['items']} & {r['id'] for r in second['items']}
+
+
 def test_filters_must_match_the_same_signal_inside_a_grouped_message(records):
     root,reader=records
     add(root,'signals:group',[event('AAA.US','1m'),event('BBB.US','5m',signal_type='consolidation_divergence')])
@@ -84,6 +98,39 @@ def test_filters_must_match_the_same_signal_inside_a_grouped_message(records):
     assert matched['items'][0]['code']=='BBB.US' and matched['items'][0]['kind']=='consolidation'
     assert reader.list({'q':"%' OR 1=1 --"})['pagination']['total']==0
     assert reader.list({'q':'三买'})['pagination']['total']==1
+
+
+@pytest.mark.parametrize('point_type', ['1buy', '2buy', '3buy', '1sell', '2sell', '3sell'])
+def test_point_type_filters_receipts_summaries_and_silent_history(records, point_type):
+    root, reader = records
+    for point in ('1buy', '2buy', '3buy', '1sell', '2sell', '3sell'):
+        add(root, 'signals:' + point, [event(point_type=point)])
+    silent(root, event('SILENT.US', point_type=point_type))
+    result = reader.list({'point_type':point_type})
+    assert result['pagination']['total'] == result['summary']['sent'] == 1
+    assert result['items'][0]['point_type'] == point_type
+    hidden = reader.list({'point_type':point_type, 'status':'suppressed'})
+    assert hidden['pagination']['total'] == 1 and hidden['items'][0]['point_type'] == point_type
+
+
+def test_point_type_filter_is_per_member_and_binds_page_cursors(records):
+    root, reader = records
+    for i in range(20):
+        add(root, f'signals:{i}', [event('AAA.US', '1m', point_type='1buy'),
+                                  event('BBB.US', '5m', point_type='3sell')], created=NOW-100-i)
+    add(root, 'screening:summary', kind='screening', content='BBB.US 三卖')
+    assert reader.list({'point_type':'3sell', 'frequency':'1m'})['pagination']['total'] == 0
+    assert reader.list({'point_type':'3sell', 'q':'AAA'})['pagination']['total'] == 0
+    first = reader.list({'point_type':'3sell', 'q':'BBB', 'size':15})
+    assert first['pagination']['total'] == first['summary']['sent'] == 20
+    assert all(row['code'] == 'BBB.US' for row in first['items'])
+    second = reader.list({'point_type':'3sell', 'q':'BBB', 'size':15, 'cursor':first['pagination']['next_cursor']})
+    assert len(second['items']) == 5
+    assert not {row['id'] for row in first['items']} & {row['id'] for row in second['items']}
+    with pytest.raises(ValueError):
+        reader.list({'point_type':'1buy', 'q':'BBB', 'size':15, 'cursor':first['pagination']['next_cursor']})
+    with pytest.raises(ValueError):
+        reader.list({'point_type':'4buy'})
 
 
 def test_delivered_consolidation_warning_is_not_relabelled_as_confirmed(records):
@@ -438,13 +485,13 @@ def test_real_chart_writer_and_reader_preserve_first_receipt_across_completion(t
     assert refreshed['images'][0]['url'] == first_url
     assert refreshed['images'][0]['coverage_status'] == 'partial'
     assert refreshed['images'][1]['coverage_status'] == 'complete'
-    assert refreshed['images'][1]['delivery_status'] == 'pending'
+    assert refreshed['images'][1]['delivery_status'] == 'suppressed'
     box.deliver_one()
     final = reader.detail(first['id'])
-    assert final['images'][1]['delivery_status'] == 'sent'
-    assert len(transport.images) == 2
+    assert final['images'][1]['delivery_status'] == 'suppressed'
+    assert len(transport.images) == 1
     box.charts.process_one(); box.deliver_one()
-    assert len(transport.images) == 2 and reader.list({'kind':'chart'})['pagination']['total'] == 2
+    assert len(transport.images) == 1 and reader.list({'kind':'chart'})['pagination']['total'] == 2
 
 
 def test_three_available_periods_are_still_partial_when_the_requested_history_is_pending(records):

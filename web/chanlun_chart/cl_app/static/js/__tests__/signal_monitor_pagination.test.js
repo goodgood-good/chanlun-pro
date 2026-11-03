@@ -29,6 +29,42 @@ function payload(){
       [k,{page:2,pages:5,size:25,total:125,overall:125,query:''}])),coverage:{total:125,ready:121,limited:4,pending:0}};
 }
 
+test('uncovered instruments and limited chart history stay distinct from processing failures',async()=>{
+  const data=payload();
+  data.seed.symbols=[{market:'fx',code:'FE.USDCNY',name:'FX',coverage_state:'unsupported',
+    coverage_message:'缺少已核实的交易时段'}];
+  data.coverage.unsupported=1;
+  data.dingtalk={enabled:true,configured:true,chart_generation:{limited:13,failed:0,pending:0}};
+  const app=fixture(async()=>({ok:true,json:async()=>data}));await wait();
+  assert.match(app.get('pool-source').textContent,/未覆盖 1 只/);
+  assert.ok(app.get('pool').children[0].children.some(child=>/未覆盖：缺少已核实的交易时段/.test(child.textContent)));
+  assert.match(app.get('dingtalk-detail').textContent,/失败 0 张 · 历史范围受限 13 张/);
+});
+
+test('a price-basis retirement explains the data revision in event history',async()=>{
+  const data=payload();data.events=[{...data.events[0],stage:'left',exit_reasons:['PRICE_BASIS_CHANGED']}];
+  const app=fixture(async()=>({ok:true,json:async()=>data}));await wait();
+  assert.match(JSON.stringify(app.get('events').children),/价格基准变化，结束旧记录追踪/);
+});
+
+test('quote-only preferences remain visible outside the realtime pool',async()=>{
+  const data=payload();data.quote_only_symbols=['fx:FE.USDCNY','ny_futures:CO.GC00W'];
+  const app=fixture(async()=>({ok:true,json:async()=>data}));await wait();
+  assert.match(app.get('pool-source').textContent,/2 个标的仅看行情，不纳入实时监听/);
+});
+
+test('official halts and source admission waits are visible without appearing as data failures',async()=>{
+  const data=payload();
+  data.coverage={total:125,ready:124,limited:0,pending:0,suspended:1};
+  data.source_waiting_periods={'us:QQQ.US:5m':{frequency:'5m'}};
+  data.seed.symbols=[{market:'a',code:'SH.513100',name:'纳指ETF',coverage_state:'suspended',
+    coverage_message:'交易暂停，预计 10:30 恢复'}];
+  const app=fixture(async()=>({ok:true,json:async()=>data}));await wait();
+  assert.match(app.get('pool-source').textContent,/停牌暂停复核 1 只/);
+  assert.match(app.get('pool-source').textContent,/另有 1 项正在等待行情链路或完整数据窗口/);
+  assert.ok(app.get('pool').children[0].children.some(child=>/交易暂停/.test(child.textContent)));
+});
+
 test('phone requests 25 rows and keeps signal labels available without a table header',async()=>{
   const app=fixture(async()=>({ok:true,json:async()=>payload()}),{WorkspaceDevice:{isPhone:true}});
   await wait();

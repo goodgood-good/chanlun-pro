@@ -77,6 +77,20 @@ def test_page_clamps_after_exits_and_hides_old_revision_signals():
     assert result["coverage"]["pending"] == 1
 
 
+def test_point_filters_apply_to_all_signals_and_history_before_paging():
+    state = sample(125)
+    for i, value in enumerate(state['signals'].values()):
+        value['point_type'] = '2sell' if i >= 60 else '1buy'
+    result = paged_state(state, {'signals_point_type':'2sell', 'signals_size':25, 'signals_page':2,
+                                 'events_point_type':'1buy', 'events_size':25}, 'current', True)
+    assert result['pagination']['signals']['total'] == 65
+    assert len(result['signals']) == 25 and all(row['point_type'] == '2sell' for row in result['signals'].values())
+    assert result['pagination']['events']['total'] == 60
+    assert all(row['point_type'] == '1buy' for row in result['events'])
+    with pytest.raises(ValueError):
+        paged_state(state, {'signals_point_type':'invalid'}, 'current', True)
+
+
 @pytest.mark.parametrize(
     "options", [{"signals_size": "1000"}, {"pool_page": "x"}, {"events_q": "x" * 101}]
 )

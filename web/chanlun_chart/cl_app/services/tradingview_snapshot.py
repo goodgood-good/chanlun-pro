@@ -82,10 +82,11 @@ class PanelImageCache:
             temporary.unlink(missing_ok=True)
 
 
-def prepare(event, runs_root):
+def prepare(event, runs_root, *, allow_summary_reference=False):
     from .notification_charts import load_chart_evidence
 
-    return _prepare_panel(event, *load_chart_evidence(event, runs_root))
+    return _prepare_panel(event, *load_chart_evidence(event, runs_root,
+        **({'allow_summary_reference':True} if allow_summary_reference else {})))
 
 
 def _prepare_panel(event, frame, snapshot, signal, *, context=False):
@@ -136,15 +137,21 @@ def _prepare_panel(event, frame, snapshot, signal, *, context=False):
     symbol = market + ":" + event["code"]
     consolidation = event.get("signal_type") == "consolidation_divergence"
     risk = event.get('signal_type') == 'holding_risk'
-    invalidated = consolidation and event.get('stage') == 'invalidated'
+    invalidated = event.get('stage') == 'invalidated' and (consolidation or event.get('signal_type') == 'native_point_preview')
     anchor_price = signal['anchor_price'] if context or risk or invalidated else event['anchor_price']
     label = ('结构止损触发' if event['point_type'] == 'risk_stop' else '反向'+POINTS[event['reverse_point_type']]) if risk else (
              ('预警失效复核' if invalidated else "盘整背驰预警" if event["stage"] == "warning" else "盘整背驰确认")
              if consolidation else POINTS[event["point_type"]])
+    if invalidated:
+        label = '预警失效复核'
+    elif event.get('warning_assessment') and not consolidation:
+        label = POINTS[event['point_type']] + '候选（未确认）'
     timezone = market_timezone.get(market, "Asia/Shanghai")
     cutoff = datetime.fromtimestamp(times[-1], CN).strftime("%Y-%m-%d %H:%M:%S")
     display_from = datetime.fromtimestamp(times[left], CN).strftime('%Y-%m-%d')
     caption = f"行情截止 {cutoff}（北京时间） · 图中时间 {timezone}"
+    if signal.get('reference_summary_only'):
+        caption += '\n原预警参考K线文件缺失；参考信息来自通知保存的摘要，当前图为本次冻结现场'
     if frequency == '30m':
         caption += f"\n30m 全部可用历史：{display_from} 至 {cutoff[:10]}"
     else:
@@ -173,7 +180,7 @@ def _prepare_panel(event, frame, snapshot, signal, *, context=False):
                      'reference_anchor_at':signal.get('reference_anchor_at') if invalidated and not context and signal.get('reference_basis_current') and signal.get('reference_anchor_at') in positions else None,
                      'reference_anchor_price':signal.get('reference_anchor_price'),
                      "anchor_at": signal["anchor_at"], "anchor_price": anchor_price,
-                     "marker": (consolidation or risk) and not context,
+                     "marker": (consolidation or risk or invalidated or bool(event.get('warning_assessment'))) and not context,
                      "signal_panel": not context, "up": event["point_type"].endswith(("buy", "down")),
                      "label": label + " " + price(anchor_price, quantum),
                      "stop_price": stop_price,
@@ -225,11 +232,13 @@ def history_description(frequency, coverage):
     target = f"近 {VISIBLE_DAYS[frequency]} 天" if VISIBLE_DAYS[frequency] else '当前来源全部可用历史'
     state = coverage.get('state', 'pending')
     span = f"{day(coverage.get('available_from'))} 至 {day(coverage.get('available_to'))}"
+    revised = ('；当前来源含事后修订，原通知证据保留'
+               if coverage.get('source_view') == 'current_source_history' else '')
     if state == 'target_reached':
-        return f'{frequency} {target} · 已取数据 {span}'
+        return f'{frequency} {target} · 已取数据 {span}{revised}'
     if state == 'source_exhausted':
         short = '；不足目标范围' if coverage.get('target_reached') is False and VISIBLE_DAYS[frequency] else ''
-        return f'{frequency} {coverage.get("source_label") or "当前来源"}已取尽 · 已取数据 {span}{short}'
+        return f'{frequency} {coverage.get("source_label") or "当前来源"}已取尽 · 已取数据 {span}{short}{revised}'
     text = {'pending': '历史范围正在补齐', 'unsupported': '该来源暂不支持扩展',
             'invalid': '历史校验未通过', 'source_error': '历史来源请求失败，等待重试',
             'render_error': '长期背景导出失败，等待重试'}.get(state, '历史范围待核验')
@@ -252,6 +261,8 @@ def _background_panel(event, frame, snapshot, coverage):
                + '\n截至原通知行情时刻；不复制原买卖点或止损线')
     if data_only:
         caption += '\n背景结构未提供，仅显示K线与指标'
+    if coverage.get('source_view') == 'current_source_history':
+        caption += f'\n历史回看含 {coverage["source_revision_rows"]} 根事后修订K线；不作为原通知证据'
     panel['settings'].update(background_only=True, background_data_only=data_only, panel_id='history:'+frequency,
         cache_key='history:'+frequency+':'+coverage['scope'], purpose='independent_background',
         title=f'{frequency} · 长期背景（{"仅K线与指标" if data_only else "结构与指标独立计算"}） · {event.get("name") or event["code"]}',
@@ -261,7 +272,8 @@ def _background_panel(event, frame, snapshot, coverage):
 
 
 def prepare_history_layout(event, runs_root, *, reused_images=None, history_period=None,
-                           initial_only=False, defer_context=False):
+                           initial_only=False, defer_context=False, previous_history=None,
+                           allow_summary_reference=False):
     """Three period groups; preserve proof pixels and add independent history.
 
     At most one background period advances a bounded fetch slice per call.
@@ -269,7 +281,8 @@ def prepare_history_layout(event, runs_root, *, reused_images=None, history_peri
     """
     from .notification_charts import load_chart_evidence
     from .notification_periods import background_evidence, context_evidence, HistoryPending, HistoryUnavailable
-    primary_frame, primary_snapshot, primary_signal = load_chart_evidence(event, runs_root)
+    primary_frame, primary_snapshot, primary_signal = load_chart_evidence(event, runs_root,
+        **({'allow_summary_reference':True} if allow_summary_reference else {}))
     reused = reused_images or {}
     panels, histories, history_panels = [], {}, {}
     primary = event['frequency']
@@ -310,9 +323,11 @@ def prepare_history_layout(event, runs_root, *, reused_images=None, history_peri
         if frequency == primary:
             panels.append(frozen(frequency, frame, snapshot, primary_signal))
         background = None
+        restore = ({'previous_coverage': previous_history[frequency]}
+                   if previous_history and frequency in previous_history else {})
         try:
             background = background_evidence(event, runs_root, frequency, primary_frame.attrs,
-                                               anchor_frame=frame, fetch=frequency == history_period)
+                                               anchor_frame=frame, fetch=frequency == history_period, **restore)
         except HistoryPending as exc:
             histories[frequency] = dict(exc.coverage)
         except HistoryUnavailable as exc:
@@ -332,7 +347,8 @@ def prepare_history_layout(event, runs_root, *, reused_images=None, history_peri
                 panel = _background_panel(event, history_frame, history_snapshot, coverage)
             # A primary proof already covering the exact same target needs no
             # duplicate chart. A longer/different independent background does.
-            if frequency != primary or int(history_frame.date.iloc[0].timestamp()) < int(primary_frame.date.iloc[0].timestamp()):
+            if (frequency != primary or coverage.get('source_view') == 'current_source_history'
+                    or int(history_frame.date.iloc[0].timestamp()) < int(primary_frame.date.iloc[0].timestamp())):
                 panels.append(panel)
                 history_panels[frequency] = 'history:'+frequency
             else:

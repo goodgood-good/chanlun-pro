@@ -120,7 +120,7 @@ def load_closed_us_history(*, code, frequency, observed, end, canonical, loader,
                         # Wall-clock lookbacks move their left edge even while
                         # closed; a canonical minute window is anchored to its
                         # actual last completed candle instead.
-                        start = end - get_lookback_timedelta(frequency)
+                        start = end - get_lookback_timedelta(frequency, market="us")
                         if start.timestamp() < meta["requested_start"]:
                             valid = False
                         else:
@@ -143,7 +143,7 @@ def load_closed_us_history(*, code, frequency, observed, end, canonical, loader,
                 "session": session, "revision": revision, "code": code,
                 "frequency": frequency, "canonical": canonical,
                 "validated_at": observed.timestamp(),
-                "requested_start": (end - get_lookback_timedelta(frequency)).timestamp(),
+                "requested_start": (end - get_lookback_timedelta(frequency, market="us")).timestamp(),
                 "fingerprint": _fingerprint(snapshot),
             }
             storage.save_klines_parquet(_NAMESPACE, *key, snapshot)

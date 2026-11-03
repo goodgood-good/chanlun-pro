@@ -152,7 +152,7 @@ def test_successful_page_slices_do_not_exhaust_three_failure_attempts_or_send_in
         assert job(box)['status']=='pending' and job(box)['attempts']==0
         assert len(transport.images)==1
     clock[0]=job(box)['next_try']+1;box.charts.process_one();box.deliver_one()
-    assert job(box)['status']=='ready' and len(transport.images)==2
+    assert job(box)['status']=='ready' and len(transport.images)==1
     with box._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM outbox WHERE id LIKE 'chart-complete:%'").fetchone()[0]==1
     assert box.charts.store.coverage(job(box)['initial_image_hash'])['missing_history_periods']==list(tv.PERIODS)
@@ -172,7 +172,7 @@ def test_source_errors_use_three_real_failures_and_honor_provider_retry_after(tm
     assert len(transport.images)==1
 
 
-def test_no_progress_backs_off_and_original_notification_deadline_stops_history(tmp_path):
+def test_no_progress_backs_off_and_history_stops_at_seven_day_retention(tmp_path):
     coverage=history('pending',token='unchanged',failed_period='1m')
     box,transport,clock=history_box(tmp_path,[chart_with_history('initial',coverage),
         *[charts.ChartHistoryPending(coverage) for _ in range(6)]])
@@ -182,6 +182,8 @@ def test_no_progress_backs_off_and_original_notification_deadline_stops_history(
         delays.append(job(box)['next_try']-before)
     assert delays==[30,60,120,240,300] and job(box)['attempts']==0
     clock[0]=2801;box.charts.process_one()
+    assert job(box)['status']=='pending' and len(transport.images)==1
+    clock[0]=1000+7*86400;box.charts.process_one()
     assert job(box)['status']=='expired' and len(transport.images)==1
 
 
@@ -189,7 +191,11 @@ def test_no_progress_backs_off_and_original_notification_deadline_stops_history(
 def test_terminal_history_limit_is_explicit_and_never_spends_the_complete_receipt(tmp_path,state):
     box,transport,clock=history_box(tmp_path,[chart_with_history('initial',history(state,failed_period='1m'))])
     box.charts.process_one();clock[0]+=5;box.deliver_one()
-    assert job(box)['status']=='failed' and json.loads(job(box)['history_coverage'])['1m']['state']==state
+    assert job(box)['status']==('limited' if state == 'unsupported' else 'failed')
+    assert json.loads(job(box)['history_coverage'])['1m']['state']==state
+    summary = box.charts.snapshot()
+    assert summary['limited'] == (state == 'unsupported')
+    assert summary['failed'] == (state == 'invalid')
     with box._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM outbox WHERE id LIKE 'chart-complete:%'").fetchone()[0]==0
     assert len(transport.images)==1
@@ -233,7 +239,7 @@ def test_one_invalid_history_does_not_block_other_periods_or_their_supplement(tm
     clock[0]=job(box)['next_try']+1; box.charts.process_one()
     assert job(box)['status']=='pending'
     clock[0]=job(box)['next_try']+1; box.charts.process_one(); box.deliver_one()
-    assert len(transport.images)==2 and job(box)['status']=='failed'
+    assert len(transport.images)==1 and job(box)['status']=='failed'
     assert json.loads(job(box)['missing_periods'])==[]
     assert json.loads(job(box)['missing_history_periods'])==['1m']
 
@@ -245,4 +251,4 @@ def test_legacy_three_period_receipt_cannot_suppress_new_long_history_image(tmp_
     with box.charts._db() as db:
         db.execute("UPDATE jobs SET status='pending',next_try=0,history_coverage=?", (json.dumps(history('pending')),))
     box.charts.process_one(); clock[0]+=5; box.deliver_one()
-    assert job(box)['status']=='ready' and len(transport.images)==2
+    assert job(box)['status']=='ready' and len(transport.images)==1

@@ -6,7 +6,7 @@ const path=require('node:path');
 const vm=require('node:vm');
 const source=fs.readFileSync(path.join(__dirname,'../signal_monitor.js'),'utf8');
 const template=fs.readFileSync(path.join(__dirname,'../../../templates/signal_monitor.html'),'utf8');
-const defaults={frequencies:['1m','5m','30m'],holdings:['1buy','2buy','3buy','1sell','2sell','3sell'],others:['1buy','2buy','3buy']};
+const defaults={frequencies:['1m','5m','30m'],other_frequencies:['5m'],holdings:['1buy','2buy','3buy','1sell','2sell','3sell'],others:['1buy','2buy','3buy']};
 const status=policy=>({enabled:true,runtime_running:true,settings:{interval_seconds:60,after_close:'15:10'},
   signals:[],events:[],errors:[],seed:{count:0,symbols:[]},dingtalk:{enabled:false,configured:true},point_notifications:policy});
 const response=(value,code=200)=>({ok:code<400,status:code,json:async()=>value});
@@ -21,7 +21,7 @@ class Element{
 function fixture(fetcher){
   const elements=new Map(),timers=[],requests=[],inputs=[];
   const get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
-  for(const match of template.matchAll(/<input\s+([^>]*name="(?:notification-frequency|holding-point|ordinary-point)"[^>]*)>/g)){
+  for(const match of template.matchAll(/<input\s+([^>]*name="(?:notification-frequency|ordinary-frequency|holding-point|ordinary-point)"[^>]*)>/g)){
     const attrs=Object.fromEntries([...match[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(value=>value.slice(1)));
     const input=get(attrs.id);Object.assign(input,attrs);inputs.push(input);
   }
@@ -41,10 +41,11 @@ const serve=(url,body=defaults)=>url.startsWith('/monitor/status')?response(stat
   url.startsWith('/monitor/notifications?')?response({items:[],pagination:{page:1,size:25,total:0,pages:1},summary:{}}):
   url.startsWith('/monitor/holding-risk')?response({holdings:[]}):response({groups:[]});
 
-test('real template provides three periods and no nonholding sell, initialized from saved settings',async()=>{
+test('real template separates holding points from ordinary buy-only delivery',async()=>{
   const ui=fixture(async url=>serve(url));await settle();
-  assert.equal(ui.inputs.length,12);
+  assert.equal(ui.inputs.length,13);
   assert.equal(ui.inputs.filter(input=>input.name==='ordinary-point'&&input.value.endsWith('sell')).length,0);
+  assert.deepEqual(ui.inputs.filter(input=>input.name==='ordinary-frequency').map(input=>input.value),['5m']);
   assert.equal(ui.get('notification-policy-fields').disabled,false);
   assert.equal(ui.get('notification-policy-save').disabled,true);
   assert.ok(ui.inputs.every(input=>input.checked));
@@ -61,6 +62,27 @@ test('failed initial read stays disabled, later saved empty settings remain empt
   assert.ok(ui.inputs.every(input=>!input.checked));
 });
 
+test('ordinary notification period saves independently from all holding periods',async()=>{
+  const ui=fixture(async(url,options)=>url.startsWith('/monitor/notification-policy')?
+    response(status(JSON.parse(options.body))):serve(url));await settle();
+  ui.change('notification-ordinary-frequency-5m',false);await ui.poll();
+  assert.equal(ui.get('notification-ordinary-frequency-5m').checked,false);
+  for(const period of defaults.frequencies)assert.equal(ui.get('notification-frequency-'+period).checked,true);
+  ui.submit();await settle();
+  const saved=JSON.parse(ui.requests.find(row=>row.options?.method==='POST').options.body);
+  assert.deepEqual(saved,{...defaults,other_frequencies:[]});
+  ui.change('notification-frequency-1m',false);
+  assert.equal(ui.get('notification-ordinary-frequency-5m').checked,false);
+});
+
+test('the master switch can still be turned off after both destination addresses are cleared',async()=>{
+  const ui=fixture(async url=>url.startsWith('/monitor/status')?
+    response({...status(defaults),dingtalk:{enabled:true,configured:false}}):serve(url));
+  await settle();
+  assert.equal(ui.get('dingtalk-enabled').checked,true);
+  assert.equal(ui.get('dingtalk-enabled').disabled,false);
+});
+
 test('poll cannot overwrite a dirty draft and save uses only independent point preferences',async()=>{
   const ui=fixture(async(url,options)=>url.startsWith('/monitor/notification-policy')?
     response(status(JSON.parse(options.body))):serve(url));await settle();
@@ -69,7 +91,7 @@ test('poll cannot overwrite a dirty draft and save uses only independent point p
   ui.submit();await settle();
   const request=ui.requests.find(row=>row.options?.method==='POST');
   assert.match(request.url,/^\/monitor\/notification-policy\?view=paged/);
-  assert.deepEqual(JSON.parse(request.options.body),{...defaults,others:['1buy','2buy']});
+  assert.deepEqual(JSON.parse(request.options.body),{...defaults,others:defaults.others.filter(point=>point!=='3buy')});
   assert.equal(ui.get('notification-policy-save').disabled,true);
   assert.match(ui.get('notification-policy-message').textContent,/已保存/);
   assert.equal(ui.get('dingtalk-enabled').checked,false);

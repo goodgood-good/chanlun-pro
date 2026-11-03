@@ -145,6 +145,7 @@
 }
 
 .active-filter-summary{font-size:12px;line-height:1.5;overflow-wrap:anywhere;color:var(--muted);padding:0;margin:0 0 8px}.active-filter-summary:empty{display:none}#queue-reset-filters{min-height:44px;max-width:100%;margin:4px 0 8px;white-space:normal}.summary-scope{font-size:12px;margin:6px 0}
+.result-view-tabs{display:flex;gap:8px;margin-bottom:12px}.result-view-tabs button[aria-pressed=true]{background:var(--accent);color:#fff;border-color:var(--accent)}.screen-window-settings,.screen-runtime-settings,.screen-rule-help{grid-column:1/-1}.screen-window-settings>.screen-controls{margin-top:12px}.screen-runtime-settings>label{display:flex;gap:8px;align-items:center;margin-top:12px}
 
 /* Sector navigation is independent of the candidate queue pagination. */
 .cp-screening .sectors .sector-controls {
@@ -169,7 +170,7 @@
 .cp-screening .sectors #sector-level { min-width: 0; max-width: 100%; min-height: 44px; }
 .cp-screening .sectors .sector-match-choice { font-size: 13px; cursor: pointer; }
 .cp-screening .sectors #sector-matches-only { width: 16px; height: 16px; min-height: 0; margin: 0; padding: 0; flex: 0 0 auto; }
-.cp-screening .sectors .sector-selection-bar { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.cp-screening .sectors .sector-selection-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; }
 .cp-screening .sectors #sector-all { flex: 0 0 auto; min-height: 44px; }
 .cp-screening .sectors #sector-active-selection { font-size: 13px; overflow-wrap: anywhere; }
 .cp-screening .sectors .sector-list { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }

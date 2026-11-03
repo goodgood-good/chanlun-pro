@@ -345,8 +345,61 @@ function Get-QmtSnapshot(
     }
 }
 
+function Get-QmtDataObservation([string]$Directory) {
+    $python = [Environment]::GetEnvironmentVariable('CHANLUN_PYTHON', 'Process')
+    if ([string]::IsNullOrWhiteSpace($python)) {
+        $venv = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
+        $python = if (Test-Path -LiteralPath $venv) { $venv } else { (Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
+    }
+    $probe = Join-Path $PSScriptRoot 'check_qmt_market_data.py'
+    $dataDirectory = Join-Path (Split-Path -Parent $Directory) 'userdata_mini\datadir'
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $python
+    $info.Arguments = '-X utf8 "{0}" --data-dir "{1}" --port {2}' -f $probe,$dataDirectory,$MarketDataPort
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($info)
+    try {
+        if (-not $process.WaitForExit(15000)) {
+            $process.Kill()
+            $process.WaitForExit()
+            return @{ready=$false;reason_code='QMT_MARKET_DATA_PROBE_TIMEOUT'}
+        }
+        $output = $process.StandardOutput.ReadToEnd()
+        if ([string]::IsNullOrWhiteSpace($output)) {
+            return @{ready=$false;reason_code='QMT_MARKET_DATA_PROBE_FAILED'}
+        }
+        return ($output | ConvertFrom-Json -ErrorAction Stop)
+    } finally { $process.Dispose() }
+}
+
+function Confirm-QmtData([Collections.IDictionary]$Observation, [int]$WaitSeconds = 0) {
+    $Observation.market_data_catalog_ready = $false
+    if (-not $Observation.ready) { return }
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    do {
+        $probe = Get-QmtDataObservation -Directory $Observation.qmt_directory
+        $Observation.market_data = $probe
+        $Observation.market_data_catalog_ready = [bool]$probe.ready
+        if ($probe.ready -or (Get-Date) -ge $deadline) { break }
+        Start-Sleep -Seconds 3
+    } while ($true)
+    $Observation.ready = [bool]$probe.ready
+    $Observation.status = if ($probe.ready) { 'ready' } else { 'not_ready' }
+    $Observation.reason_code = $probe.reason_code
+}
+
 function Write-Observation([Collections.IDictionary]$Observation, [int]$ExitCode) {
-    $Observation | ConvertTo-Json -Depth 8 -Compress
+    $json = $Observation | ConvertTo-Json -Depth 8 -Compress
+    $stateRoot = Join-Path $ProjectRoot '.cache\chanlun_qmt_runtime'
+    [IO.Directory]::CreateDirectory($stateRoot) | Out-Null
+    $path = Join-Path $stateRoot 'heartbeat.json'
+    $temporary = Join-Path $stateRoot ('heartbeat.{0}.tmp' -f $PID)
+    [IO.File]::WriteAllText($temporary,$json,[Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporary -Destination $path -Force
+    Write-Output $json
     exit $ExitCode
 }
 
@@ -415,6 +468,7 @@ try {
         -ProductIdentity $productIdentity
     Write-QmtLog ("before ready={0} reason={1} processes={2}" -f $before.ready, $before.reason_code, $before.process_count)
     if ($Action -eq 'Status') {
+        Confirm-QmtData -Observation $before
         Write-Observation -Observation $before -ExitCode $(if ($before.ready) { 0 } else { 3 })
     }
 
@@ -505,6 +559,7 @@ try {
         -Directory $qmtDir `
         -ProductIdentity $productIdentity
     $final.changed = ($Action -eq 'Restart' -or $started)
+    Confirm-QmtData -Observation $final -WaitSeconds $StartupTimeoutSeconds
     Write-QmtLog ("completed ready={0} reason={1} changed={2}" -f $final.ready, $final.reason_code, $final.changed)
     Write-Observation -Observation $final -ExitCode $(if ($final.ready) { 0 } else { 3 })
 } catch {

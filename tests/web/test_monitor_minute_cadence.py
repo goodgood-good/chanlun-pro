@@ -1,4 +1,4 @@
-"""Minute cadence changes dispatch only; durable pool and proof remain intact."""
+"""Legacy minute cadence keeps pool/proof intact; fixed holding scope has separate coverage."""
 from copy import deepcopy
 from datetime import timedelta
 
@@ -15,7 +15,10 @@ KEY = 'a:SH.600088'
 
 
 @pytest.fixture
-def cold(monitor):
+def cold(monitor, monkeypatch):
+    # These request-ownership/cadence regressions exercise the retained legacy
+    # all-symbol policy. test_holding_monitor_scope covers the active policy.
+    monkeypatch.setattr('chanlun.screening.timeframe_policy.enabled', lambda settings: False)
     service, manual, live, clock = monitor
     clock[0] = clock[0].replace(minute=30, second=0)
     cutoff = int(clock[0].timestamp())

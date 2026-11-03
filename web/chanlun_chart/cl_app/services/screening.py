@@ -89,11 +89,12 @@ def _result_reader_revision():
     """
     project = Path(__file__).resolve().parents[4]
     files = [Path(__file__).resolve(), Path(__file__).with_name("screening_policy.py"),
+             Path(__file__).with_name('first_center_sequence.py'),
              Path(__file__).with_name("screening_progress.py"),
              Path(__file__).with_name("historical_native_pool.py")]
     files.extend(project / "src" / "chanlun" / "screening" / name for name in (
         "rules.py", "confirmation.py", "nesting.py", "evidence.py", "cache.py", "markets.py",
-        "lower_first_timeline.py",
+        "lower_first_timeline.py", 'timeframe_policy.py',
     ))
     files.extend((project / "src" / "chanlun" / "cl_utils" / "point_exits.py",
                   project / "src" / "chanlun" / "core" / "strict_structure" / "unit_adapter.py",
@@ -114,7 +115,7 @@ def validate_settings(body, *, max_codes=100):
     allowed = {"scope", "codes", "frequencies", "point_types", "recent_sessions", "alert_mode",
                "max_anchor_sessions", "exclude_st", "workers", "max_anchor_gain_pct",
                "include_weak_second", "strategy", "confirmation_frequency",
-               "structural_levels", "symbols", "minimum_operating_frequency"}
+               "structural_levels", "symbols", "minimum_operating_frequency", "timeframe_policy", "watch_groups"}
     if set(body) - allowed:
         raise ValueError("请求包含未知选股条件")
     strategy = body.get("strategy", DIRECT_STRATEGY)
@@ -130,6 +131,13 @@ def validate_settings(body, *, max_codes=100):
     if scope not in {"all_a", "codes", "all_a_watchlist", "watchlist", "symbols"}:
         raise ValueError("请指定行情源 A 股股票池或明确的股票代码")
     result = {"scope": scope}
+    groups = body.get('watch_groups')
+    if groups is not None:
+        if (scope != 'watchlist' or not isinstance(groups, list) or not 1 <= len(groups) <= 50
+                or any(not isinstance(name, str) or not name.strip() or name != name.strip()
+                       or len(name) > 100 for name in groups)):
+            raise ValueError('指定分组需选择 1–50 个有效自选分组')
+        result['watch_groups'] = list(dict.fromkeys(groups))
     for field, options, default in (("frequencies", ("5m",) if strategy == STRATEGY else FREQUENCIES,
                                      ["5m"]),
                                      ("point_types", POINT_TYPES, list(POINT_TYPES))):
@@ -140,6 +148,10 @@ def validate_settings(body, *, max_codes=100):
             raise ValueError(f"{field} 不合法")
         result[field] = value
     result["strategy"] = strategy
+    from chanlun.screening.timeframe_policy import POLICY
+    if body.get('timeframe_policy', POLICY) != POLICY:
+        raise ValueError('当前采用 30m 背景、5m 交易、1m 短差及区间确认')
+    result['timeframe_policy'] = POLICY
     if strategy == DIRECT_STRATEGY:
         result["alert_mode"] = "native_center_signals"
     if strategy == STRATEGY:
@@ -200,6 +212,7 @@ class ScreeningManager:
         self._root = root
         self._max_codes = max_codes
         self._warm_results = warm_results
+        self.background_committed_reads = bool(reuse_workers)
         self._reuse_workers = bool(reuse_workers and os.name == "nt")
         if self._reuse_workers and warm_results:
             raise ValueError("Reusable monitor workers cannot wait for page-result warmup")
@@ -229,6 +242,16 @@ class ScreeningManager:
     def status(self):
         return self._status(self._directory())
 
+    def scheduler_status(self):
+        """Current lifecycle/source identity; frozen bytes are checked on consumption."""
+        return self._scheduler_status_at(self._directory())
+
+    def _scheduler_status_at(self,directory):
+        reader=self._status
+        if getattr(reader,'__func__',None) is ScreeningManager._status:
+            return reader(directory,scheduler=True)
+        return reader(directory)
+
     def notification_source_status(self):
         """Read only the current model identity for notification validation.
 
@@ -242,8 +265,9 @@ class ScreeningManager:
             self._revision_checked = time.monotonic()
         return {"current_source_revision": self._revision}
 
-    def _status(self, directory):
+    def _status(self, directory, *, scheduler=False):
         """Read one pinned run; a concurrent start may change latest.json."""
+        from .storage_capacity import snapshot as storage_snapshot
         if directory is None:
             return {"status": "idle", "selected": [], "reason_labels": {**REASON_LABELS, **POLICY_LABELS},
                     "selection_policy_version": POLICY_VERSION}
@@ -260,7 +284,7 @@ class ScreeningManager:
         state["reason_labels"] = {**REASON_LABELS, **POLICY_LABELS}
         state["selection_policy_version"] = POLICY_VERSION
         state["result_reader_revision"] = _RESULT_READER_REVISION
-        state["cancel_requested"] = (directory / "cancel").exists()
+        state["cancel_requested"] = (directory / "cancel").exists() or (directory / "priority_handoff.json").exists()
         if state.get('status') == 'cancelled':
             try:
                 handoff = read_state_json(directory / 'policy_handoff.json')
@@ -274,7 +298,8 @@ class ScreeningManager:
                     state['stop_reason'] = 'policy_update'
             except (OSError,ValueError,TypeError,AttributeError):
                 pass
-        state["evidence_version"] = evidence_version(directory)
+        if not scheduler:
+            state["evidence_version"] = evidence_version(directory)
         checked = time.monotonic()
         if self._revision_checked is None or checked - self._revision_checked >= 5:
             self._revision = source_revision()
@@ -291,7 +316,9 @@ class ScreeningManager:
             and settings.get("strategy") == DIRECT_STRATEGY
             and settings.get("alert_mode") == "native_center_signals"
         )
-        state.update(self._freshness(state))
+        if not scheduler:
+            state.update(self._freshness(state))
+            state['storage_capacity']=storage_snapshot(self.root)
         return state
 
     def _freshness(self, state):
@@ -492,7 +519,7 @@ class ScreeningManager:
         saved. Never infer a missing signal from symbols still being computed.
         """
         directory = self._directory()
-        state = self._status(directory)
+        state = self._scheduler_status_at(directory)
         completed = state.get("completed", 0)
         pinned = {**state, "completed": min(completed, after_completed + limit),
                   "frozen_native_review": False}
@@ -515,6 +542,7 @@ class ScreeningManager:
                     "rejection_counts": {}, "observation_count": 0,
                     "selected_symbols": 0}
         selected, observations, entry_waiting, recent_rejections, errors, counts = [], [], [], [], [], {}
+        historical_confirmed = []
         consolidation_alerts, verified_periods = [], []
         historical_recheck_periods = []
         u295_lower_structural_witnesses = []
@@ -549,6 +577,9 @@ class ScreeningManager:
                                    **({'frequency':requested[0]} if len(requested)==1 else {}),
                                    **({"reasons": item["reasons"]} if item.get("reasons") else {})})
                 for row in item["rows"]:
+                    policy_exclusions += sum(bool(set(c.get('reasons', [])) & {
+                        'THIRD_BUY_NOT_FIRST_UP_CENTER', 'THIRD_BUY_CENTER_SEQUENCE_UNKNOWN'})
+                        for c in row.get('recent_rejections', []) if c.get('center_sequence'))
                     header = {k: row[k] for k in ("code", "market", "name", "frequency", "source_closed_at", "input_fingerprint",
                                                   "latest_close", "structure_price_quantum") if k in row}
                     if (not item.get("error") and not row.get("error") and not row.get("data_errors")
@@ -560,7 +591,14 @@ class ScreeningManager:
                             'point_preview_checked': row.get('point_preview_checked') is True,
                             "consolidation_checked": row.get("consolidation_checked") is True
                                 and not row.get("consolidation_error") and not row.get("consolidation_rejections")})
+                    from chanlun.screening import timeframe_policy
+                    role_policy = timeframe_policy.enabled(state.get('settings', {}))
                     nested = state.get("settings", {}).get("strategy") == STRATEGY
+                    if role_policy:
+                        header.update(timeframe_policy=timeframe_policy.POLICY,
+                                      operating_role=timeframe_policy.ROLES.get(row['frequency']),
+                                      confirmation_evidence=row.get('confirmation_evidence', {}),
+                                      background_evidence=row.get('background_evidence', {}))
                     if nested:
                         header.update(strategy=STRATEGY, confirmation_evidence=row.get("confirmation_evidence", {}))
                     if not frozen_native_review and (row.get("consolidation_error") or row.get("consolidation_rejections")):
@@ -621,8 +659,16 @@ class ScreeningManager:
                                            "reasons": ["U295_WITNESS_EVIDENCE_MISMATCH"]})
                     if not item.get("error") and not row.get("data_errors") and not row.get("error"):
                         from chanlun.core.strict_structure.native_point_preview import is_point_preview, PREVIEW_AUDIT
-                        native_signals = [*row.get('selected', []), *([] if frozen_native_review else
-                            [candidate for candidate in row.get('observations', []) if is_point_preview(candidate.get('point', {}))])]
+                        history_ids = {id(c) for c in row.get('historical_confirmed', [])}
+                        native_signals = [*row.get('selected', []), *row.get('historical_confirmed', []), *([candidate for candidate in row.get('observations', [])
+                            if candidate.get('point', {}).get('status') == 'confirmed'
+                            and candidate.get('point', {}).get('evidence_scope') == 'native_center_signal'] if frozen_native_review else
+                            [candidate for candidate in row.get('observations', []) if is_point_preview(candidate.get('point', {}))
+                             or role_policy and candidate.get('nested_confirmation', {}).get('policy') == timeframe_policy.POLICY])]
+                        if role_policy and row.get('frequency') == '30m':
+                            for reason, count in row.get('reason_counts', {}).items():
+                                counts[reason] = counts.get(reason, 0) + count
+                            continue
                         if frozen_native_review and native_signals:
                             from .historical_native_pool import historical_native_period
                             try:
@@ -660,15 +706,47 @@ class ScreeningManager:
                                 if not health["complete"] or not health["verified"]:
                                     raise ValueError("native center signal evidence is incomplete")
                                 exit_plans = evidence_exit_catalog(directory, row["code"], row["frequency"], manifest)
-                                eligible_native, eligible_previews = [], []
+                                eligible_native, eligible_previews, eligible_history = [], [], []
                                 following = evidence_confirmation_catalog(directory, row["code"], row["frequency"], manifest)
+                                main_snapshot = lower_snapshot = higher_snapshot = None
+                                if role_policy and row['frequency'] == '5m':
+                                    _, main_snapshot, _ = load_evidence(directory, row['code'], '5m', manifest)
+                                    if row.get('confirmation_evidence'):
+                                        _, lower_snapshot, _ = load_evidence(directory, row['code'], '1m', row['confirmation_evidence'])
+                                    if row.get('background_evidence'):
+                                        _, higher_snapshot, _ = load_evidence(directory, row['code'], '30m', row['background_evidence'])
+                                sequences = None
+                                if any(c['point'].get('point_type') in {'3buy', '3sell'} for c in native_signals):
+                                    from .first_center_sequence import CenterSequences
+                                    if main_snapshot is None:
+                                        _, main_snapshot, _ = load_evidence(directory, row['code'], row['frequency'], manifest)
+                                    sequences = CenterSequences(main_snapshot, source_valid)
                                 for candidate in native_signals:
                                     point = candidate["point"]
+                                    historical = id(candidate) in history_ids
                                     preview = is_point_preview(point)
+                                    combined = role_policy and row['frequency'] == '5m' and not frozen_native_review and not historical
+                                    nested_waiting = combined and candidate.get('selection_status') == 'approaching'
+                                    expected_reasons = ['NOT_CONFIRMED'] if preview else []
+                                    if combined and candidate.get('nested_confirmation', {}).get('state') != 'confirmed':
+                                        expected_reasons.append(timeframe_policy.PENDING)
+                                    if frozen_native_review and not preview and candidate.get('reasons') == [timeframe_policy.PENDING]:
+                                        expected_reasons = [timeframe_policy.PENDING]
+                                    if combined:
+                                        # A dependency error may be displayed as waiting; it
+                                        # cannot authorize a trade or a completion notification.
+                                        proof_lower = lower_snapshot
+                                        if not timeframe_policy.saved_binding_valid(candidate, main_snapshot, proof_lower):
+                                            raise ValueError('5m/1m interval evidence mismatch')
+                                        expected_background = timeframe_policy.background(higher_snapshot,
+                                            side=point['side'], expected_cutoff=row.get('background_source_closed_at'),
+                                            as_of=main_snapshot['source_closed_at'], price_basis=main_snapshot['price_basis_revision'])
+                                        if candidate.get('background_30m') != expected_background:
+                                            raise ValueError('30m background evidence mismatch')
                                     if (not preview and (point.get("status") != "confirmed"
                                             or point.get("formal_point_issued") is not True
                                             or point.get("rule_basis") != NATIVE_SIGNAL_RULE_BASIS)
-                                            or candidate.get("reasons") != (['NOT_CONFIRMED'] if preview else [])
+                                            or candidate.get("reasons") != expected_reasons
                                             or not all(candidate.get("audit", {}).get(key) is True
                                                        for key in (PREVIEW_AUDIT if preview else REPLAY_CHECKS))
                                              or point_catalog.get(point.get("point_id")) != point
@@ -677,25 +755,54 @@ class ScreeningManager:
                                         raise ValueError("native center signal proof mismatch")
                                     lifetime = [] if preview else native_selection_lifetime_reasons(
                                         point, point_catalog.values(), following, source_valid)
+                                    if historical:
+                                        from chanlun.screening.retired_first_points import history_detail
+                                        detail = history_detail(point, list(point_catalog.values()), following, source_valid)
+                                        if (not detail or candidate.get('history') != detail or candidate.get('historical_only') is not True
+                                                or candidate.get('selection_status') != 'historical'):
+                                            raise ValueError('retired first-point history mismatch')
+                                        eligible_history.append({**header, **candidate, 'strategy': 'native_center_signals',
+                                            'evidence': manifest, 'evidence_verified': True, 'evidence_available': True,
+                                            'evidence_chart_available': manifest.get('chart_saved') is True,
+                                            'frozen_native_review': frozen_native_review})
+                                        continue
                                     if lifetime:
                                         lifetime_exclusions += 1
                                         recent_rejections.append({**header, **candidate, "reasons": lifetime})
                                         for reason in lifetime:
                                             counts[reason] = counts.get(reason, 0) + 1
                                         continue
-                                    (eligible_previews if preview else eligible_native).append({
+                                    sequence = sequences.assess(point) if sequences is not None else None
+                                    # The native path must apply the same selection
+                                    # preference as the older reader. Its local pair
+                                    # counter alone cannot authorize a first center.
+                                    policy_reasons = (selection_policy_reasons(point, sequence)
+                                        if state.get('settings', {}).get('alert_mode') == 'native_center_signals'
+                                        and not frozen_native_review else [])
+                                    if policy_reasons:
+                                        policy_exclusions += 1
+                                        recent_rejections.append({**header, **candidate,
+                                            'center_sequence': sequence, 'reasons': policy_reasons})
+                                        for reason in policy_reasons:
+                                            counts[reason] = counts.get(reason, 0) + 1
+                                        continue
+                                    (eligible_previews if preview or nested_waiting else eligible_native).append({
                                         **header, **candidate,
+                                        'center_sequence': sequence,
+                                        'history_repair': (main_snapshot or {}).get('history_repair'),
                                         "strategy": "native_center_signals",
                                         "evidence": manifest,
                                         "evidence_verified": True,
                                         "evidence_available": True,
                                         "evidence_chart_available": manifest.get("chart_saved") is True,
                                         "frozen_native_review": frozen_native_review,
+                                        **({'observation_validation': 'checked'} if nested_waiting else {}),
                                         "confirmation_segment": following.get(point['point_id'], {'state':'pending_confirmation'}) if preview else following[point["point_id"]],
                                         "exit_plan": exit_plans.get(point["point_id"]),
                                     })
                                 selected.extend(eligible_native)
                                 observations.extend(eligible_previews)
+                                historical_confirmed.extend(eligible_history)
                             except (OSError, ValueError, KeyError, TypeError):
                                 errors.append({**header, "reasons": ["EVIDENCE_MISSING"]})
                             recent_rejections.extend({**header, **candidate}
@@ -888,7 +995,7 @@ class ScreeningManager:
                 "errors": errors, "rejection_counts": counts,
                 "semantic_exclusion_count": semantic_exclusions,
                 "lifetime_exclusion_count": lifetime_exclusions,
-                "selection_policy_exclusion_count": policy_exclusions,
+                "selection_policy_exclusion_count": policy_exclusions, 'historical_confirmed': historical_confirmed,
                 "observation_count": len(observations),
                 "selected_symbols": len({s["code"] for s in selected})}
 
@@ -896,7 +1003,7 @@ class ScreeningManager:
         result = self.results(available=True)
         if result.get("run_id") != source:
             raise ValueError("该结果已被新一轮选股替换，请刷新选股页面")
-        candidate = next((row for row in [*result["selected"], *result["observations"],
+        candidate = next((row for row in [*result["selected"], *result["observations"], *result.get('historical_confirmed', []),
                                           *result.get("entry_waiting", [])]
                           if row["code"] == code and row.get("market", "a") == market and (row["frequency"] == frequency
                               or frequency == "1m" and row.get("nested_confirmation", {}).get("strategy") == STRATEGY)
@@ -907,6 +1014,12 @@ class ScreeningManager:
         manifest = candidate.get("confirmation_evidence" if lower else "evidence", {})
         frame, snapshot, health = load_evidence(self.root / source, code, frequency, manifest)
         expected_point = candidate["nested_confirmation"].get("point") if lower else candidate["point"]
+        focus_divergence = (candidate['nested_confirmation'].get('divergence') if lower else None)
+        if focus_divergence:
+            saved_divergence = next((a for a in snapshot.get('native_consolidation_alerts', [])
+                                     if a.get('alert_id') == focus_divergence.get('alert_id')), None)
+            if saved_divergence != focus_divergence:
+                raise ValueError('区间内部力度证据与保存的结构不一致')
         saved_point = next((p for level in snapshot["levels"]
                             if expected_point and level.get("structural_level", 0) == expected_point.get("structural_level", 0)
                             for p in level["points"] if expected_point and p["point_id"] == expected_point["point_id"]), None)
@@ -934,6 +1047,7 @@ class ScreeningManager:
         bars = [[int(row.date.timestamp()), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)]
                 for row in frame.itertuples(index=False)]
         return {"source": source, "candidate": candidate, "focus_point": expected_point,
+                'focus_divergence': focus_divergence,
                 "bars": bars, "snapshot": snapshot,
                 "metadata": {**health, "source_revision": result.get("source_revision"),
                              "source_current": result["source_current"], "cutoff_current": result["cutoff_current"],
@@ -975,7 +1089,7 @@ class ScreeningManager:
                 **({"strict_structure": frozen_structure}
                    if authoritative else {})}
 
-    def start(self, body, *, external_notifications=True, force_rebuild=False, monitor_periods=None, holding_snapshot=None, due_periods=None, deadline_at=None):
+    def start(self, body, *, external_notifications=True, force_rebuild=False, monitor_periods=None, holding_snapshot=None, due_periods=None, deadline_at=None, source_prefetch=None):
         if type(external_notifications) is not bool:
             raise ValueError("外部通知选项必须是布尔值")
         if type(force_rebuild) is not bool:
@@ -984,7 +1098,30 @@ class ScreeningManager:
             if (self._reuse_workers or type(deadline_at) not in (int, float)
                     or not math.isfinite(deadline_at) or deadline_at <= self._now().timestamp()):
                 raise ValueError('午间选股截止时间无效')
+        # Evidence requests belong to the private monitor transport, not to
+        # public stock-selection preferences. Keep the public validator strict.
+        warning_periods = {}
+        if self._reuse_workers and isinstance(body, dict):
+            body = dict(body)
+            warning_periods = body.pop('_warning_evidence_periods', {})
         settings = validate_settings(body, max_codes=self._max_codes)
+        if source_prefetch is not None:
+            from chanlun.screening.source_prefetch import validate_hint
+            if not self._reuse_workers or not 1 <= len(settings.get('symbols', ())) <= 64:
+                raise ValueError('Source prefetch requires a private bounded monitor batch')
+            source_prefetch = validate_hint(source_prefetch)
+        if not isinstance(warning_periods, dict):
+            raise ValueError('预警复核证据周期不合法')
+        if warning_periods:
+            allowed = {f"{s['market']}:{s['code']}" for s in settings.get('symbols', [])}
+            if (settings['scope'] != 'symbols' or not isinstance(warning_periods, dict)
+                    or set(warning_periods) - allowed or any(not isinstance(v, list) or not v
+                                                           or any(not isinstance(p, str) or p not in FREQUENCIES for p in v)
+                                                           for v in warning_periods.values())):
+                raise ValueError('预警复核证据周期不合法')
+        if not self._reuse_workers:
+            from chanlun.screening.timeframe_policy import screening_settings
+            settings = screening_settings(settings)
         if holding_snapshot is not None:
             from chanlun.screening.markets import validate_symbol
             if (settings['scope']!='symbols' or not isinstance(holding_snapshot,list) or len(holding_snapshot)>10000
@@ -1008,6 +1145,11 @@ class ScreeningManager:
                 raise ValueError('监听待更新周期不合法')
             settings['symbols']=[{**s,'_monitor_periods':sorted(set(due_periods[f"{s['market']}:{s['code']}"]))}
                                  for s in settings['symbols']]
+        if source_prefetch is not None:
+            from chanlun.screening.source_prefetch import admission_matches_request
+            if not admission_matches_request(source_prefetch, {'settings': settings,
+                    'holding_snapshot': {'keys': holding_snapshot or []}}):
+                raise ValueError('Source prefetch admission differs from the final monitor batch')
         # Web scheduling and an official local rerun may use separate managers.
         # Share the same admission lock before reading or publishing latest.json.
         dispatch_lock = interprocess_file_lock(self.root / 'worker_dispatch.lock', timeout_seconds=15)
@@ -1017,7 +1159,7 @@ class ScreeningManager:
             run_id = uuid.uuid4().hex
             directory = self.root / run_id
             request = {"run_id": run_id, "observed_at": self._now().isoformat(),
-                       "settings": settings}
+                       "settings": settings, 'verify_completed_inputs': True}
             if deadline_at is not None:
                 request.update(deadline_at=deadline_at, deadline_kind='noon')
             if not self._reuse_workers and settings.get('alert_mode') == 'native_center_signals':
@@ -1027,8 +1169,12 @@ class ScreeningManager:
             if self._reuse_workers:
                 from .screening_worker_runtime import runtime_request
                 request['worker_runtime'] = runtime_request()
+            if source_prefetch is not None:
+                request['source_prefetch'] = source_prefetch
             if holding_snapshot is not None:
                 request['holding_snapshot']={'schema':'monitor-holdings-v1','keys':holding_snapshot}
+            if warning_periods:
+                request['warning_evidence_periods'] = warning_periods
             if not external_notifications:
                 # Run-local delivery policy, independent of stock selection
                 # settings and the user's normal notification preference.
@@ -1108,6 +1254,26 @@ class ScreeningManager:
             from .screening_worker_runtime import release
             with interprocess_file_lock(self.root / 'worker_dispatch.lock', timeout_seconds=15):
                 release(self.root)
+
+    def handoff_for_priority(self, expected_run, control):
+        """Only the monitor's verified priority decision requests a soft handoff."""
+        from chanlun.screening.priority_handoff import publish_handoff
+        with self._lock:
+            directory = self._directory()
+            if directory is None or directory.name != expected_run:
+                return
+            status = self._scheduler_status_at(directory)
+            if status["status"] not in {"starting", "running"}:
+                return
+            if (directory / "cancel").exists():
+                return
+            try:
+                if not self._reuse_workers or status.get('source_current') is not True:
+                    raise ValueError('Soft handoff requires a current private monitor')
+                publish_handoff(directory, read_state_json(directory / 'request.json'), control)
+            except (OSError, ValueError, TypeError, KeyError):
+                # Invalid/missing control can never authorize a grace period.
+                (directory / 'cancel').touch()
 
     def cancel(self):
         with self._lock:

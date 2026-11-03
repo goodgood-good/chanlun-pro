@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import json
 from pathlib import Path
 import threading
@@ -18,7 +18,7 @@ def test_idle_monitor_returns_all_capacity_to_screening(monkeypatch):
     assert capacity.worker_capacity(16,monitor=True)==4
     assert capacity.worker_capacity(16)==4
     assert capacity.role_limits(16, demand=16, screening_active=True) == {
-        'monitor_capacity':12,'screening_capacity':4,'monitor_reserved':12}
+        'monitor_capacity':4,'screening_capacity':12,'monitor_reserved':4}
 
 
 def test_manual_and_monitor_work_share_slots_and_release_them_after_errors(tmp_path,monkeypatch):
@@ -48,6 +48,19 @@ def test_manual_and_monitor_work_share_slots_and_release_them_after_errors(tmp_p
         with capacity.compute_slot({'compute_budget':budget},tmp_path):pass
 
 
+def test_future_maintenance_yields_to_an_active_full_scan_without_leaking_locks(tmp_path,monkeypatch):
+    from chanlun import config
+    monkeypatch.setattr(config,'get_data_path',lambda:tmp_path)
+    monkeypatch.setattr(capacity.os,'cpu_count',lambda:2)
+    budget=capacity.budget_request()
+    capacity.update_resource_budget(budget)
+    with pytest.raises(capacity.MaintenanceDeferred):
+        with capacity.compute_slot({'compute_budget':budget,'background_maintenance':True},tmp_path):
+            pytest.fail('maintenance was admitted during a full scan')
+    with capacity.compute_slot({'compute_budget':budget},tmp_path):
+        pass
+
+
 def test_memory_budget_stops_new_work_and_recovers_gradually():
     gib=capacity.GIB
     assert capacity.pressure_limit(None,{'available':gib//4,'reserve':2*gib},16,100)==0
@@ -73,7 +86,16 @@ def resource_budget(tmp_path,monkeypatch):
     return capacity.budget_request()
 
 
-@pytest.mark.parametrize('limit,live,scan', [(0,0,0),(1,1,1),(2,1,1),(3,2,1),(4,3,1),(8,6,2),(16,12,4)])
+def test_fresh_advisory_budget_does_not_contend_for_the_writer_lock(resource_budget,monkeypatch):
+    monkeypatch.setattr(capacity.time,'time',lambda:1000.)
+    first=capacity.update_resource_budget(resource_budget,monitor=True)
+    def forbidden(*args,**kwargs):pytest.fail('a fresh atomic snapshot needs no writer lock')
+    monkeypatch.setattr(capacity,'interprocess_file_lock',forbidden)
+    second=capacity.update_resource_budget(resource_budget,monitor=True)
+    assert second==first
+
+
+@pytest.mark.parametrize('limit,live,scan', [(0,0,0),(1,1,1),(2,1,1),(3,1,2),(4,1,3),(8,2,6),(16,4,12)])
 def test_live_lease_split_keeps_low_cpu_roles_runnable(limit,live,scan):
     limits=capacity.role_limits(limit,demand=800,screening_active=True)
     assert (limits['monitor_capacity'],limits['screening_capacity'])==(live,scan)
@@ -86,7 +108,7 @@ def test_live_demand_renews_independent_owners_then_expires_and_returns_slots(re
     monkeypatch.setattr(capacity.time,'time',lambda:now[0])
     capacity.update_resource_budget(resource_budget)
     active=capacity.publish_monitor_demand(resource_budget,demand=800,owner='old',expires_in=12)
-    assert active['monitor_capacity']==12 and active['screening_capacity']==4
+    assert active['monitor_capacity']==4 and active['screening_capacity']==12
     capacity.publish_monitor_demand(resource_budget,demand=3,owner='new',expires_in=12)
     remaining=capacity.publish_monitor_demand(resource_budget,demand=0,owner='old')
     assert remaining['monitor_capacity']==3 and remaining['screening_capacity']==13
@@ -159,7 +181,7 @@ def test_late_old_owner_release_preserves_a_newer_owner_lease(resource_budget, m
             resume.set()
         released = old.result(timeout=3)
     assert json.loads(path.read_text())['leases'] == {'new': before}
-    assert released['monitor_capacity'] == 12 and released['screening_capacity'] == 4
+    assert released['monitor_capacity'] == 4 and released['screening_capacity'] == 12
 
 
 def test_demand_reader_does_not_discard_lease_newer_than_callers_timestamp(resource_budget):
@@ -168,27 +190,37 @@ def test_demand_reader_does_not_discard_lease_newer_than_callers_timestamp(resou
     capacity.publish_monitor_demand(resource_budget, demand=16, owner='new')
     observed = capacity._with_roles({'limit':16, 'background_until':time.time()+10},
                                     Path(resource_budget['root']), 16, stale_now)
-    assert observed['monitor_demand'] == 16 and observed['monitor_capacity'] == 12
+    assert observed['monitor_demand'] == 16 and observed['monitor_capacity'] == 4
 
 
-@pytest.mark.parametrize('limit,live,scan', [(0,0,0),(1,1,1),(2,1,1),(4,3,1),(8,7,1),(16,15,1)])
-def test_overdue_pressure_preserves_global_limit_and_one_scanning_slot(limit, live, scan):
+@pytest.mark.parametrize('limit,live,scan', [(0,0,0),(1,1,1),(2,1,1),(4,3,1),(8,6,2),(16,12,4)])
+def test_overdue_pressure_borrows_capacity_without_starving_screening(limit, live, scan):
     roles = capacity.role_limits(limit, demand=16, screening_active=True, overdue_pressure=True)
     assert (roles['monitor_capacity'], roles['screening_capacity']) == (live, scan)
     assert capacity.role_limits(limit, demand=16, overdue_pressure=True)['monitor_capacity'] == limit
 
 
+def test_soft_memory_pause_recovers_one_worker_without_waiting_for_an_extra_half_gib():
+    gib=capacity.GIB
+    paused={'limit':0,'changed_at':90}
+    memory={'available':int(2.4*gib),'reserve':2*gib}
+    assert capacity.pressure_limit(paused,memory,16,100)==1
+    active={'limit':1,'changed_at':90}
+    assert capacity.pressure_limit(active,{'available':int(1.8*gib),'reserve':2*gib},16,100)==1
+    assert capacity.pressure_limit(active,{'available':gib//4,'reserve':2*gib},16,100)==0
+
+
 def test_boost_uses_each_owners_actual_demand_and_releases_to_normal_share(resource_budget):
     capacity.update_resource_budget(resource_budget)
     capacity.publish_monitor_demand(resource_budget, demand=16, owner='normal')
-    small = capacity.publish_monitor_demand(resource_budget, demand=2, owner='urgent', overdue_pressure=True)
-    assert small['monitor_capacity'] == 12
-    thirteen = capacity.publish_monitor_demand(resource_budget, demand=13, owner='urgent', overdue_pressure=True)
-    assert (thirteen['monitor_capacity'], thirteen['screening_capacity']) == (13, 3)
-    high = capacity.publish_monitor_demand(resource_budget, demand=16, owner='urgent', overdue_pressure=True)
-    assert (high['monitor_capacity'], high['screening_capacity']) == (15, 1)
+    small = capacity.publish_monitor_demand(resource_budget, demand=2, owner='urgent', overdue_pressure=True, holding_demand=2)
+    assert small['monitor_capacity'] == 4
+    thirteen = capacity.publish_monitor_demand(resource_budget, demand=13, owner='urgent', overdue_pressure=True, holding_demand=7)
+    assert (thirteen['monitor_capacity'], thirteen['screening_capacity']) == (12, 4)
+    high = capacity.publish_monitor_demand(resource_budget, demand=16, owner='urgent', overdue_pressure=True, holding_demand=16)
+    assert (high['monitor_capacity'], high['screening_capacity']) == (12, 4)
     normal = capacity.publish_monitor_demand(resource_budget, demand=16, owner='urgent', overdue_pressure=False)
-    assert (normal['monitor_capacity'], normal['screening_capacity']) == (12, 4)
+    assert (normal['monitor_capacity'], normal['screening_capacity']) == (4, 12)
     with pytest.raises(ValueError):
         capacity.publish_monitor_demand(resource_budget, demand=16, overdue_pressure='yes')
 
@@ -218,7 +250,9 @@ def test_unknown_preupgrade_slot_counts_conservatively_until_it_releases(resourc
         with capacity.compute_slot({'compute_budget':resource_budget}, tmp_path):
             entered.set()
     with ThreadPoolExecutor(max_workers=1) as pool:
-        with capacity.interprocess_file_lock(root/'slot_0.lock'):
+        with ExitStack() as locks:
+            for index in range(3):
+                locks.enter_context(capacity.interprocess_file_lock(root/f'slot_{index}.lock'))
             task = pool.submit(scanning_task)
             assert not entered.wait(.1)
         task.result(timeout=3)

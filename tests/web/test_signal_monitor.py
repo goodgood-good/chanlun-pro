@@ -91,6 +91,9 @@ def legacy_full_period_batch(service, live):
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
+    # These lifecycle regressions deliberately exercise the legacy single-clock
+    # contract. Fixed-role scheduling/admission is covered separately.
+    monkeypatch.setattr('chanlun.screening.timeframe_policy.enabled', lambda settings: False)
     monkeypatch.setattr("cl_app.services.signal_monitor.watchlist_symbols", lambda: [])
     monkeypatch.setattr("cl_app.services.signal_monitor.holding_symbols", lambda: [])
     clock = [datetime(2026, 9, 17, 14, 59, tzinfo=CN)]
@@ -760,27 +763,28 @@ def test_full_screening_keeps_the_previous_pool_live_with_bounded_workers(setup,
     service.check_now()
     service.tick()
     assert len(live.started) == 2
-    assert live.started[-1]["workers"] == 12
-    assert len(live.started[-1]["symbols"]) == 30
+    assert live.started[-1]["workers"] == 4
+    assert len(live.started[-1]["symbols"]) == 16
     assert live.started[-1]["symbols"][0] == holding
     assert service.snapshot()["seed"]["run_id"] == old_seed
-    assert service.snapshot()["pending_symbols_count"] == 0
+    assert service.snapshot()["pending_symbols_count"] == 14
     assert all(s["code"] != "SZ.000001" for s in live.started[-1]["symbols"])
     service.tick()
     assert len(live.started) == 2  # Never overlap two monitor jobs.
 
     live.finish(cutoff)
     service.tick()
-    assert len(live.started) == 2  # Drain the second committed prefix before replacing this run.
+    assert len(live.started) == 3  # The remaining pool uses another bounded wave.
+    live.finish(cutoff)
     service.tick()
     assert service.snapshot()["pending_symbols_count"] == 0
-    assert len(live.started) == 2
+    assert len(live.started) == 3
     assert {s["code"] for job in live.started[1:] for s in job["symbols"]} == {r["code"] for r in rows}
 
     manual.rows = rows
     manual.finish(cutoff)
     service.tick()
-    assert len(live.started) == 3
+    assert len(live.started) == 4
     assert len(live.started[-1]["symbols"]) == 30
     assert live.started[-1]["workers"] == 16
     assert service.snapshot()["seed"]["run_id"] == manual.state["run_id"]
@@ -798,7 +802,7 @@ def test_holdings_are_monitored_while_the_first_full_screening_is_still_running(
     assert service.snapshot()["seed"]["screening_symbols"] == []
 
 
-def test_scheduled_full_scan_limits_monitor_workers_in_the_same_scheduler_tick(setup):
+def test_scheduled_full_scan_keeps_unexpired_closing_checks_in_live_budget(setup):
     rows = [signal(f"SH.{600000 + i}") for i in range(20)]
     service, manual, live, clock, cutoff = _seed(setup, rows)
     service.tick()
@@ -811,8 +815,8 @@ def test_scheduled_full_scan_limits_monitor_workers_in_the_same_scheduler_tick(s
     service.tick()
     assert len(manual.started) == len(live.started) == 2
     assert manual.state["status"] == "running"
-    assert live.started[-1]["workers"] == 2
-    assert len(live.started[-1]["symbols"]) == 4  # Historical work yields short waves to the scan.
+    assert live.started[-1]["workers"] == 4
+    assert len(live.started[-1]["symbols"]) == 16  # The closing delivery window is still live.
 
 
 def test_routes_require_login_and_csrf_and_reads_do_not_launch_jobs(monkeypatch):
@@ -1415,6 +1419,8 @@ def _preview_service(setup, monkeypatch):
 
 
 def test_holding_warning_invalidation_reactivation_and_confirmation_share_one_identity(setup, monkeypatch):
+    from tests.web.warning_helpers import refute_warning
+    refute_warning(monkeypatch)
     service, live, cutoff, warning = _preview_service(setup, monkeypatch)
     extra = lambda: [e for e in service.snapshot()["events"] if e.get("signal_type") == "consolidation_divergence"]
     first, = extra()
@@ -1444,6 +1450,8 @@ def test_holding_warning_invalidation_reactivation_and_confirmation_share_one_id
 
 
 def test_invalidation_keeps_previous_proof_but_uses_new_check_evidence_for_its_chart(setup,monkeypatch):
+    from tests.web.warning_helpers import refute_warning
+    refute_warning(monkeypatch)
     service,live,cutoff,warning=_preview_service(setup,monkeypatch)
     previous=next(v for v in service._load()['signals'].values() if v.get('stage')=='warning')
     previous['evidence']={'version':'previous'}
@@ -1480,6 +1488,8 @@ def test_existing_warning_sends_once_when_new_closed_data_crosses_enable_time(se
 
 
 def test_recovered_warning_requires_two_distinct_closed_checks_but_confirmation_is_immediate(setup,monkeypatch):
+    from tests.web.warning_helpers import refute_warning
+    refute_warning(monkeypatch)
     service,live,cutoff,warning=_preview_service(setup,monkeypatch)
     def finish(rows,stamp):
         setup[3][0] = max(setup[3][0], datetime.fromtimestamp(stamp, CN))

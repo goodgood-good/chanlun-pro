@@ -1,4 +1,4 @@
-"""A rule upgrade must refresh completed screening without resetting noon limits."""
+"""A rule upgrade refreshes completed screening with bounded retry attempts."""
 from copy import deepcopy
 from datetime import timedelta
 
@@ -44,16 +44,14 @@ def test_new_manual_completion_is_adopted_before_a_later_rule_upgrade(setup):
     assert len(manual.started)==3
 
 
-@pytest.mark.parametrize('minutes,refresh',[(5,True),(21,False)])
-def test_noon_rule_refresh_only_uses_the_remainder_of_its_original_budget(setup,minutes,refresh):
+@pytest.mark.parametrize('minutes',[5,21])
+def test_noon_rule_refresh_has_no_twenty_minute_deadline(setup,minutes):
     service,manual,_,clock,_,phase=completed(setup,morning=True)
-    deadline=service._load()['daily'][phase]['deadline_at']
     clock[0]+=timedelta(minutes=minutes)
     stale(manual);service.tick()
-    assert len(manual.started)==(2 if refresh else 1)
-    assert service._load()['daily'][phase]['deadline_at']==deadline
-    if refresh:
-        assert manual.state['deadline_at']==deadline and manual.started[-1]['frequencies']==['5m','30m']
+    assert len(manual.started)==2
+    assert 'deadline_at' not in service._load()['daily'][phase]
+    assert 'deadline_at' not in manual.state and manual.started[-1]['frequencies']==['5m','30m']
 
 
 def test_custom_manual_scope_is_not_replaced_by_a_full_market_refresh(setup):

@@ -114,7 +114,7 @@ test('watchlist context follows origin independently of selected period or empty
   const watch={id:'watch',market:'us',code:'AAPL',name:'Apple',origin:'watchlist',stage:'monitoring',frequency:'30m',point:{}};
   const proof=row('proof','5m','3buy');
   assert.deepEqual(ids([watch,proof],{...pick('1m',[]),origin:'all'}),['watch']);
-  assert.deepEqual(ids([watch,proof],{...pick('5m',['3buy']),origin:'all'}),['watch','proof']);
+  assert.deepEqual(ids([watch,proof],{...pick('5m',['3buy']),origin:'all'}),['proof','watch']);
   assert.deepEqual(ids([watch,proof],{...pick('5m',['3buy']),origin:'watchlist'}),['watch']);
   assert.deepEqual(ids([watch],{...pick('1m',[]),origin:'all',market:'a'}),[]);
   assert.deepEqual(ids([watch],{...pick('1m',[]),origin:'all',query:'apple'}),['watch']);
@@ -147,7 +147,7 @@ test('advanced refinements remain AND constraints on the selected period and typ
 test('progressive updates retain only matching historical rows until real withdrawal',()=>{
   const rows=[row('buy','5m','3buy'),row('sell','5m','3sell'),row('other','30m','3buy')],before=JSON.stringify(rows);
   const selection=pick('5m',['3buy','3sell']),limited=rows.map(r=>r.id==='buy'?{...r,refresh_state:'limited',result_source:'old'}:r);
-  assert.deepEqual(ids(limited,selection),['buy','sell']);
+  assert.deepEqual(ids(limited,selection),['sell','buy']);
   assert.deepEqual(ids(limited,{...selection,include_previous:false}),['sell']);
   assert.deepEqual(ids(rows.filter(r=>r.id!=='buy'),selection),['sell']);assert.equal(JSON.stringify(rows),before);
 });

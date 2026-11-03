@@ -453,6 +453,7 @@ _VALUE_COLUMNS_FOR_ALIGN = (
     "c", "o", "h", "l", "v",
     "macd_dif", "macd_dea", "macd_hist", "macd_area",
     "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
+    "higher_macd_raw_dif", "higher_macd_raw_dea", "higher_macd_raw_hist",
 )  # 保持与 tv._TV_VALUE_COLUMNS 同步
 
 

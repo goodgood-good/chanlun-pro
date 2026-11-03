@@ -29,11 +29,17 @@ def storage_symbol(code, market="a"):
     return market + "_" + hashlib.sha256(code.encode()).hexdigest()[:32]
 
 
-def watchlist_symbols():
+def watchlist_symbols(groups=None):
     from chanlun.zixuan import ZiXuan
     watch = ZiXuan("a")
+    available = {group['name'] for group in watch.zixuan_list}
+    requested = set(groups) if groups is not None else available
+    if requested - available:
+        raise ValueError('所选自选分组已不存在，请刷新分组后重试')
     found = {}
     for group in watch.zixuan_list:
+        if group['name'] not in requested:
+            continue
         for row in watch.zx_stocks(group["name"]):
             market, code = row["market"], row["code"]
             if not validate_symbol(market, code):
@@ -137,7 +143,7 @@ def _market_context(name, minute, frequency, recent_sessions, max_anchor_session
     cutoff = periods[-1][1]
     return {"frequency": frequency, "cutoff": cutoff,
             "recent_from": sessions[-recent_sessions], "anchor_from": sessions[-max_anchor_sessions],
-            "history_from": sessions[-min(len(sessions), max(60, max_anchor_sessions+2))],
+            "history_from": sessions[-min(len(sessions), max(25, max_anchor_sessions+2))],
             "trading_days": tuple(sessions), "calendar_source": f"exchange_calendars:{name}",
             "calendar_coverage_start": sessions[0], "session_periods": tuple(periods),
             "session_timezone": str(calendar.tz), "session_calendar": name}
@@ -182,6 +188,16 @@ def external_frame(code, frequency, context):
     from chanlun.exchange.quote_capacity import release_worker_quote_resources
     try:
         return _external_frame(code, frequency, context)
+    except Exception as exc:
+        from chanlun.exchange.quote_capacity import QuoteConnectionBusy,QuoteConnectionCancelled
+        from chanlun.exchange.longbridge_history_limit import LongbridgeHistoryBusy
+        from chanlun.exchange.usmart_rate_limit import USmartRateLimitTimeout,USmartRateLimitCancelled
+        from chanlun.exchange.errors import SourcePreparationPending
+        if isinstance(exc,(QuoteConnectionBusy,QuoteConnectionCancelled,LongbridgeHistoryBusy,
+                           USmartRateLimitTimeout,USmartRateLimitCancelled)):
+            raise SourcePreparationPending({'progress_token':type(exc).__name__,
+                'retry_after':getattr(exc,'retry_after',3)},code=getattr(exc,'code','quote_request_cancelled')) from exc
+        raise
     finally:
         # The frame is local now. Return the remote connection slot before
         # structure calculation so reusable CPU workers do not retain sockets.
@@ -195,7 +211,23 @@ def _external_frame(code, frequency, context):
     if getattr(exchange, "screening_time_contract_verified", None) is False:
         raise MarketDataContractError("BAR_TIME_LABEL_UNAVAILABLE", "行情源尚未核实分钟K线时间口径，暂不请求结构计算行情")
     end = datetime.fromtimestamp(context["cutoff"], CN)
-    frame = exchange.klines(code, frequency, end_date=end.isoformat(), args={"timeout": 20})
+    query = {"end_date": end.isoformat(), "args": {"timeout": 20}}
+    if context['market']=='us':
+        query['args']['_screening_completed']=True
+        if context.get('_history_provider') in {'longbridge','usmart'}:
+            query['args']['_history_provider']=context['_history_provider']
+    if context.get('history_from'):
+        from chanlun.exchange._lookback import get_lookback_timedelta
+        required = pd.Timestamp(context['history_from'], tz=context.get('session_timezone', CN))
+        default_start = end - get_lookback_timedelta(frequency, market=context['market'])
+        if required < default_start:
+            # A parent's terminal interval can start before the normal source
+            # window. Pass the actual bound and opt out of the adapter's default
+            # horizon clamp; the returned frame still passes calendar/quality
+            # checks and never invents missing earlier history.
+            query.update(start_date=required.isoformat())
+            query['args']['allow_long_history'] = True
+    frame = exchange.klines(code, frequency, **query)
     if frame is None or frame.empty:
         raise ValueError("行情源没有返回 K 线，请检查连接或数据权限")
     declared = frame.attrs.get("bar_time_label", getattr(exchange, "kline_time_label", None))

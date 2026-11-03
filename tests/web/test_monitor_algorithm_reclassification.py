@@ -9,6 +9,16 @@ from cl_app.services.signal_monitor import SignalMonitor
 from tests.web.test_signal_monitor import setup as setup, _seed, signal
 
 
+@pytest.mark.parametrize('available,expected',[(99,True),(100,True),(101,False)])
+def test_a_provider_change_does_not_reannounce_already_checked_market_history(available,expected):
+    check={'revision':'same-algorithm','cutoff':100,'price_basis_revision':'longbridge-basis'}
+    assert SignalMonitor._historical_reclassification(check,'same-algorithm',available,'usmart-basis') is expected
+    assert not SignalMonitor._historical_reclassification(check,'same-algorithm',available,'longbridge-basis')
+    baseline=SignalMonitor._notification_baseline(check)
+    assert baseline['price_basis_revision']=='longbridge-basis'
+    assert SignalMonitor._historical_reclassification({'notification_baseline':baseline},'same-algorithm',available,'usmart-basis') is expected
+
+
 @pytest.mark.parametrize(
     "advance,new_revision,expected",
     [(0, "new", False), (300, "new", True), (0, "old", True)],

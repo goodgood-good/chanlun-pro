@@ -15,11 +15,12 @@
   let statusCache=null;
   let riskRevision=null,riskRetryAt=0;
   const policyForm=$('notification-policy-form');
-  const policyChoices={frequencies:['1m','5m','30m'],holdings:['1buy','2buy','3buy','1sell','2sell','3sell'],others:['1buy','2buy','3buy']};
-  const policyNames={frequencies:'notification-frequency',holdings:'holding-point',others:'ordinary-point'};
+  const policyChoices={frequencies:['1m','5m','30m'],other_frequencies:['5m'],holdings:['1buy','2buy','3buy','1sell','2sell','3sell'],others:['1buy','2buy','3buy']};
+  const policyNames={frequencies:'notification-frequency',other_frequencies:'ordinary-frequency',holdings:'holding-point',others:'ordinary-point'};
   const policy={ready:false,available:false,saving:false,dirty:false,version:0,saved:null,error:'',notice:'正在读取买卖点通知设置…'};
   function normalizePolicy(value){
     if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!Object.hasOwn(policyChoices,key)))return null;
+    if(!Object.hasOwn(value,'other_frequencies'))value={...value,other_frequencies:Array.isArray(value.frequencies)&&value.frequencies.includes('5m')?['5m']:[]};
     const result={};
     for(const [key,allowed] of Object.entries(policyChoices)){
       if(!Array.isArray(value[key])||value[key].some(item=>!allowed.includes(item))||new Set(value[key]).size!==value[key].length)return null;
@@ -164,6 +165,7 @@
       hours:$('notifications-hours').value||'24',
       q:$('notifications-search').value.trim(),status:$('notifications-status').value||'all',
       kind:$('notifications-kind').value||'all',frequency:$('notifications-frequency').value||'all',
+      point_type:$('notifications-point-type')?.value||'all',
       scope:$('notifications-scope').value||'all'});
     if(inbox.frozen&&Number.isFinite(inbox.asOf))params.set('as_of',String(inbox.asOf));
     const cursor=inbox.frozen&&inbox.pageCursors.get(inbox.page);
@@ -257,6 +259,69 @@
     if(typeof value!=='string'||!/^\/(?!\/)/.test(value))return null;
     return value.startsWith('/monitor/notifications/')||value.startsWith('/public/alert-chart/')?value:null;
   }
+  const notificationView={tab:'info',signalIndex:0,frameKey:null,controlsKey:null};
+  function resetNotificationChart(message='选择一条通知后查看图表。'){
+    notificationView.signalIndex=0;notificationView.frameKey=null;notificationView.controlsKey=null;
+    $('notification-chart-host')?.replaceChildren(node('p',message,'muted'));
+    if($('notification-chart-controls'))$('notification-chart-controls').hidden=true;
+  }
+  function renderNotificationChart(item){
+    const host=$('notification-chart-host'),controls=$('notification-chart-controls');
+    if(!host||!controls)return;
+    if(!item){resetNotificationChart(inbox.detailLoading?'正在读取通知图表…':'选择一条通知后查看图表。');return;}
+    const charts=Array.isArray(item.charts)&&item.charts.length?item.charts:
+      (Array.isArray(item.signals)&&item.signals.length?item.signals:[item]).map((entry,index)=>({...entry,index})).filter(entry=>entry.code);
+    if(notificationView.controlsKey===null){
+      const point=$('notifications-point-type')?.value||'all';
+      const match=charts.findIndex(entry=>(point==='all'||entry.point_type===point)&&entry.code===(inbox.selectedRow?.code||item.code));
+      notificationView.signalIndex=match<0?0:match;
+    }
+    if(notificationView.signalIndex>=charts.length)notificationView.signalIndex=0;
+    const selected=charts[notificationView.signalIndex];
+    const controlsKey=JSON.stringify([item.id,charts]);
+    if(notificationView.controlsKey!==controlsKey){
+      const selector=$('notification-chart-selector');
+      selector.replaceChildren(...charts.map((entry,index)=>{
+        const option=node('option',[entry.name||entry.code,entry.code,entry.frequency,points[entry.point_type]||entry.point_type,stages[entry.stage]||entry.stage].filter(Boolean).join(' · '));
+        option.value=String(index);return option;
+      }));
+      notificationView.controlsKey=controlsKey;
+    }
+    $('notification-chart-selector').value=String(notificationView.signalIndex);
+    $('notification-chart-selector-label').hidden=charts.length<2;
+    controls.hidden=charts.length<2;
+    const base=selected&&/^[A-Za-z0-9._-]+$/.test(item.id)?`/monitor/notifications/${item.id}/current-chart/${Number.isInteger(selected.index)?selected.index:notificationView.signalIndex}`:null;
+    const url=base&&typeof selected.view_url==='string'&&new RegExp('^'+base.replace(/\./g,'\\.')+'\\?version=[a-f0-9]{64}$').test(selected.view_url)?selected.view_url:base;
+    const key=JSON.stringify([item.id,notificationView.signalIndex,url]);
+    if(notificationView.frameKey===key)return;
+    notificationView.frameKey=key;
+    if(url){
+      const frame=node('iframe',undefined,'notification-chart-iframe');
+      frame.title=[selected.name,selected.code,selected.frequency,'当前行情与通知标记'].filter(Boolean).join(' · ');
+      frame.src=url;frame.setAttribute('referrerpolicy','same-origin');
+      host.replaceChildren(frame);
+    }else host.replaceChildren(node('p','这条通知没有可定位的标的，无法加载行情图表。','notification-empty'));
+  }
+  function selectNotificationTab(tab){
+    notificationView.tab=tab;
+    for(const [name,id,panelId] of [['info','notification-info-tab','notification-detail-content'],['chart','notification-chart-tab','notification-chart-panel']]){
+      const button=$(id),panel=$(panelId),active=name===tab;
+      button?.setAttribute('aria-selected',String(active));button?.setAttribute('tabindex',active?'0':'-1');
+      if(panel)panel.hidden=!active;
+    }
+    if(tab==='chart')renderNotificationChart(inbox.detail);
+  }
+  for(const [id,tab] of [['notification-info-tab','info'],['notification-chart-tab','chart']]){
+    $(id)?.addEventListener('click',()=>selectNotificationTab(tab));
+    $(id)?.addEventListener('keydown',event=>{
+      if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+      event.preventDefault();const next=event.key==='Home'?'info':event.key==='End'?'chart':tab==='info'?'chart':'info';
+      selectNotificationTab(next);$(next==='info'?'notification-info-tab':'notification-chart-tab')?.focus?.();
+    });
+  }
+  $('notification-chart-selector')?.addEventListener('change',()=>{
+    notificationView.signalIndex=Number($('notification-chart-selector').value)||0;renderNotificationChart(inbox.detail);
+  });
   function imageLabel(image,index){
     if(typeof image.label==='string'&&image.label)return image.label;
     return Array.isArray(image.periods)&&image.periods.length>1?image.periods.join(' / ')+' 合成图':image.frequency||`附图 ${index+1}`;
@@ -359,6 +424,7 @@
     const original=node('details',undefined,'notification-original');original.open=originalWasOpen;
     original.append(node('summary','消息原文'),node('pre',item.body||item.message||'未保存消息原文。'));content.append(original);
     for(const note of item.record_notes||[])if(typeof note==='string')content.append(node('p',note,'muted'));
+    if(notificationView.tab==='chart')renderNotificationChart(item);
   }
   async function selectNotification(row,scroll=false){
     if(!row?.id)return;
@@ -366,7 +432,7 @@
     inbox.selectedId=row.id;inbox.selectedRow=row;inbox.autoSelect=true;
     inbox.detailVersion=notificationVersion(row);inbox.detailLoading=true;
     syncNotificationSelection();
-    if(changed){inbox.detail=null;inbox.imageIndex=0;$('notification-detail-content').replaceChildren(node('p','正在读取通知详情…','notification-empty'));}
+    if(changed){inbox.detail=null;inbox.imageIndex=0;resetNotificationChart('正在读取通知图表…');$('notification-detail-content').replaceChildren(node('p','正在读取通知详情…','notification-empty'));}
     if(scroll&&phone)$('notification-detail').scrollIntoView?.({block:'start',behavior:'smooth'});
     inbox.detailController?.abort();inbox.detailController=typeof AbortController==='function'?new AbortController():null;
     const request=++inbox.detailRequest;
@@ -382,11 +448,12 @@
         inbox.selectedId=null;inbox.selectedRow=null;inbox.detail=null;inbox.detailVersion=null;
         inbox.autoSelect=false;inbox.imageIndex=0;inbox.detailFetchedAt=0;
         $('notification-detail-content').replaceChildren(node('p','所选通知已不存在或已超过保存期限，请选择其他记录。','notification-empty'));
+        resetNotificationChart('所选通知已不存在，请选择其他记录。');
         syncNotificationSelection();
         return;
       }
       inbox.detailVersion=null;
-      if(!inbox.detail)$('notification-detail-content').replaceChildren(node('p',error.name==='AbortError'?'详情读取超时，请点选重试。':error.message,'notification-error'));
+      if(!inbox.detail){$('notification-detail-content').replaceChildren(node('p',error.name==='AbortError'?'详情读取超时，请点选重试。':error.message,'notification-error'));resetNotificationChart('通知资料读取失败，请重新选择该记录。');}
       else inboxMessage('详情暂未更新，保留上次内容。'+error.message);
     }finally{if(request===inbox.detailRequest)inbox.detailLoading=false;}
   }
@@ -407,6 +474,7 @@
   }
   function pointStatus(row) {
     if(row.stage==='left')return '退出候选';
+    if(row.operating_role==='trade'&&row.lower_confirmation_state!=='confirmed')return '5m 交易待 1m 确认';
     return row.point_status ? stages[row.point_status]||row.point_status : row.stage==='confirmed'?'已确认':'筛选条件待齐';
   }
   function holdingBadge(row, label='我的持仓') {
@@ -414,12 +482,18 @@
   }
   function statusDetails(row) {
     const details=[];
+    if(row.stage!=='invalidated'&&row.candidate_updated)details.push(`候选拐点更新 ${row.candidate_previous_price??'—'} → ${row.anchor_price??'—'} · 原结构继续观察`);
+    if(row.stage!=='invalidated'&&row.preview_trigger_active===false)details.push(row.warning_assessment?.reason||'原结构尚未被否定，继续观察，买卖点仍未确认');
+    if(row.stage==='invalidated'&&row.signal_type==='native_point_preview')details.push(row.invalidation_reason||'原结构条件已不成立');
+    if(row.operating_role)details.push({trade:'5m 交易级别',short_term:'1m 短差级别',background:'30m 大级别背景'}[row.operating_role]);
+    if(row.background_30m)details.push('30m 背景：'+({up:'中枢上移',down:'中枢下移',range:'中枢震荡',unknown:'待核验'}[row.background_30m.direction]||'待核验')+
+      (row.background_30m.alignment==='countertrend'?' · 逆势风险':''));
     if(row.data_freshness&&row.data_freshness!=='ready')details.push(
       row.data_freshness==='limited'?'数据受限，当前状态待复核':row.data_freshness==='updating'?'最新收盘K线尚待复核':'等待有效数据核验');
     if(row.signal_type==='holding_risk')details.push(`持仓参考 ${points[row.reference_point_type]||'买点'} · 结构止损 ${row.stop_price??'—'}`);
     if(row.stage==='left'&&row.exit_reasons?.length){
       const reasons={STRUCTURAL_STOP_TRIGGERED:'触发结构止损参考',ANCHOR_DISTANCE_EXCEEDED:'距拐点超过筛选上限',
-        CONFIRMING_SEGMENT_COMPLETED:'后继线段已完成',FIRST_ADVANCED_TO_SECOND:'已进入二类点阶段',LATER_SELL:'出现更晚的卖点',LATER_BUY:'出现更晚的买点',SELECTION_WINDOW_ENDED:'退出当前筛选窗口'};
+        CONFIRMING_SEGMENT_COMPLETED:'后继线段已完成',FIRST_ADVANCED_TO_SECOND:'已进入二类点阶段',LATER_SELL:'出现更晚的卖点',LATER_BUY:'出现更晚的买点',SELECTION_WINDOW_ENDED:'退出当前筛选窗口',PRICE_BASIS_CHANGED:'价格基准变化，结束旧记录追踪'};
       details.push(row.exit_reasons.map(reason=>reasons[reason]||reason).join('；'));
     }
     if(row.signal_type==='consolidation_divergence'){
@@ -443,10 +517,12 @@
       const start=(remote.page-1)*remote.size,end=Math.min(start+rows.length,remote.total);
       $(id+'-page').textContent=remote.total?`${remote.page} / ${remote.pages} 页 · ${start+1}–${end} / ${remote.total} 条`:'0 条';
       $(id+'-prev').disabled=remote.page<=1;$(id+'-next').disabled=remote.page>=remote.pages;
-      return {rows,total:remote.total,filtered:!!remote.query||remote.scope==='holdings'};
+      return {rows,total:remote.total,filtered:!!remote.query||remote.scope==='holdings'||!!remote.point_type&&remote.point_type!=='all'};
     }
     const query=$(id+'-search').value.trim().toLocaleLowerCase();
-    const scoped=id==='signals'&&$('signals-scope')?.value==='holdings'?rows.filter(row=>row.holding):rows;
+    const pointType=$(id+'-point-type')?.value||'all';
+    const scoped=rows.filter(row=>(id!=='signals'||$('signals-scope')?.value!=='holdings'||row.holding)
+      &&(pointType==='all'||row.point_type===pointType));
     const matching=query?scoped.filter(row=>[row.code,row.name,row.frequency,points[row.point_type]].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)):scoped;
     const size=Number($(id+'-page-size').value)||50;
     const total=matching.length, count=Math.max(1,Math.ceil(total/size));
@@ -486,7 +562,7 @@
     const summary=data?.holding_summary,element=$('holding-focus-summary');
     if(element&&summary){
       const periods=data.monitor_frequencies?.length?` · ${data.monitor_frequencies.join(' / ')}`:'';
-      const text=`我的持仓 ${summary.count} 只${periods} · 当前信号 ${summary.signals} 条 · 已更新 ${summary.ready} 只${summary.updating?` · 待更新 ${summary.updating} 只`:''}${summary.limited?` · 数据受限 ${summary.limited} 只`:''}${summary.pending?` · 待核验 ${summary.pending} 只`:''}${summary.source_current===false?' · 持仓名单暂待核验':''}`;
+      const text=`我的持仓 ${summary.count} 只${periods} · 当前信号 ${summary.signals} 条 · 已更新 ${summary.ready} 只${summary.updating?` · 待更新 ${summary.updating} 只`:''}${summary.limited?` · 数据受限 ${summary.limited} 只`:''}${summary.unsupported?` · 未覆盖 ${summary.unsupported} 只`:''}${summary.pending?` · 待核验 ${summary.pending} 只`:''}${summary.source_current===false?' · 持仓名单暂待核验':''}`;
       if(element.textContent!==text)element.textContent=text;
     }
     const riskSummary=$('holding-risk-summary');
@@ -501,10 +577,11 @@
   function pool() {
     const page=listPage('pool',data?.seed?.symbols||[]);
     $('pool').replaceChildren(...page.rows.map(row=>{
-      const link=chart(row),label={limited:'数据受限',pending:'待核验',updating:'待最新K线复核',scheduled:'巡检未到期'}[row.coverage_state];
+      const link=chart(row),label={unsupported:'未覆盖',limited:'数据受限',pending:'待核验',updating:'待最新K线复核',scheduled:row.coverage_message?.startsWith('复牌后')?'等待复牌后K线':'巡检未到期',suspended:'停牌暂停'}[row.coverage_state];
       if(row.minute_monitoring==='background')link.append(node('small',' · 1m 每5分钟巡检'));
+      if(row.minute_monitoring==='auxiliary')link.append(node('small',' · 5m 交易监听，1m／30m 辅助确认'));
       else if(row.minute_monitoring==='realtime')link.append(node('small',' · 1m 每分钟监听'));
-      if(label)link.append(node('small',' · '+label));return link;
+      if(label)link.append(node('small',' · '+label+(row.coverage_message?'：'+row.coverage_message:'')));return link;
     }));
     $('pool-empty').textContent=page.total?'':page.filtered?'没有匹配的监听标的。':'尚无选股候选或自选标的。';
   }
@@ -525,7 +602,7 @@
     const minuteEnabled=periods.includes('1m')&&Number.isInteger(minute?.foreground)&&Number.isInteger(minute?.background);
     if(minuteSummary){
       minuteSummary.hidden=!minuteEnabled;
-      minuteSummary.textContent=minuteEnabled?`1m：每分钟监听 ${minute.foreground} 只 · 每5分钟巡检 ${minute.background} 只。巡检发现有效买卖点后自动恢复每分钟监听。`:'';
+      minuteSummary.textContent=minuteEnabled?(minute.auxiliary?`1m 独立监听 ${minute.foreground} 只；非持仓 ${minute.auxiliary} 只仅监听 5m，1m／30m 按需提供区间确认与背景。`:`1m：每分钟监听 ${minute.foreground} 只 · 每5分钟巡检 ${minute.background} 只。巡检发现有效买卖点后自动恢复每分钟监听。`):'';
     }
     const cadence=minuteEnabled&&minute.background?'实时队列随新 K 线收盘检查；1m 后台队列每5分钟巡检':'新 K 线收盘后优先检查';
     $('live-detail').textContent=`监听周期：${periods.join('、')||'待配置'}。${cadence}；常规检查间隔 ${result.settings.interval_seconds} 秒，已完成标的即时更新。最近处理 ${date(result.last_check_at)}，最近整批完成 ${date(result.last_batch_completed_at)}。${result.pending_symbols_count?`仍有 ${result.pending_symbols_count} 只等待检查。`:''}${live.error||''}`;
@@ -542,7 +619,10 @@
     }
     const markets={a:'A 股',us:'美股',hk:'港股',fx:'外汇',ny_futures:'国际期货',futures:'国内期货',currency_spot:'数字货币现货',currency:'数字货币合约'};
     const coverage=Object.entries(result.pool_markets||{}).map(([m,n])=>`${markets[m]||m} ${n} 只`).join('，');
-    $('pool-source').textContent=seed?`选股候选 ${seed.screening_count??seed.screening_symbols?.length??poolCount} 只${seed.screening_recheck_count?` + 待复核 ${seed.screening_recheck_count} 只`:''} + 自选 ${seed.watchlist_count||0} 只，去重共 ${poolCount} 只，其中持仓 ${seed.holding_count||0} 只。${coverage}。${result.coverage?`已更新 ${result.coverage.ready} 只 · 待更新 ${result.coverage.updating||0} 只${result.coverage.scheduled?` · 巡检未到期 ${result.coverage.scheduled} 只`:''} · 数据受限 ${result.coverage.limited} 只 · 待核验 ${result.coverage.pending} 只。`:''}${seed.error_count?'盘后选股存在数据问题，详见选股诊断。':''}`:'自选标的无需先出现买卖点即可进入监听名单。';
+    $('pool-source').textContent=seed?`选股候选 ${seed.screening_count??seed.screening_symbols?.length??poolCount} 只${seed.screening_recheck_count?` + 待复核 ${seed.screening_recheck_count} 只`:''} + 自选 ${seed.watchlist_count||0} 只，去重共 ${poolCount} 只，其中持仓 ${seed.holding_count||0} 只。${coverage}。${result.coverage?`已更新 ${result.coverage.ready} 只 · 待更新 ${result.coverage.updating||0} 只${result.coverage.scheduled?` · 巡检未到期 ${result.coverage.scheduled} 只`:''} · 数据受限 ${result.coverage.limited} 只${result.coverage.unsupported?` · 未覆盖 ${result.coverage.unsupported} 只`:''} · 待核验 ${result.coverage.pending} 只。`:''}${seed.error_count?'盘后选股存在数据问题，详见选股诊断。':''}`:'自选标的无需先出现买卖点即可进入监听名单。';
+    if(result.quote_only_symbols?.length)$('pool-source').textContent+=`另有 ${result.quote_only_symbols.length} 个标的仅看行情，不纳入实时监听。`;
+    if(result.coverage?.suspended)$('pool-source').textContent+=`停牌暂停复核 ${result.coverage.suspended} 只。`;
+    if(Object.keys(result.source_waiting_periods||{}).length)$('pool-source').textContent+=`另有 ${Object.keys(result.source_waiting_periods).length} 项正在等待行情链路或完整数据窗口。`;
     progress('daily-progress',manual);progress('live-progress',live);
     $('pool-count').textContent=poolCount;$('signal-count').textContent=result.pagination?.signals.overall??result.signals.length;
     $('event-count').textContent=result.pagination?.events.overall??result.events.length;$('error-count').textContent=result.errors?.length||0;
@@ -557,17 +637,17 @@
       $('notification-activity-status').textContent=activity.message;
       $('notification-activity-times').textContent=`最近复核 ${date(activity.last_check_at)} · 最近新事件 ${date(activity.last_event_at)} · 最近通知成功 ${date(activity.last_sent_at)} · 最近一次处理新增 ${activity.new_events??'—'} 条`;
     }
-    $('dingtalk-enabled').checked=!!dt.enabled;$('dingtalk-enabled').disabled=busy||!dt.configured;
+    $('dingtalk-enabled').checked=!!dt.enabled;$('dingtalk-enabled').disabled=busy||(!dt.configured&&!dt.enabled);
     $('dingtalk-status').textContent=!dt.configured?'尚未配置机器人':!dt.enabled?'钉钉通知已关闭':dt.last_error&&!dt.last_error.startsWith('等待')?'通知发送遇到问题':dt.pending?'通知处理中':'钉钉通知已开启';
     const charts=dt.chart_delivery||{},generation=dt.chart_generation||{};
-    $('dingtalk-detail').textContent=dt.configuration_error||`通知待发 ${dt.pending||0} 条 · 已发送 ${dt.sent||0} 条 · 失败 ${dt.failed||0} 条 · 最近成功 ${date(dt.last_sent_at)}；图表已发 ${charts.sent||0} 张 · 待处理 ${(charts.pending||0)+(generation.pending||0)} 张 · 失败 ${(charts.failed||0)+(generation.failed||0)} 张${dt.last_error?'；'+dt.last_error:''}${generation.last_error?'；'+generation.last_error:''}`;
+    $('dingtalk-detail').textContent=dt.configuration_error||`通知待发 ${dt.pending||0} 条 · 已发送 ${dt.sent||0} 条 · 失败 ${dt.failed||0} 条 · 最近成功 ${date(dt.last_sent_at)}；图表已发 ${charts.sent||0} 张 · 待处理 ${(charts.pending||0)+(generation.pending||0)} 张 · 失败 ${(charts.failed||0)+(generation.failed||0)} 张${generation.limited?` · 历史范围受限 ${generation.limited} 张`:''}${dt.last_error?'；'+dt.last_error:''}${generation.last_error?'；'+generation.last_error:''}`;
     if(dt.storage_available===false)$('dingtalk-detail').textContent='通知记录暂不可读取，发送数量尚无法核对；行情复核继续运行。';
     const archive=generation.evidence_archive;
     if(archive&&(archive.saved||archive.pending||archive.unavailable||archive.error))
       $('dingtalk-detail').textContent+=archive.error?'；'+archive.error:
         `；原始证据留存 ${archive.saved||0} 条（${archive.keep_days||7} 天）${archive.pending?' · 待保存 '+archive.pending+' 条':''}${archive.unavailable?' · 无法留存 '+archive.unavailable+' 条':''}`;
-    const delivery={pending:'待发送',sending:'发送中',retry:'等待重试',sent:'已发送',failed:'发送失败',expired:'已过期，未补发'};
-    $('dingtalk-history').replaceChildren(...(dt.history||[]).map(row=>node('p',`${date(row.created)} · ${row.kind==='screening'?'选股完成汇总':row.kind==='chart'?'信号图表':'监听信号'} · ${delivery[row.status]||row.status}${row.error?' · '+row.error:''}`)));
+    const delivery={pending:'待发送',sending:'发送中',retry:'等待重试',sent:'已发送',failed:'发送失败',expired:'已过期，未补发',suppressed:'已静默'};
+    $('dingtalk-history').replaceChildren(...(dt.history||[]).map(row=>node('p',`${date(row.created)} · ${row.kind==='screening'?'选股完成汇总':row.kind==='chart'?'信号图表':'监听信号'} · ${delivery[row.status]||row.status}${row.error?' · '+row.error:''}${row.reason_code==='PARTIAL_RECHECK_REJECTIONS'?' · '+row.decision_message+'（'+row.rejection_count+'条）':''}`)));
     if($('business-health')&&result.business_health){
       const health=result.business_health;
       const labels={running:'调度正常',paused:'已暂停',stopped:'调度未运行',starting:'启动检查中',delayed:'调度检查有延迟'};
@@ -580,6 +660,7 @@
     params.set('signals_scope',$('signals-scope')?.value||'all');
     for(const id of ['signals','pool','events']){
       params.set(id+'_page',String(pages[id]));params.set(id+'_size',$(id+'-page-size').value||'50');params.set(id+'_q',$(id+'-search').value.trim());
+      if(id!=='pool')params.set(id+'_point_type',$(id+'-point-type')?.value||'all');
     }
     return '?'+params.toString();
   }
@@ -638,7 +719,7 @@
       busy=false;
       if(action==='notification-policy')policy.saving=false;
       policyControls();
-      if(data){$('enable').disabled=false;$('pause').disabled=!data.enabled;$('check-now').disabled=!data.enabled||!(data.seed?.count??data.seed?.codes?.length);$('dingtalk-enabled').checked=!!data.dingtalk?.enabled;$('dingtalk-enabled').disabled=!data.dingtalk?.configured;}
+      if(data){$('enable').disabled=false;$('pause').disabled=!data.enabled;$('check-now').disabled=!data.enabled||!(data.seed?.count??data.seed?.codes?.length);$('dingtalk-enabled').checked=!!data.dingtalk?.enabled;$('dingtalk-enabled').disabled=!data.dingtalk?.configured&&!data.dingtalk?.enabled;}
       if(refreshAfterControl){
         refreshAfterControl=false;clearTimeout(searchTimer);
         const followUp=refresh(true),request=serial;
@@ -665,6 +746,7 @@
   $('monitor-form').addEventListener('submit',event=>{event.preventDefault();void control('start',{morning_after_close:$('morning-after-close').value,after_close:$('after-close').value,screening_workers:Number($('daily-workers').value),monitor_workers:Number($('monitor-workers')?.value||16),interval_seconds:Number($('interval').value),daily_scope:$('daily-scope').value});});
   $('pause').addEventListener('click',()=>void control('pause'));
   $('dingtalk-enabled').addEventListener('change',()=>void control('dingtalk',{enabled:$('dingtalk-enabled').checked}));
+  document.addEventListener?.('notification-channels-saved',()=>void refresh(true));
   $('check-now').addEventListener('click',()=>void control('check'));
   $('reload').addEventListener('click',()=>void refresh());
   $('holding-risk-open')?.addEventListener('click',()=>{
@@ -674,6 +756,7 @@
   });
   $('signals-scope')?.addEventListener('change',()=>{pages.signals=1;void refresh(true);});
   for(const id of ['signals','pool','events']){
+    $(id+'-point-type')?.addEventListener('change',()=>{pages[id]=1;void refresh(true);});
     $(id+'-search').addEventListener('input',()=>{pages[id]=1;clearTimeout(searchTimer);searchTimer=setTimeout(()=>void refresh(true),180);});
     $(id+'-page-size').addEventListener('change',()=>{pages[id]=1;void refresh(true);});
     $(id+'-prev').addEventListener('click',()=>{pages[id]--;void refresh(true);if(phone)$(id+'-page')?.scrollIntoView?.({block:'center'});});
@@ -775,15 +858,18 @@
       const result=await api('/monitor/analytics');
       $('analytics-description').textContent=result.error||`自 ${date(result.since)} 起记录 ${result.events} 条事件（保留最近一年），其中持仓风险 ${result.risk_events||0} 条。以下统计范围为提醒窗口；历史未完整记录的预警不计入转确认比例。`;
       $('analytics-groups').replaceChildren(...(result.groups||[]).map(row=>{
-        const tr=node('tr');for(const value of [`${row.market} ${row.frequency}`,points[row.point_type]||row.point_type,row.samples,
-          row.warnings?`${row.warning_confirmed} 确认 / ${row.warning_invalidated} 失效 / ${row.warnings} 次预警`:'—',
+        const kind={buy_sell_point:'正式买卖点',native_point_preview:'未确认预警',consolidation_divergence:'盘整背驰'}[row.signal_type]||row.signal_type;
+        const label=[points[row.point_type]||row.point_type,kind].filter(Boolean).join(' · ');
+        const confirmed=Number.isFinite(row.warning_confirmed)?`${row.warning_confirmed} 确认`:'转确认未关联统计';
+        const tr=node('tr');for(const value of [`${row.market} ${row.frequency}`,label,row.samples,
+          row.warnings?`${confirmed} / ${row.warning_invalidated} 失效 / ${row.warnings} 次预警`:'—',
           `${row.window_exits} 退出 / ${row.window_stop_hits} 触发止损参考`,Number.isFinite(row.confirmation_delay_bars)?row.confirmation_delay_bars.toFixed(1)+' 根K线':'—'])tr.append(node('td',String(value)));return tr;
       }));
-      $('analytics-timings').replaceChildren(...(result.timings||[]).map(row=>node('p',`${row.market} ${row.frequency} · ${row.samples} 次成功计算 · 标的内部平均 ${(row.total_ms/1000).toFixed(2)} 秒：取数 ${(row.fetch_ms/1000).toFixed(2)} / 结构 ${(row.structure_ms/1000).toFixed(2)} / 核验 ${(row.validation_ms/1000).toFixed(2)} / 保存 ${(row.persistence_ms/1000).toFixed(2)}；复用 ${row.proofs_reused} 个确认记录`)));
+      $('analytics-timings').replaceChildren(...(result.timings||[]).map(row=>node('p',`${row.market} ${row.frequency} · ${row.samples} 次成功计算 · ${row.measurement_scope==='screening-period-task-v1'?'周期计算（含联动）':'旧口径：主周期'}平均 ${(row.total_ms/1000).toFixed(2)} 秒：取数 ${(row.fetch_ms/1000).toFixed(2)} / 结构 ${(row.structure_ms/1000).toFixed(2)} / 核验 ${(row.validation_ms/1000).toFixed(2)} / 保存 ${(row.persistence_ms/1000).toFixed(2)}${row.measurement_scope==='screening-period-task-v1'?' / 联动及其他处理 '+(row.coordination_ms/1000).toFixed(2):''}；主周期复用 ${row.proofs_reused} 条回放记录`)));
       const delivery=result.delivery;
       if(delivery){
         $('analytics-timings').append(node('p',delivery.error||`近 ${delivery.days} 天通知处理统计；以平台成功回执为准，文字、图文与独立图片分别统计。手机实际到达时间和历史记录缺少的阶段时间不作估算。`));
-        const labels={cutoff_to_sent:'行情截止至平台回执',schedule_wait:'截止至调度',worker_wait:'等待计算',fetch:'取数',compute:'计算与保存',result_wait:'结果读取',detection_to_sent:'发现至平台回执',queue:'发送排队',provider:'发送处理',queue_before_first_claim:'入队至首次处理',validation:'本收据末次发送前复核',validation_total:'本收据累计复核（不含拆分前批次）',send_preparation:'复核后发送准备',request:'平台请求'};
+        const labels={cutoff_to_sent:'实际行情截止至平台回执',task_cutoff_to_sent:'任务截止至平台回执',task_schedule_wait:'任务截止至调度',schedule_wait:'实际行情截止至调度',worker_wait:'等待计算',fetch:'取数',compute:'主周期计算与保存',coordination:'周期联动与任务处理',result_wait:'结果读取',detection_to_sent:'发现至平台回执',queue:'发送排队',provider:'发送处理',queue_before_first_claim:'入队至首次处理',validation:'本收据末次发送前复核',validation_total:'本收据累计复核（不含拆分前批次）',send_preparation:'复核后发送准备',request:'平台请求'};
         for(const row of delivery.groups||[]){
           const parts=Object.entries(row.measures||{}).map(([name,v])=>`${labels[name]||name} ${v.average_seconds.toFixed(2)} 秒（P95 ${v.p95_seconds.toFixed(2)}，${v.samples} 次）`);
           $('analytics-timings').append(node('p',`${row.market} ${row.frequency} · ${row.kind==='combined'?'图文':row.kind==='chart'?'图片':'文字'} · ${row.samples} 条：${parts.join('；')}`));
@@ -826,9 +912,10 @@
       ++inbox.detailRequest;inbox.detailController?.abort();
       syncNotificationSelection();
       $('notification-detail-content').replaceChildren(node('p','选择一条通知查看详情。','notification-empty'));
+      resetNotificationChart();
       void refreshNotifications(true);
     };
-    for(const id of ['hours','status','kind','frequency','scope'])$('notifications-'+id).addEventListener('change',filterChanged);
+    for(const id of ['hours','status','kind','frequency','scope','point-type'])$('notifications-'+id)?.addEventListener('change',filterChanged);
     $('notifications-search').addEventListener('input',()=>{
       inbox.searchPending=true;notificationPager();
       clearTimeout(inbox.searchTimer);inbox.searchTimer=setTimeout(filterChanged,200);

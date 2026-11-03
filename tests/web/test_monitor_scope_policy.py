@@ -180,7 +180,7 @@ def test_summary_stays_compact_and_classification_counts_do_not_change_when_due(
     due = minute_scope_summary(value, REVISION, {KEY: CUTOFF + 300})
     for summary in (waiting, due):
         assert {k:v for k,v in summary.items() if k != 'per_symbol'} == {
-            'frequency': '1m', 'foreground': 0, 'background': 1, 'interval_seconds': 300, 'total': 1}
+            'frequency': '1m', 'foreground': 0, 'background': 1, 'auxiliary': 0, 'interval_seconds': 300, 'total': 1}
         assert set(summary['per_symbol']) == {KEY}
         assert 'signals' not in summary['per_symbol'][KEY]
     assert waiting['per_symbol'][KEY]['due'] is False

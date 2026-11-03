@@ -226,7 +226,7 @@ class USmartHistoryCache:
                              and 0 <= now-meta["fetched_at"]
                              and floor >= meta["end_floor"])
                     if valid and floor == meta["end_floor"] and now-meta["fetched_at"] < self.coalesce_seconds:
-                        return _clean(cached.loc[(cached.date>=end-get_lookback_timedelta(frequency))
+                        return _clean(cached.loc[(cached.date>=end-get_lookback_timedelta(frequency, market="us"))
                                                  & (cached.date<=end)].reset_index(drop=True))
                 except (KeyError,TypeError,ValueError):
                     valid = False
@@ -247,7 +247,7 @@ class USmartHistoryCache:
                             clean_tail = _clean(tail)
                             result = pd.concat([keep,clean_tail],ignore_index=True)
                             result.attrs = dict(clean_tail.attrs)
-                            result = result.loc[(result.date>=end-get_lookback_timedelta(frequency)) & (result.date<=end)]
+                            result = result.loc[(result.date>=end-get_lookback_timedelta(frequency, market="us")) & (result.date<=end)]
                             limit = (meta["base_limit"]-int(tail.attrs.get(FETCH,{}).get("future_rows",0))
                                      if meta.get("window_capped") else meta["row_limit"])
                             if meta.get("window_capped") and len(result)<limit:

@@ -1,14 +1,16 @@
 """Persist a stopped worker's terminal state before applying run retention."""
 
-import json
 import math
 import os
-import threading
 import time
 
+from chanlun.persistence.file_lock import interprocess_file_lock, InterprocessLockTimeout
+from chanlun.screening.state_io import read_state_json
 from chanlun.screening.worker_lifetime import process_identity
 
-_LOCK = threading.Lock()
+def transition_lock(directory, *, timeout_seconds=15):
+    """Serialize interruption decisions with admission of a replacement owner."""
+    return interprocess_file_lock(directory / 'lifecycle.lock', timeout_seconds=timeout_seconds)
 
 
 def pid_alive(pid):
@@ -76,21 +78,29 @@ def reconcile_interrupted(directory, state, *, now=None, alive=None):
         or owner_alive() is not False
     ):
         return state
-    with _LOCK:
-        path = directory / "status.json"
-        current = json.loads(path.read_text(encoding="utf-8"))
-        # A completion/heartbeat published while checking the process wins.
-        if current != state:
-            return current
-        if owner_alive() is not False:
-            return current
-        interrupted = {
-            **state,
-            "status": "interrupted",
-            "interruption_detected_at": stamp,
-            "error": "选股工作进程已退出，可重新运行",
-        }
-        from chanlun.screening.runner import write_json
-
-        write_json(path, interrupted, durable=True)
-        return interrupted
+    path = directory / 'status.json'
+    try:
+        with transition_lock(directory, timeout_seconds=.1):
+            current = read_state_json(path)
+            if current != state:
+                return current
+            if owner_alive() is not False:
+                return current
+            # The process probe may itself overlap a final completion receipt.
+            # Re-read after it; a new owner also needs the same transition lock.
+            current = read_state_json(path)
+            if current != state:
+                return current
+            interrupted = {
+                **state,
+                'status': 'interrupted',
+                'interruption_detected_at': stamp,
+                'error': '选股工作进程已退出，可重新运行',
+            }
+            from chanlun.screening.runner import write_json
+            write_json(path, interrupted, durable=True)
+            return interrupted
+    except InterprocessLockTimeout:
+        # Another transition owns the task. A status read must not bypass it
+        # or infer an interruption from contention alone.
+        return read_state_json(path)

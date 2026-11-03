@@ -35,7 +35,7 @@ def old_rule_record(frozen_native_run, version=3):
     return manager, directory, record
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6])
 def test_verified_old_native_rule_recovers_only_symbol_membership_and_cutoff(
     frozen_native_run, version,
 ):

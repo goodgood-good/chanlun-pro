@@ -680,6 +680,12 @@
                     return false;
                 indicators[name] = values.length ? values.map(value => value ?? NaN) : times.map(() => NaN);
             }
+            for (const name of ['higher_macd_raw_dif','higher_macd_raw_dea','higher_macd_raw_hist']) {
+                const values = patch[name] || [];
+                if (!Array.isArray(values) || values.length && values.length !== times.length)
+                    return false;
+                indicators[name] = times.map((_, i) => values[i] ?? NaN);
+            }
             const next = {
                 ...current, ...indicators,
                 fxs: patch.fxs, bis: patch.bis, xds: patch.xds,
@@ -794,12 +800,16 @@
                     const align = (oldValues = [], newValues = []) => indices.map(i => (i < 0 ? oldValues[-i - 1] : newValues[i]) ?? NaN);
                     return {
                         times,
+                        chart_times: times.map(t => chartBarTimeSeconds(t / 1000, resolution, symbol, barTimeLabel)),
                         macd_dif: align(existing?.macd_dif, macd_dif),
                         macd_dea: align(existing?.macd_dea, macd_dea),
                         macd_hist: align(existing?.macd_hist, macd_hist),
                         higher_macd_dif: align(existing?.higher_macd_dif, higher_macd_dif),
                         higher_macd_dea: align(existing?.higher_macd_dea, higher_macd_dea),
                         higher_macd_hist: align(existing?.higher_macd_hist, higher_macd_hist),
+                        higher_macd_raw_dif: align(existing?.higher_macd_raw_dif, fullResponse.higher_macd_raw_dif || []),
+                        higher_macd_raw_dea: align(existing?.higher_macd_raw_dea, fullResponse.higher_macd_raw_dea || []),
+                        higher_macd_raw_hist: align(existing?.higher_macd_raw_hist, fullResponse.higher_macd_raw_hist || []),
                     };
                 };
                 const generationIsCurrent = requestGeneration === undefined ||

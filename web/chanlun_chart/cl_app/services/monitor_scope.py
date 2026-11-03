@@ -1,4 +1,4 @@
-"""Cadence only: verified negative automatic 1m candidates use five-minute checks.
+"""Independent holding/trade scope and legacy negative-minute cadence.
 
 This module neither changes pool membership nor calculates/filters signals.
 All clocks are existing market closed-bar timestamps supplied by the caller.
@@ -6,6 +6,25 @@ All clocks are existing market closed-bar timestamps supplied by the caller.
 
 MINUTE_BACKGROUND_SECONDS = 300
 CHECKPOINTS = 'minute_cadence_checkpoints'
+
+
+def trade_only_monitoring(state, key):
+    """Only current holding membership may narrow an independent monitor job."""
+    from chanlun.screening.timeframe_policy import enabled
+    settings = (state.get('seed') or {}).get('settings', {})
+    return (enabled(settings) and state.get('holding_source_current') is True
+            and key not in state.get('holding_symbols', []))
+
+
+def independent_monitor_periods(state, key):
+    """5m still calculates its own nested 1m and background 30m evidence."""
+    from .monitor_exclusions import quote_only_symbols
+    if key in quote_only_symbols():
+        return set()
+    periods = set((state.get('seed') or {}).get('settings', {}).get('frequencies', []))
+    periods.update(plan['frequency'] for plan in state.get('holding_risk_plans', {}).values()
+                   if isinstance(plan, dict) and plan.get('active') and _symbol(plan) == key)
+    return periods & {'5m'} if trade_only_monitoring(state, key) else periods
 
 
 def _symbol(row):
@@ -102,6 +121,9 @@ def minute_cadence(state, key, revision, closed_at, *, manual_override=False,
                 'last_check_cutoff': cutoff, 'next_due_at': None,
                 'clock_known': type(closed_at) is int}
 
+    if trade_only_monitoring(state, key):
+        return {**realtime('trade_confirmation_only'), 'classification': 'auxiliary',
+                'eligible': False, 'due': False, 'cadence_seconds': None}
     if manual_override:
         return realtime('explicit_check')
     if notification_recheck:
@@ -183,6 +205,7 @@ def minute_scope_summary(state, revision, closed_at_by_symbol=None):
             value.update(due=None, eligible=True)
         per_symbol[key] = value
     background = sum(value['cold'] for value in per_symbol.values())
-    return {'frequency': '1m', 'foreground': len(per_symbol) - background,
+    auxiliary = sum(value['classification'] == 'auxiliary' for value in per_symbol.values())
+    return {'frequency': '1m', 'foreground': len(per_symbol) - background - auxiliary, 'auxiliary': auxiliary,
             'background': background, 'interval_seconds': MINUTE_BACKGROUND_SECONDS,
             'total': len(per_symbol), 'per_symbol': per_symbol}

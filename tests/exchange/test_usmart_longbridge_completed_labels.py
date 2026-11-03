@@ -189,9 +189,9 @@ def _canonical_head_rows(delegated):
     # beginning. Include prices there so blindly reusing the first fetch fails.
     cutoff = pd.Timestamp("2026-09-04T20:00:00Z")
     observed = pd.Timestamp("2026-09-06T12:00:00Z")
-    start = cutoff - get_lookback_timedelta("1m")
+    start = cutoff - get_lookback_timedelta("1m", market="us")
     dates = [start - pd.Timedelta(minutes=1), start, start + pd.Timedelta(minutes=1),
-             observed - get_lookback_timedelta("1m"), cutoff - pd.Timedelta(minutes=1)]
+             observed - get_lookback_timedelta("1m", market="us"), cutoff - pd.Timedelta(minutes=1)]
     frame = delegated.frames["1m"].iloc[:len(dates)].copy()
     frame["date"] = dates
     delegated.frames["1m"] = frame
@@ -203,8 +203,8 @@ def test_canonical_query_supplements_only_missing_head_and_matches_closed_query(
     result = delegated.ex.canonical_closed_minute_history("AAPL.US", end_date=observed.isoformat())
     requests = list(delegated.requests)
     assert requests[-1][1] == start
-    assert requests[-1][2] == observed - pd.Timedelta(days=30)
-    assert len(requests) == 4  # Three original 10-day slices and one head supplement.
+    assert requests[-1][2] == observed - pd.Timedelta(days=60)
+    assert len(requests) == 7  # Six original 10-day slices and one head supplement.
     assert result.iloc[0].date == start + pd.Timedelta(minutes=1)
     assert result.iloc[-1].date == cutoff
     assert len(result) == 4
@@ -220,14 +220,14 @@ def test_canonical_query_reuses_full_provider_page_when_it_already_covers_head(d
     original = delegated.cq._fetch_segment_data
 
     def full_page(code, period, adjust, end, lower, priority="interactive"):
-        if lower == observed - pd.Timedelta(days=30):
+        if lower == observed - pd.Timedelta(days=60):
             # A complete SDK page can extend before the requested lower bound.
             lower = start - pd.Timedelta(minutes=1)
         return original(code, period, adjust, end, lower, priority)
 
     monkeypatch.setattr(delegated.cq, "_fetch_segment_data", full_page)
     result = delegated.ex.canonical_closed_minute_history("AAPL.US", end_date=observed.isoformat())
-    assert len(delegated.requests) == 3
+    assert len(delegated.requests) == 6
     assert len(result) == 4
     assert result.iloc[0].date == start + pd.Timedelta(minutes=1)
     assert result.iloc[-1].date == cutoff

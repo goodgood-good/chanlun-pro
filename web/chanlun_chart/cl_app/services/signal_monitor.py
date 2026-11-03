@@ -13,6 +13,7 @@ from datetime import datetime
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import shutil
@@ -30,17 +31,20 @@ from chanlun.screening.markets import closed_bar_cutoff, holding_symbols, watchl
 from .screening import ScreeningManager, MonitorResultsReadError, manager as screening_manager, read_state_json, validate_settings, all_periods_failed
 from .dingtalk_notifications import signal_status_key, signal_reference
 from .notification_handoff import retain as retain_notifications, pending_events, evidence_references
-from .notification_freshness import notification_deadline, notification_is_live, stamp_notification
+from .notification_freshness import notification_deadline, notification_is_live, stamp_notification, NOTIFICATION_LIFETIME
 from .notification_text import REASONS, price as notification_price
 from .monitor_view import validate_page_options
 from .notification_policy import (
     default_point_notifications, normalize_point_notifications,
     next_point_notification_since, point_notification_decision,
+    trade_notification_rejection,
 )
 from .screening_pool_recovery import independent_members, pending_members, suspend_pending, resolve_pending
-from .monitor_scope import build_minute_scope_index, minute_cadence, record_minute_checkpoint
+from .monitor_scope import build_minute_scope_index, minute_cadence, record_minute_checkpoint, independent_monitor_periods
 from . import monitor_requests
-from .monitor_fairness import plan_batch, task_lane, SERVICE_PATTERN, remember_pending, record_costs, service_pressure
+from .monitor_exclusions import quote_only_symbols
+from .monitor_fairness import plan_batch, task_lane, SERVICE_PATTERN, remember_pending, record_costs, service_pressure, live_batch_waves
+from .monitor_maintenance import prune_diagnostics, recover_warning_rechecks, basis_change_exit, notification_priority_periods, warning_recheck_symbols
 
 
 ACTIVE = {"starting", "running"}
@@ -52,7 +56,6 @@ MONITOR_READ_ATTEMPTS = 3
 MONITOR_LIVE_SLICE_SECONDS = 30
 MONITOR_HOLDING_WAIT_SECONDS = 5
 MORNING_AFTER_CLOSE = "11:35"
-MORNING_BUDGET_SECONDS = 20 * 60
 LOG = logging.getLogger(__name__)
 _PRIVATE_SNAPSHOT_FIELDS = frozenset({
     'point_notification_since',
@@ -123,8 +126,7 @@ def _bound_risk_periods(state, key):
 
 
 def _monitor_periods(state, key):
-    return (set((state.get('seed') or {}).get('settings',{}).get('frequencies',[]))
-            | _bound_risk_periods(state, key))
+    return independent_monitor_periods(state, key)-set(state.get('suspended_periods',{}).get(key,{}))
 
 
 def _monitor_frequency(state, symbol, default='5m'):
@@ -142,6 +144,12 @@ def _available_monitor_periods(state, key, revision):
 def monitor_settings(state, source_settings):
     """Apply explicit monitoring periods without rewriting saved scan results."""
     settings = deepcopy(source_settings)
+    from chanlun.screening.timeframe_policy import enabled, LIVE_PERIODS, POLICY
+    if enabled(settings) or enabled(state.get('settings', {}).get('screening', {})):
+        settings['timeframe_policy'] = POLICY
+        settings['frequencies'] = list(LIVE_PERIODS)
+        settings.pop('minimum_operating_frequency', None)
+        return settings
     if state.get('monitor_frequencies'):
         settings['frequencies'] = list(state['monitor_frequencies'])
         if settings.get('minimum_operating_frequency') and settings['frequencies'] != [settings['minimum_operating_frequency']]:
@@ -152,6 +160,12 @@ def monitor_settings(state, source_settings):
 def configure_periods(state, frequencies, stamp):
     """Persist a period change and establish notification cutoffs for additions."""
     base = deepcopy(state['settings']['screening'])
+    from chanlun.screening.timeframe_policy import enabled, LIVE_PERIODS
+    if enabled(base):
+        requested = {**base, 'frequencies': frequencies}
+        requested.pop('minimum_operating_frequency', None)
+        validate_settings(requested)
+        frequencies = list(LIVE_PERIODS)
     base['frequencies'] = frequencies
     if base.get('minimum_operating_frequency') and frequencies != [base['minimum_operating_frequency']]:
         base.pop('minimum_operating_frequency')
@@ -237,31 +251,48 @@ def _clear_period_retries(state, key, periods):
     _store_period_retries(state, key, records)
 
 
+def _signal_identity(row):
+    identity = json.dumps([row.get('market', 'a'), row['code'], row['frequency'], row['point']['point_id']])
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
 def _signal(row):
     point = row["point"]
     from chanlun.core.strict_structure.native_point_preview import is_point_preview
     nested = row.get("nested_confirmation") or {}
     following = row.get("confirmation_segment") or {}
     witness = point.get('preview_witness') or {}
-    identity = json.dumps([row.get("market", "a"), row["code"], row["frequency"], point["point_id"]])
     return {
-        "id": hashlib.sha256(identity.encode()).hexdigest(),
+        "id": _signal_identity(row),
         "code": row["code"], "market": row.get("market", "a"), "name": row.get("name", row["code"]),
         "frequency": row["frequency"], "point_type": point["point_type"],
+        "timeframe_policy": row.get('timeframe_policy'),
+        "operating_role": row.get('operating_role'),
+        "background_30m": deepcopy(row.get('background_30m')),
+        "nested_confirmation": deepcopy(row.get('nested_confirmation')),
+        "confirmation_evidence": deepcopy(row.get('confirmation_evidence')),
         "point_id": point["point_id"],
         **({'preview_key':point['preview_key']} if point.get('preview_key') else {}),
         **({'signal_type':'native_point_preview','formal_point_issued':False} if is_point_preview(point) else {}),
         **({key:witness.get(key) for key in ('preview_trigger','estimate_factor','estimated_area_c',
                                             'macd_area_a','macd_area_c')} if is_point_preview(point) else {}),
         'price_basis_revision': point.get('price_basis_revision'),
+        'strength_source': point.get('strength_source'),
+        'strength_frequency': (point.get('divergence') or witness).get('strength_frequency'),
         'confirmation_delay_bars': row.get('confirmation_delay_bars'),
         "evidence_scope": point.get("evidence_scope"),
-        "center_ordinal": point.get("center_ordinal"),
+        "center_ordinal": ((row.get('center_sequence') or {}).get('ordinal')
+                           if point.get('evidence_scope') == 'native_center_signal' else point.get('center_ordinal')),
+        'center_sequence': deepcopy(row.get('center_sequence')),
         "stage": row.get("selection_status", point["status"]),
         "point_status": point["status"],
+        "point_available_at": point.get("available_at"),
         "point_confirmed_at": point.get("confirmed_at"),
         "selection_status": row.get("selection_status", point["status"]),
         "lower_confirmation_state": nested.get("state"),
+        'lower_check_state': nested.get('check_state'),
+        'lower_assessment': deepcopy(nested.get('assessment')),
+        'lower_evidence_type': nested.get('evidence_type'),
         "lower_frequency": nested.get("frequency"),
         "following_segment_state": following.get("state"),
         "following_segment_direction": (following.get("segment") or {}).get("direction"),
@@ -269,7 +300,8 @@ def _signal(row):
         "anchor_at": point.get("anchor_at"), "center_id": point.get("center_id"),
         "latest_close": row.get("latest_close"), "structure_price_quantum": row.get("structure_price_quantum"),
         "exit_plan": deepcopy(row.get("exit_plan")), "evidence": deepcopy(row.get("evidence")),
-        "available_at": point.get("available_at"),
+        "available_at": (row.get('selection_available_at', point.get("available_at"))
+                         if row.get('timeframe_policy') else point.get('available_at')),
         "selection_available_at": row.get("selection_available_at", point.get("available_at")),
         "source_closed_at": row.get("source_closed_at"),
         "missing_conditions": point.get("missing_conditions", []),
@@ -301,6 +333,7 @@ def _consolidation_signal(row):
         "available_at": alert["available_at"], "point_confirmed_at": alert["confirmed_at"],
         "source_closed_at": row.get("source_closed_at"), "center_id": alert["center_id"],
         "macd_area_a": alert["macd_area_a"], "macd_area_c": alert["macd_area_c"],
+        "strength_source": alert.get('strength_source'), "strength_frequency": alert.get('strength_frequency'),
         "macd_area_ratio": alert["macd_area_ratio"], "core_position": alert["core_position"],
         "comparison_form": alert["comparison_form"], "holding": True,
         "estimated_area_c": alert.get("estimated_area_c"),
@@ -366,6 +399,7 @@ class SignalMonitor:
         self._thread = None
         self._state = None
         self._control_version = 0
+        self._source_prefetch_control = None
         self._compute_budget = compute_budget
         self._publish_compute_budget = root is None or compute_budget is not None
         self._compute_budget_owner = uuid4().hex
@@ -376,7 +410,7 @@ class SignalMonitor:
         self._notification_rechecks = {}
         self._notification_retry_after = {}
         from .notification_validation import DependencyReads
-        self._notification_dependency_reads = DependencyReads()
+        self._notification_dependency_reads = DependencyReads(wake=self._wake_notification_validation)
         self._startup_retries = {}
         self._notifications = notifications
         self._analytics = None
@@ -392,6 +426,7 @@ class SignalMonitor:
         self._screening_read_attempts = 0
         from .monitor_incremental import CommittedReader
         self._incremental_reader = CommittedReader(self._wake.set)
+        self._monitor_result_reader = CommittedReader(self._wake.set)
         self._risk_view_cache = None
         from .screening_maintenance import InputRetention
         self._input_retention = InputRetention()
@@ -446,7 +481,13 @@ class SignalMonitor:
 
     def _validate_notification_events(self, events):
         """Yield slow dependencies; only current state may authorize sending."""
-        from .notification_validation import validation_deadline, remaining, holding_lane, DeferredEvents, state_epoch
+        from .notification_validation import validation_deadline, remaining, holding_lane, DeferredEvents, state_epoch, ValidatedEvents
+        quote_only = quote_only_symbols()
+        if events and all(f"{event.get('market', 'a')}:{event.get('code', '')}" in quote_only for event in events):
+            rejected = ValidatedEvents()
+            for event in events:
+                rejected.reject(event, 'OUTSIDE_MONITOR_SCOPE')
+            return rejected, []
         deadline = validation_deadline()
         # Loading a cold state can perform recovery I/O. Runtime startup owns
         # that work; a queued notification waits instead of doing it here.
@@ -545,22 +586,35 @@ class SignalMonitor:
         risk_plans = state.get('holding_risk_plans', {})
         recovering_run = (state.get('active_monitor_run')
                           if state.get('active_monitor_run') != state.get('processed_run') else None)
-        valid, pending = [], []
+        from .notification_validation import ValidatedEvents
+        from .notification_freshness import notification_rejection
+        valid, pending = ValidatedEvents(), []
         for event in events:
             if not notification_is_live(event, self.now().timestamp()):
+                valid.reject(event,notification_rejection(event,self.now().timestamp()))
+                continue
+            key = _symbol_key(event)
+            if key in quote_only_symbols():
+                valid.reject(event, 'OUTSIDE_MONITOR_SCOPE')
                 continue
             policy_decision = point_notification_decision(state, event, fresh_holdings)
             if policy_decision == 'deny':
+                valid.reject(event,'NOTIFICATION_POLICY_DISABLED')
                 continue
             if policy_decision == 'pending':
                 pending.append(event)
                 continue
-            key = _symbol_key(event)
             frequency = event.get("frequency")
+            from chanlun.screening.timeframe_policy import enabled
+            rejection = trade_notification_rejection(event, policy_enabled=enabled(seed.get('settings', {})))
+            if rejection:
+                valid.reject(event, rejection)
+                continue
             awaiting_commit = bool(recovering_run and event.get('run_id') == recovering_run)
             holding_only = (event.get('signal_type') in {'holding_risk', 'consolidation_divergence'}
                             or event.get('point_type') not in seed.get('settings', {}).get('point_types', []))
             if holding_only and holding_current and key not in state['holding_symbols']:
+                valid.reject(event,'HOLDING_REMOVED')
                 continue
             if event.get('signal_type') == 'holding_risk':
                 if fresh_holdings is None or not holding_current:
@@ -575,15 +629,18 @@ class SignalMonitor:
                     pending.append(event)
                 continue
             if key not in seed.get("codes", []) or frequency not in seed.get("settings", {}).get("frequencies", []):
+                valid.reject(event,'OUTSIDE_MONITOR_SCOPE')
                 continue
             admission_at = event.get('recorded_at') if event.get('signal_type') == 'native_point_preview' else event.get('available_at')
             if (admission_at or 0) < max(
                     state.get('notification_frequency_since', {}).get(frequency, 0),
                     state.get('notification_symbol_since', {}).get(key, 0)):
+                valid.reject(event,'BEFORE_NOTIFICATION_ENABLED')
                 continue
             consolidation = event.get("signal_type") == "consolidation_divergence"
             if consolidation:
                 if fresh_holdings is not None and key not in fresh_holdings:
+                    valid.reject(event,'HOLDING_REMOVED')
                     continue
                 if fresh_holdings is None or not holding_current:
                     pending.append(event)
@@ -593,6 +650,7 @@ class SignalMonitor:
                 if event.get('stage') == 'warning':
                     since = max(since, state.get('consolidation_warning_enabled_at', 0))
                 if (event.get('available_at') or 0) < since:
+                    valid.reject(event,'BEFORE_NOTIFICATION_ENABLED')
                     continue
             elif event.get("point_type") not in seed.get("settings", {}).get("point_types", []):
                 if event.get('point_type') not in POINT_TYPES:
@@ -636,6 +694,7 @@ class SignalMonitor:
                     or known.get('notification_authorized') is False
                     or known.get('notification_state') not in (None, signal_status_key(event)))
                 if negative or superseded:
+                    valid.reject(event,'SIGNAL_EXIT_CONFIRMED' if negative else 'SIGNAL_SUPERSEDED')
                     continue
                 if expected is not None:
                     self._request_notification_recheck(event, expected, revision)
@@ -651,6 +710,8 @@ class SignalMonitor:
                     or not legacy_confirmation and signal_status_key(item) != signal_status_key(event)):
                 if awaiting_commit:
                     pending.append(event)
+                else:
+                    valid.reject(event,'SIGNAL_STATE_CHANGED')
                 continue
             check = checks.get(f"{key}:{frequency}")
             expected = expected_cutoffs.get((key, frequency))
@@ -664,7 +725,21 @@ class SignalMonitor:
                 pending.append(event)
                 continue
             if not consolidation and item["id"] not in check.get("identities", []):
+                valid.reject(event,'SIGNAL_IDENTITY_REJECTED')
                 continue
+            if (item.get('point_type') == '3buy' and item.get('evidence_scope') == 'native_center_signal'
+                    and item.get('stage') != 'invalidated'):
+                from .first_center_sequence import first_verified, SCHEMA
+                sequence = item.get('center_sequence')
+                if (not first_verified(sequence) or sequence.get('direction') != 'up'
+                        or sequence.get('center_id') != item.get('center_id')
+                        or sequence.get('known_at') != item.get('point_available_at', item.get('available_at'))):
+                    if not isinstance(sequence, dict) or sequence.get('schema') != SCHEMA:
+                        self._request_notification_recheck(event, expected, revision)
+                        pending.append(event)
+                    else:
+                        valid.reject(event,'FIRST_CENTER_POLICY_REJECTED')
+                    continue
             delivered = deepcopy({**event, **item})
             if fresh_holdings is not None:
                 delivered['holding'] = key in fresh_holdings
@@ -687,7 +762,6 @@ class SignalMonitor:
 
     def _pending_notification_symbols(self, state, now):
         pool=set((state.get('seed') or {}).get('codes',[]))
-        periods=set((state.get('seed') or {}).get('settings',{}).get('frequencies',[]))
         for key, request in list(self._notification_rechecks.items()):
             symbol, frequency=key
             check=state['selection_checks'].get(f'{symbol}:{frequency}',{})
@@ -700,7 +774,7 @@ class SignalMonitor:
                 complete = all(identity in state['signals']
                                and state['signals'][identity].get('source_closed_at') == check.get('cutoff')
                                for identity in identities)
-            if symbol not in pool or frequency not in periods or request['expires']<=now or complete:
+            if symbol not in pool or frequency not in _monitor_periods(state, symbol) or request['expires']<=now or complete:
                 self._notification_rechecks.pop(key,None)
         urgent={symbol for symbol,_ in self._notification_rechecks}
         self._notification_retry_after={key:value for key,value in self._notification_retry_after.items() if key in urgent}
@@ -713,7 +787,7 @@ class SignalMonitor:
             if path.is_file():
                 try:
                     self._state = read_state_json(path)
-                except (json.JSONDecodeError, UnicodeError):
+                except (ValueError, UnicodeError):
                     backup = self.root / "state.backup.json"
                     self._state = read_state_json(backup)
                     if not isinstance(self._state, dict) or not {"enabled", "settings", "seed", "events"}.issubset(self._state):
@@ -766,8 +840,11 @@ class SignalMonitor:
             self._state.setdefault('point_notifications', default_point_notifications())
             self._state.setdefault('point_notification_since', {})
             self._state.setdefault('point_notification_version', 0)
+            policy_migrated = False
             try:
-                self._state['point_notifications'] = normalize_point_notifications(self._state['point_notifications'])
+                saved_policy = self._state['point_notifications']
+                policy = normalize_point_notifications(saved_policy, legacy_ordinary_sells=True)
+                self._state['point_notifications'] = policy
                 if (not isinstance(self._state['point_notification_since'], dict)
                         or any(not isinstance(key, str) or type(value) not in (int, float)
                                or not math.isfinite(value) or value < 0
@@ -775,8 +852,18 @@ class SignalMonitor:
                         or type(self._state['point_notification_version']) is not int
                         or self._state['point_notification_version'] < 0):
                     raise ValueError('通知策略版本或起点无效')
+                from .notification_policy import BUY_POINTS
+                # Remove only ordinary sell delivery; preserve selected buys,
+                # holding choices and activation windows across the upgrade.
+                upgraded = {**policy, 'others': [point for point in policy['others'] if point in BUY_POINTS]}
+                if 'other_frequencies' not in saved_policy or upgraded != policy:
+                    self._state.update(point_notifications=upgraded,
+                        point_notification_since=next_point_notification_since(policy, upgraded,
+                            self._state['point_notification_since'], self.now().timestamp()),
+                        point_notification_version=self._state['point_notification_version'] + 1)
+                    policy_migrated = True
             except ValueError:
-                self._state['point_notifications'] = {'frequencies': [], 'holdings': [], 'others': []}
+                self._state['point_notifications'] = {key: [] for key in default_point_notifications()}
                 self._state['point_notification_since'] = {}
                 self._state['point_notification_version'] = 0
                 self._state['point_notification_error'] = '已暂停买卖点通知：保存的通知条件无效，请重新设置。'
@@ -784,6 +871,33 @@ class SignalMonitor:
             self._state.setdefault("consolidation_warning_enabled_at", int(self.now().timestamp()))
             self._state["settings"].setdefault("morning_after_close", MORNING_AFTER_CLOSE)
             self._state['settings'].setdefault('monitor_workers',MAX_WORKERS)
+            from chanlun.screening.timeframe_policy import POLICY, LIVE_PERIODS, SCAN_PERIODS
+            if self._state['settings']['screening'].get('timeframe_policy') != POLICY:
+                base = {**self._state['settings']['screening'], 'timeframe_policy': POLICY,
+                        'frequencies': list(SCAN_PERIODS)}
+                base.pop('minimum_operating_frequency', None)
+                self._state['settings']['screening'] = validate_settings(base)
+                seed = self._state.get('seed') or {}
+                if seed:
+                    seed['settings'] = monitor_settings(self._state, {**seed['settings'], 'timeframe_policy': POLICY})
+                # Former independent 5m/30m points await the new joint proof.
+                # Existing watch/holding membership and notification switches survive.
+                for name in ('signals', 'unverified_signals', 'pending_notifications'):
+                    values = self._state.get(name, {})
+                    self._state[name] = {key: value for key, value in values.items()
+                        if value.get('point_type') not in POINT_TYPES or value.get('frequency') == '1m'}
+                self._state['force'] = True
+                self._state['next_check_at'] = 0
+                self._state['timeframe_policy_updated_at'] = self.now().timestamp()
+                self._state['monitor_frequencies'] = list(LIVE_PERIODS)
+                now = self.now()
+                clock = now.strftime('%H:%M')
+                phase = ('afternoon' if clock >= self._state['settings']['after_close'] else
+                         'morning' if self._state['settings']['morning_after_close'] <= clock < '15:00' else None)
+                daily = self._state.get('daily') or {}
+                if phase and daily.get('session') == now.date().isoformat() and daily.get(phase):
+                    daily[phase].update(status='updating', attempts=0, retry_at=0,
+                                        refresh_reason='timeframe_policy_updated')
             if self._state.get('compute_budget_version') != 1:
                 # Upgrade the old default once; smaller explicit budgets survive.
                 if self._state['settings'].get('screening',{}).get('workers') == 12:
@@ -799,15 +913,30 @@ class SignalMonitor:
             (self._state.get("seed") or {}).pop("external_notifications", None)
             if 'pending_notifications' not in self._state:
                 retain_notifications(self._state,self.now().timestamp())
+            maintenance = recover_warning_rechecks(self._state, _clear_period_retries)
+            maintenance |= prune_diagnostics(self._state)
+            if policy_migrated or maintenance:
+                self._save()
         return self._state
 
     def _save(self):
         try:
-            write_json(self.root / "state.json", self._state, durable=True)
-            write_json(self.root / "state.backup.json", self._state, durable=True)
-        except OSError:
+            prune_diagnostics(self._state)
+            from chanlun.screening.source_prefetch import control_value, publish_control
+            control = control_value(self._state, self._control_version,
+                                    os.environ.get('CHANLUN_BUILD_REVISION'))
+            # Revoke stale source hints before publishing a changed scope.
+            # Ordinary signal commits leave this small control file untouched.
+            self._source_prefetch_control = publish_control(
+                self.root / 'runs', control, getattr(self, '_source_prefetch_control', None))
+            from chanlun.persistence.state_snapshot import compact_state
+            snapshot=compact_state(self._state)
+            write_json(self.root / "state.json", snapshot, durable=True)
+            write_json(self.root / "state.backup.json", snapshot, durable=True)
+        except Exception:
             # Subsequent readers must reload what actually reached disk, never
-            # publish events left only in memory after a failed commit.
+            # publish events left only in memory after a failed commit. This
+            # also covers encoding/compression failure before either write.
             self._state = None
             raise
 
@@ -822,11 +951,11 @@ class SignalMonitor:
             with self._lock:
                 seed=self._load().get('seed') or {}
                 identities=[(s.get('market','a'),s['code']) for s in seed.get('symbols',[])]
-                periods=tuple(seed.get('settings',{}).get('frequencies',[]))
+                periods={f'{market}:{code}': _monitor_periods(self._load(), f'{market}:{code}') for market,code in identities}
             observed=self.now()
             # Calendar work must not hold the monitor's shared state lock.
             for market, code in identities:
-                for period in periods:
+                for period in periods[f'{market}:{code}']:
                     try:value=closed_bar_cutoff(market,code,observed,period)
                     except (ValueError,OSError,TypeError):value=None
                     expected_cutoffs[f'{market}:{code}:{period}']=value
@@ -1063,6 +1192,12 @@ class SignalMonitor:
         with self._lock:
             return bool(self._load().get("dingtalk_enabled"))
 
+    def _wake_notification_validation(self):
+        box = self._notifications
+        wake = getattr(box,'wake_validation',None)
+        if callable(wake):
+            wake()
+
     def selection_overlay(self, source, revision):
         with self._lock:
             state = self._load()
@@ -1096,7 +1231,9 @@ class SignalMonitor:
     def _notification_baseline(check):
         previous=check.get('notification_baseline') or check
         if previous.get('revision') and type(previous.get('cutoff')) is int:
-            return {'revision':previous['revision'],'cutoff':previous['cutoff']}
+            return {'revision':previous['revision'],'cutoff':previous['cutoff'],
+                    **({'price_basis_revision':previous['price_basis_revision']}
+                       if previous.get('price_basis_revision') else {})}
         return None
 
     @staticmethod
@@ -1105,7 +1242,16 @@ class SignalMonitor:
         previous = state.get('seed') or {}
         revision = result.get('current_source_revision') or (result.get('source_revision')
                     if result.get('source_current') is True else None)
-        ignored = {'scope','codes','symbols','workers','exclude_st'}
+        ignored = {'scope','codes','symbols','workers','exclude_st','watch_groups'}
+        from chanlun.screening.timeframe_policy import POLICY, SCAN_PERIODS, LIVE_PERIODS, enabled as roles_enabled
+        scan_profiles = (set(SCAN_PERIODS), set(SCAN_PERIODS) | {'1m'}, {'5m', '30m'}, set(LIVE_PERIODS))
+        fixed_roles = all(roles_enabled(settings)
+                          and set(settings.get('frequencies', [])) in scan_profiles
+                          for settings in (previous.get('settings', {}), result.get('settings', {})))
+        if fixed_roles:
+            # Prewarmed and candidate-only background plans share the same
+            # fixed rules. Every reused physical period is still checked below.
+            ignored.add('frequencies')
         def rules(settings):
             return {key:(sorted(value) if key in {'frequencies','point_types','structural_levels'} else value)
                     for key,value in settings.items() if key not in ignored}
@@ -1126,7 +1272,7 @@ class SignalMonitor:
                 incoming_fingerprints.setdefault(key,set()).add(fingerprint if isinstance(fingerprint,str) else None)
         for row in [*result.get('selected',[]), *result.get('observations',[])]:
             key=f"{_symbol_key(row)}:{row['frequency']}"
-            incoming_identities.setdefault(key,set()).add(_signal(row)['id'])
+            incoming_identities.setdefault(key,set()).add(_signal_identity(row))
         excluded=set(state.get('force_pending_symbols',[])) | set(state.get('retry_symbols',{}))
         errors={( _symbol_key(error), error.get('frequency')) for error in result.get('errors',[]) if error.get('code')}
         retained={}
@@ -1135,6 +1281,7 @@ class SignalMonitor:
             fingerprint=check.get('input_fingerprint')
             if (symbol not in excluded and (symbol,None) not in errors and (symbol,frequency) not in errors
                     and check.get('revision')==revision and check.get('error') is False
+                    and not check.get('pending_identities')
                     and type(check.get('cutoff')) is int and isinstance(check.get('identities'),list)
                     and isinstance(fingerprint,str) and len(fingerprint)==64
                     and all(char in '0123456789abcdef' for char in fingerprint)
@@ -1144,7 +1291,7 @@ class SignalMonitor:
                 retained[key]=deepcopy(check)
         checked={}
         for symbol, cutoff in state.get('checked_cutoffs',{}).items():
-            periods=set(result.get('settings',{}).get('frequencies',[]))
+            periods=set(LIVE_PERIODS if fixed_roles else result.get('settings',{}).get('frequencies',[]))
             periods.update(plan['frequency'] for plan in state.get('holding_risk_plans',{}).values()
                            if plan.get('active') and _symbol_key(plan)==symbol)
             if (type(cutoff) is int and state.get('attempted_cutoffs',{}).get(symbol)==cutoff
@@ -1153,9 +1300,12 @@ class SignalMonitor:
         return retained, dict(checked), checked
 
     @classmethod
-    def _historical_reclassification(cls, check, revision, available_at):
+    def _historical_reclassification(cls, check, revision, available_at, price_basis_revision=None):
         previous=cls._notification_baseline(check)
-        return bool(previous and revision and previous['revision']!=revision
+        changed=bool(previous and ((revision and previous['revision']!=revision)
+                     or (previous.get('price_basis_revision') and price_basis_revision
+                         and previous['price_basis_revision']!=price_basis_revision)))
+        return bool(changed
                     and type(available_at) in (int,float) and available_at<=previous['cutoff'])
 
     def _mark_selection_failures(self, symbols, stamp, revision, frequency=None, *, cutoffs=None, reason=None):
@@ -1193,7 +1343,7 @@ class SignalMonitor:
         if not isinstance(body, dict) or set(body) != {"enabled"} or type(body["enabled"]) is not bool:
             raise ValueError("请指定是否启用钉钉通知")
         if body["enabled"] and not self.notifications.transport.configuration()["configured"]:
-            raise ValueError("请先配置应用的 CHANLUN_DINGTALK_WEBHOOK")
+            raise ValueError("请先在通知设置中配置钉钉机器人地址")
         manual = self.screening.status()
         with self._lock:
             state = self._load()
@@ -1252,6 +1402,15 @@ class SignalMonitor:
         self._notification_retry_at=time.monotonic()+5
 
     def _screening_results_for_monitor(self, status):
+        # Lightweight polling omits the full-directory token. Actual result
+        # consumption still needs it so repaired evidence resets a failed
+        # read's bounded retry budget, even when the run/cutoff did not change.
+        if ('evidence_version' not in status
+                and callable(getattr(type(self.screening), 'scheduler_status', None))):
+            refreshed = self.screening.status()
+            if refreshed.get('run_id') != status.get('run_id'):
+                return {'status': 'unavailable'}
+            status = refreshed
         key=json.dumps({k:status.get(k) for k in ('run_id','status','completed','evidence_version',
             'source_revision','source_current','frozen_native_review','current_source_revision',
             'result_reader_revision','selection_policy_version','settings','cutoffs','market_cutoffs')},sort_keys=True)
@@ -1427,6 +1586,7 @@ class SignalMonitor:
     def start_runtime(self):
         self._input_retention.stop.clear()
         self._incremental_reader.resume()
+        self._monitor_result_reader.resume()
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
@@ -1440,6 +1600,7 @@ class SignalMonitor:
     def stop_runtime(self):
         self._input_retention.stop.set()
         self._incremental_reader.close()
+        self._monitor_result_reader.close()
         self._stop.set()
         self._wake.set()
         thread = self._thread
@@ -1492,32 +1653,41 @@ class SignalMonitor:
     def poll_interval(self):
         return .5 if self._busy_poll else 3
 
-    def _monitor_capacity(self, demand, screening_active, *, overdue_pressure=False, service_estimate=None):
+    def _monitor_capacity(self, demand, screening_active, *, overdue_pressure=False, service_estimate=None, holding_demand=0):
         """Publish bounded live demand; isolated explicit roots use pure limits."""
         demand = 0 if self._stop.is_set() else max(0, int(demand))
         if demand:
             with self._lock:
                 configured = self._load()['settings'].get('monitor_workers', MAX_WORKERS)
             demand = min(demand, configured, cpu_capacity())
-        limits = role_limits(cpu_capacity(), demand, screening_active, overdue_pressure=overdue_pressure)
+            estimate=service_estimate or {}
+            needed=estimate.get('required_workers')
+            if (screening_active and estimate.get('boost_ready') is True
+                    and type(needed) is int and needed>0):
+                # Queue length is not simultaneous compute demand. Use the
+                # measured deadline/recurring workload plus one spare worker;
+                # cold/unknown estimates retain the conservative full demand.
+                demand=min(demand,needed+1)
+        holding_demand = min(demand, max(0, int(holding_demand)))
+        limits = role_limits(cpu_capacity(), demand, screening_active, overdue_pressure=overdue_pressure, holding_demand=holding_demand)
         self._busy_poll = demand > 0
         if self._publish_compute_budget:
             if self._compute_budget is None:
                 self._compute_budget = budget_request()
             try:
                 pressure = publish_monitor_demand(self._compute_budget, demand=demand,
-                    expires_in=12, owner=self._compute_budget_owner, overdue_pressure=overdue_pressure)
+                    expires_in=12, owner=self._compute_budget_owner, overdue_pressure=overdue_pressure, holding_demand=holding_demand)
                 actual_limit = pressure.get('limit', cpu_capacity())
                 needed = min(demand, (service_estimate or {}).get('required_workers', demand))
-                normal = role_limits(actual_limit, needed, True)['monitor_capacity']
+                normal = role_limits(actual_limit, needed, True, holding_demand=min(holding_demand, needed))['monitor_capacity']
                 if (demand and actual_limit > 1 and screening_active and not overdue_pressure
                         and (service_estimate or {}).get('boost_ready') and needed > normal):
                     # Memory can shrink the shared budget after planning. The
                     # same measured demand must be compared to that real split.
                     overdue_pressure, demand = True, needed
                     pressure = publish_monitor_demand(self._compute_budget, demand=demand,
-                        expires_in=12, owner=self._compute_budget_owner, overdue_pressure=True)
-                    limits = role_limits(cpu_capacity(), demand, screening_active, overdue_pressure=True)
+                        expires_in=12, owner=self._compute_budget_owner, overdue_pressure=True, holding_demand=min(holding_demand, demand))
+                    limits = role_limits(cpu_capacity(), demand, screening_active, overdue_pressure=True, holding_demand=min(holding_demand, demand))
                 limits['monitor_capacity'] = min(limits['monitor_capacity'], pressure['monitor_capacity'])
                 for key in ('screening_capacity', 'monitor_reserved', 'limit'):
                     if key in pressure:
@@ -1526,7 +1696,7 @@ class SignalMonitor:
                 # The worker's shared slot locks remain authoritative even if
                 # this advisory demand update could not be published.
                 LOG.warning('monitor compute demand update unavailable')
-        self._last_compute_limits = {**limits, 'monitor_demand': demand, 'overdue_pressure': overdue_pressure,
+        self._last_compute_limits = {**limits, 'monitor_demand': demand, 'holding_demand': holding_demand, 'overdue_pressure': overdue_pressure,
                                      'observed_at': self.now().timestamp()}
         return limits['monitor_capacity']
 
@@ -1604,7 +1774,7 @@ class SignalMonitor:
                 control_version = self._control_version
             if self._stop.is_set():
                 return
-            manual = self.screening.status()
+            manual = self._scheduler_status(self.screening)
             self._record_daily_run(manual)
             if not self._control_is_current(control_version):
                 return
@@ -1848,6 +2018,11 @@ class SignalMonitor:
         try:
             watch = watchlist_symbols() if include_watchlist else []
             holdings = holding_symbols()
+            quote_only = quote_only_symbols()
+            quote_members = sorted({_symbol_key(symbol) for symbol in [*watch, *holdings]
+                                    if _symbol_key(symbol) in quote_only})
+            watch = [symbol for symbol in watch if _symbol_key(symbol) not in quote_only]
+            holdings = [symbol for symbol in holdings if _symbol_key(symbol) not in quote_only]
         except Exception as exc:
             with self._lock:
                 current = self._load()
@@ -1870,6 +2045,8 @@ class SignalMonitor:
             if not state["enabled"] or not self._control_is_current(control_version):
                 return
             source_recovered = state.get("holding_source_current") is False
+            quote_changed = state.get('quote_only_symbols', []) != quote_members
+            state['quote_only_symbols'] = quote_members
             state["watchlist_error"] = ""
             state["holding_source_current"] = True
             held_keys = sorted(_symbol_key(symbol) for symbol in holdings)
@@ -1880,22 +2057,26 @@ class SignalMonitor:
             seed = state.get("seed")
             if seed is None:
                 if not watch and not holdings:
+                    if quote_changed:
+                        self._save()
                     return
                 seed = {"run_id": "watchlist", "screening_symbols": [], "symbols": [], "codes": [],
-                        "cutoffs": {}, "settings": state["settings"]["screening"], "error_count": 0}
+                        "cutoffs": {}, "settings": monitor_settings(state, state["settings"]["screening"]), "error_count": 0}
                 state["seed"] = seed
             base = seed.get("screening_symbols", seed["symbols"])
             pool = {_symbol_key(s): s for s in base}
             pool.update(seed.get('incremental_screening_symbols', {}))
             pool.update({_symbol_key(s): s for s in watch})
             pool.update({_symbol_key(s): s for s in holdings})
+            pool = {key:value for key,value in pool.items() if key not in quote_only}
             symbols = [pool[key] for key in sorted(pool)]
             frequencies = set(seed.get("settings", {}).get("frequencies", []))
             point_types = set(seed.get("settings", {}).get("point_types", []))
-            scope_pruned = False
+            scope_pruned = quote_changed
+            scope_state = {**state, 'holding_symbols': held_keys}
             for name in ("signals", "unverified_signals"):
                 kept = {key: item for key, item in state[name].items()
-                        if _symbol_key(item) in pool and item.get("frequency") in frequencies
+                        if _symbol_key(item) in pool and item.get("frequency") in _monitor_periods(scope_state, _symbol_key(item))
                         and (_symbol_key(item) in held_keys if item.get("signal_type") == "consolidation_divergence"
                              else item.get("point_type") in (set(POINT_TYPES) if _symbol_key(item) in held_keys else point_types))}
                 scope_pruned |= len(kept) != len(state[name])
@@ -1904,6 +2085,19 @@ class SignalMonitor:
                     scope_pruned |= item.get('holding') != holding
                     item['holding'] = holding
                 state[name] = kept
+            previous_errors = state.get('errors', [])
+            kept_errors = [item for item in previous_errors if not item.get('frequency')
+                           or item['frequency'] in _monitor_periods(scope_state, _symbol_key(item))]
+            scope_pruned |= len(kept_errors) != len(previous_errors)
+            if 'errors' in state:
+                state['errors'] = kept_errors
+            for name in ('minute_force_pending', 'active_minute_override_tokens'):
+                previous = state.get(name, {})
+                kept = {key: value for key, value in previous.items()
+                        if key in pool and '1m' in _monitor_periods(scope_state, key)}
+                scope_pruned |= len(kept) != len(previous)
+                if name in state:
+                    state[name] = kept
             checks = {key: item for key, item in state["selection_checks"].items()
                       if item.get("symbol") in pool and (key.rsplit(":", 1)[-1] in frequencies
                           or state['holding_risk_plans'].get(key,{}).get('active'))}
@@ -1951,14 +2145,18 @@ class SignalMonitor:
             for phase in ("morning", "afternoon"):
                 record = daily.get(phase) or {}
                 updating = manual.get('status') == 'cancelled' and manual.get('stop_reason') == 'policy_update'
+                resumed = bool(manual.get('resume_count')) and record.get('status') in {'partial', 'timed_out'}
                 if record.get("run_id") != manual.get("run_id") or (record.get("status") != "started"
-                        and not (updating and record.get('status') == 'failed')):
+                        and not resumed and not (updating and record.get('status') == 'failed')):
                     continue
                 healthy = manual["status"] == "completed" and not all_periods_failed(manual)
                 budget_stopped = manual.get('stop_reason') == 'time_budget'
                 record["status"] = ('partial' if manual.get('completed', 0) else 'timed_out') if budget_stopped else (
                     'updating' if updating else 'completed' if healthy else 'failed')
                 record["finished_at"] = manual.get("finished_at")
+                if resumed:
+                    record.pop('deadline_at', None)
+                    record.update(completed=manual.get('completed', 0), total=manual.get('total', 0))
                 if manual.get('stop_reason') == 'time_budget':
                     record.update(completed=manual.get('completed', 0), total=manual.get('total', 0))
                 self._save()
@@ -2028,10 +2226,13 @@ class SignalMonitor:
             if phase == 'morning' and phase_settings.get('strategy') == 'direct_structural':
                 phase_settings['frequencies'] = ['5m', '30m']
                 phase_settings.pop('minimum_operating_frequency', None)
+            from chanlun.screening.timeframe_policy import screening_settings
+            phase_settings = screening_settings(phase_settings)
             compatible_completed = (
                 manual.get('status') == 'completed' and not all_periods_failed(manual)
                 and manual.get('cutoffs', {}).get('5m') == cutoff
-                and manual.get('settings') == phase_settings)
+                and {**manual.get('settings', {}), **({'timeframe_policy': phase_settings['timeframe_policy']}
+                    if phase_settings.get('timeframe_policy') else {})} == phase_settings)
             if compatible_completed and manual.get('source_current'):
                 # A manually refreshed run may have replaced an already
                 # completed scheduled run. Remember its actual identity.
@@ -2043,14 +2244,13 @@ class SignalMonitor:
                 self._startup_retries.pop('daily',None)
                 return
             revision = manual.get('current_source_revision')
-            refresh_budget = phase != 'morning' or now.timestamp() < (phase_state.get('deadline_at') or 0)
             if (phase_state.get('status') == 'completed' and compatible_completed
                     and manual.get('source_current') is False and manual.get('frozen_native_review')
                     and revision and manual.get('source_revision') and manual['source_revision'] != revision
-                    and phase_state.get('source_recovery_revision') != revision and refresh_budget):
+                    and phase_state.get('source_recovery_revision') != revision):
                 # Frozen completed results intentionally omit old-rule previews.
                 # Rebuild once under the new rules instead of leaving that view
-                # empty indefinitely. Reuse the original noon deadline.
+                # empty indefinitely. Scheduled scans run until completion.
                 phase_state = {**phase_state, 'run_id':manual['run_id'], 'status':'updating',
                     'attempts':0, 'retry_at':0, 'source_recovery_revision':revision,
                     'refresh_reason':'rules_updated'}
@@ -2061,19 +2261,12 @@ class SignalMonitor:
                     self._save()
                 self._startup_retries.pop('daily',None)
                 return
-            deadline_at = None
-            if phase == 'morning':
-                deadline_at = phase_state.get('deadline_at') or min(
-                    now.timestamp() + MORNING_BUDGET_SECONDS,
-                    now.replace(hour=12, minute=55, second=0, microsecond=0).timestamp())
-                if not phase_state.get('deadline_at') and manual.get('status') not in ACTIVE:
-                    phase_state = daily[phase] = {**phase_state, 'deadline_at': deadline_at}
-                    self._save()
-                if now.timestamp() >= deadline_at and manual.get('status') not in ACTIVE:
-                    daily[phase] = {**phase_state, 'status': 'timed_out', 'deadline_at': deadline_at}
-                    self._save()
-                    return
             if manual["status"] in ACTIVE:
+                return
+            recovery = getattr(self.screening, '_automatic_recovery', None)
+            if recovery is not None and recovery.pending(manual):
+                # Let the same-run recovery owner authenticate and resume the
+                # committed prefix before a daily retry replaces latest.json.
                 return
             revision=manual.get('current_source_revision')
             if (manual.get('status') in {'failed','interrupted','cancelled'}
@@ -2113,8 +2306,8 @@ class SignalMonitor:
                 if not self._start_allowed('daily',context):
                     return
             try:
-                options = {'deadline_at':deadline_at} if deadline_at is not None else {}
-                if phase_state.get('refresh_reason') == 'rules_updated':
+                options = {}
+                if phase_state.get('refresh_reason') in {'rules_updated', 'timeframe_policy_updated'}:
                     options['external_notifications'] = False
                 launched = self.screening.start(settings, **options)
             except Exception as error:
@@ -2128,8 +2321,6 @@ class SignalMonitor:
                                            if phase_state.get('refresh_reason') else {}),
                                         "run_id": launched["run_id"], "status": "started",
                                                 "attempts": attempts + 1, "retry_at": now.timestamp() + (60 if phase == 'morning' else 900)}
-                if deadline_at is not None:
-                    state['daily'][phase]['deadline_at'] = deadline_at
                 self._clear_start_failure('daily',state)
                 self._save()
                 self._startup_retries.pop('daily',None)
@@ -2220,14 +2411,16 @@ class SignalMonitor:
                 active_lanes = state.get('active_service_lanes', {})
                 cold_batch = bool(active_lanes) and all(lane == 'cold' for lane in active_lanes.values())
                 elapsed = now.timestamp() - state.get('active_scheduled_at', now.timestamp())
-                short_wait = bool(held - unfinished) or cold_batch
+                urgent = {key for key in self._pending_notification_symbols(state, now.timestamp())
+                          if now.timestamp() >= self._notification_retry_after.get(key, 0)}
+                short_wait = bool(held - unfinished) or cold_batch or bool(urgent)
                 if elapsed < (MONITOR_HOLDING_WAIT_SECONDS if short_wait else MONITOR_LIVE_SLICE_SECONDS):
                     return
                 revision = status.get('current_source_revision') or status.get('source_revision')
                 waiting = False
+                priority_waiting = []
                 scope_index = build_minute_scope_index(state)
                 decisions = {}
-                urgent = self._pending_notification_symbols(state, now.timestamp())
                 for symbol in seed.get('symbols', []):
                     key = _symbol_key(symbol)
                     for frequency in self._schedulable_periods(state, symbol, revision, now, scope_index, decisions):
@@ -2251,12 +2444,12 @@ class SignalMonitor:
                                   or key in urgent or frequency == '1m' and key in state.get('minute_force_pending', {}))
                         lane = task_lane(frequency, decisions.get(key, {}))
                         slice_due = (elapsed >= MONITOR_LIVE_SLICE_SECONDS or cold_batch and lane == 'hot'
-                                     or key in held and elapsed >= MONITOR_HOLDING_WAIT_SECONDS)
+                                     or (key in held or key in urgent) and elapsed >= MONITOR_HOLDING_WAIT_SECONDS)
                         if not in_flight and needed and slice_due:
                             waiting = True
-                            break
-                    if waiting:
-                        break
+                            if key in held or key in urgent and (key,frequency) in self._notification_rechecks:
+                                priority_waiting.append((0 if key in held and frequency=='1m' else 1 if key in held else 2,
+                                                         period_key,[revision,target]))
                 if not waiting:
                     return
                 unfinished = set(state.get('active_symbols', [])) - set(state.get('active_consumed_symbols', []))
@@ -2267,9 +2460,26 @@ class SignalMonitor:
                 # A cold period gets one rotation, then an uninterrupted
                 # attempt. Its own cutoff, not the faster symbol clock, guards
                 # against frequent minute ticks killing the same work forever.
-                if any(
-                        counts.get(key) == token for key, token in fingerprints.items()):
-                    return
+                priority_yields = state.setdefault('priority_slice_yields', {})
+                fresh_priorities = {scope: token for _, scope, token in priority_waiting
+                                    if priority_yields.get(scope) != token}
+                protected = {key: token for key, token in fingerprints.items() if counts.get(key) == token}
+                rescues = state.setdefault('live_priority_rescues', {})
+                if protected:
+                    if not fresh_priorities or any(rescues.get(key) == [revision, token]
+                                                   for key, token in protected.items()):
+                        return
+                    # Permit one urgent rescue, then let the interrupted target
+                    # finish even if faster holding clocks keep advancing.
+                    rescues.update({key: [revision, token] for key, token in fingerprints.items()})
+                # A protected slow attempt cannot suppress a new holding clock
+                # or an explicit notification proof indefinitely. Each such
+                # target gets one priority handoff, subject to the slow target's
+                # bounded rescue above; new minute clocks cannot starve it.
+                # One handoff admits all currently waiting priority periods.
+                # Recording only one would allow the remaining periods to
+                # cancel the same slow attempt repeatedly at the same clock.
+                priority_yields.update(fresh_priorities)
                 counts.update(fingerprints)
                 state.setdefault('live_yielded_periods', {}).update(
                     {key: list(active_periods.get(key, [])) for key in unfinished})
@@ -2277,11 +2487,16 @@ class SignalMonitor:
                 state.update(live_slice_yields=counts, yielding_monitor_run=expected_run)
                 self._save()
                 monitor = self.monitor
-            monitor.cancel()
+                priority_control = deepcopy(getattr(self, '_source_prefetch_control', None))
+                soft_handoff = bool(priority_waiting) and callable(getattr(monitor, 'handoff_for_priority', None))
+            if soft_handoff:
+                monitor.handoff_for_priority(expected_run, priority_control)
+            else:
+                monitor.cancel()
             self._wake.set()
 
     def _schedulable_periods(self, state, symbol, revision, now, scope_index, decisions=None):
-        """Apply only minute cadence; proof and notification scope stays intact."""
+        """Select independent jobs; linked evidence remains inside the 5m task."""
         key = _symbol_key(symbol)
         available = _available_monitor_periods(state, key, revision)
         if '1m' not in available:
@@ -2299,6 +2514,32 @@ class SignalMonitor:
         if decisions is not None:
             decisions[key] = decision
         return available if decision['eligible'] else available - {'1m'}
+
+    def _refresh_suspension_status(self,state,now):
+        from chanlun.screening.suspension_status import fund_halt
+        paused={}
+        for symbol in (state.get('seed') or {}).get('symbols',[]):
+            if symbol.get('market','a')!='a' or not symbol['code'].startswith('SH.5'):
+                continue
+            key=_symbol_key(symbol)
+            for period in independent_monitor_periods(state,key):
+                try:target=closed_bar_cutoff('a',symbol['code'],now,period)
+                except (ValueError,OSError):continue
+                fact=fund_halt(symbol['code'],now,cutoff=target)
+                if fact:paused.setdefault(key,{})[period]={**fact,'name':symbol.get('name',symbol['code'])}
+        changed=state.get('suspended_periods',{})!=paused
+        state['suspended_periods']=paused
+        old_errors=state.get('errors',[])
+        state['errors']=[row for row in old_errors if not (
+            row.get('frequency') in paused.get(_symbol_key(row),{})
+            and set(row.get('reasons',[])) and set(row['reasons'])<={'STALE_DATA','NO_VOLUME'})]
+        for row in old_errors:
+            if row not in state['errors']:
+                _clear_period_retries(state,_symbol_key(row),{row['frequency']})
+        changed |= old_errors!=state['errors']
+        if not state['errors'] and state.get('last_error')=='部分标的行情或计算异常，请查看问题列表':
+            state['last_error']='';changed=True
+        if changed:self._save()
 
     def _initialize_minute_cadence(self, state, revision):
         """Adopt existing verified checks once; later seeds still get a first check."""
@@ -2353,8 +2594,8 @@ class SignalMonitor:
             expected_seed = seed.get('run_id')
             expected_run = state.get('active_monitor_run')
             expected_processed = state.get('processed_run')
-        manual = self.screening.status()
-        monitor_status = self.monitor.status()
+        manual = self._scheduler_status(self.screening)
+        monitor_status = self._scheduler_status(self.monitor)
         if monitor_status['status'] in ACTIVE:
             with self._control_lock:
                 with self._lock:
@@ -2363,12 +2604,18 @@ class SignalMonitor:
                     live_active = active & set(state.get('active_live_symbols', []))
                     demand = (len(live_active) + state.get('pending_live_tasks', 0)
                               + min(2, len(active - live_active) + state.get('pending_background_tasks', 0))) if state['enabled'] else 0
+                    if monitor_status.get('phase')=='source_preparation':
+                        # Native history preparation does not use CL workers.
+                        # Keep two slots for a prompt live handoff instead of
+                        # reserving a full calculation wave during provider I/O.
+                        demand=min(2,demand)
                     pressure = state.get('monitor_service_pressure', {})
                     boosted = bool(demand and pressure.get('overdue_pressure'))
                     if boosted:
                         demand = min(demand, pressure.get('required_workers', demand))
+                    holding_demand = len(active & set(state.get('holding_symbols', [])))
                 self._monitor_capacity(max(1, demand) if demand else 0, manual['status'] in ACTIVE,
-                                       overdue_pressure=boosted, service_estimate=pressure)
+                                       overdue_pressure=boosted, service_estimate=pressure, holding_demand=holding_demand)
             self._yield_live_for_priority(now, monitor_status, control_version,
                                           expected_seed, expected_run)
             self._yield_background_for_live(now,monitor_status,control_version,
@@ -2387,6 +2634,7 @@ class SignalMonitor:
             seed = state.get("seed")
             if not seed or not seed["codes"]:
                 return
+            self._refresh_suspension_status(state,now)
             trigger_period = next(
                 (period for period in ("1m", "5m", "30m")
                  if period in seed.get("settings", {}).get("frequencies", ())),
@@ -2415,6 +2663,7 @@ class SignalMonitor:
                                 and now.timestamp() < state.get("next_check_at", 0))
             urgent=self._pending_notification_symbols(state,now.timestamp())
             cutoffs, errors, pending, retries, recent = {}, [], [], set(), set()
+            closing_delivery = set()
             due_retry_periods, due_notification_periods = {}, {}
             revision_only_periods = {}
             scope_index = build_minute_scope_index(state)
@@ -2493,9 +2742,13 @@ class SignalMonitor:
                 if fresh or due or urgent_due:
                     pending.append(symbol)
                     cutoffs[key] = closed
+                    if not is_recent and 0 <= now.timestamp()-closed < NOTIFICATION_LIFETIME:
+                        closing_delivery.add(key)
                     if due or not fresh:
                         retries.add(key)
             calendar_revision = reference.get("current_source_revision") or reference.get("source_revision")
+            recurring_recent = set(recent)
+            recent.update(closing_delivery)
             failed_symbols = {_symbol_key(error) for error in errors}
             changed_calendar = state.get("schedule_errors", []) != errors
             if failed_symbols and (changed_calendar or any(
@@ -2562,6 +2815,17 @@ class SignalMonitor:
             # symbol look fresh while every eligible period is already checked.
             # Do not turn an empty plan back into an unsolicited minute task.
             pending = [symbol for symbol in pending if planned_periods[_symbol_key(symbol)]]
+            from .monitor_scan_priority import defer_to_screening
+            deferred_closed=[symbol for symbol in pending if defer_to_screening(
+                state,manual,symbol,cutoffs.get(_symbol_key(symbol)),now.timestamp(),revision,scope_index,
+                urgent=bool(due_notification_periods.get(_symbol_key(symbol))))]
+            deferred_keys={_symbol_key(symbol) for symbol in deferred_closed}
+            if state.get('closed_market_deferred_symbols',0)!=len(deferred_keys):
+                state['closed_market_deferred_symbols']=len(deferred_keys)
+                state['closed_market_deferred_run']=manual.get('run_id') if deferred_keys else None
+                self._save()
+            pending=[symbol for symbol in pending if _symbol_key(symbol) not in deferred_keys]
+            planned_periods={key:periods for key,periods in planned_periods.items() if key not in deferred_keys}
             if not pending:
                 if state['force'] or state.get('pending_symbols_count'):
                     state.update(force=False, pending_symbols_count=0)
@@ -2582,20 +2846,23 @@ class SignalMonitor:
             demand = live_work + min(2, historical_work)
             available_capacity = min(cpu_capacity(), self._last_compute_limits.get('limit', cpu_capacity()))
             pressure = service_pressure(state, planned_periods, planned_targets, minute_decisions,
-                                        recent, now.timestamp(), available_capacity)
+                                        recent, now.timestamp(), available_capacity, recurring_keys=recurring_recent)
             if pressure['overdue_pressure']:
                 demand = min(demand, pressure['required_workers'])
+            holding_demand = min(demand, sum(key in state.get('holding_symbols', []) for key in planned_periods))
             workers = min(role_limits(cpu_capacity(), demand, screening_active,
-                                      overdue_pressure=pressure['overdue_pressure'])['monitor_capacity'],
+                                      overdue_pressure=pressure['overdue_pressure'], holding_demand=holding_demand)['monitor_capacity'],
                           state['settings'].get('monitor_workers', MAX_WORKERS))
             mode='live' if live_pending else 'background'
             fair_plan = deepcopy({'symbols':pending, 'periods':planned_periods, 'targets':planned_targets,
-                'decisions':minute_decisions, 'urgent':urgent, 'recent':recent, 'cutoffs':cutoffs,
+                'decisions':minute_decisions, 'urgent':urgent | warning_recheck_symbols(state), 'recent':recent, 'cutoffs':cutoffs,
+                'period_costs':state.get('monitor_period_costs', {}),
                 'now':now.timestamp(), 'capacity':workers, 'cursor':state.get('monitor_fair_cursor', 0),
                 'state':{name:state.get(name, {}) for name in ('selection_checks', 'attempted_cutoffs',
                     'monitor_pending_deadlines', 'attempted_monitor_periods', 'holding_symbols', 'monitor_critical_cursor')},
                 'minute_requests':{key:monitor_requests.snapshot(state,key) for key in planned_periods},
                 'risk_periods':{key:sorted(_bound_risk_periods(state,key)) for key in planned_periods}})
+            fair_plan['state']['notification_priority_periods'] = notification_priority_periods(state)
             tasks, fair_cursor, critical_cursor = self._fair_batch(fair_plan, workers)
             pending = [task['symbol'] for task in tasks]
             queue_counts = Counter(task_lane(frequency, minute_decisions.get(key, {}))
@@ -2608,6 +2875,7 @@ class SignalMonitor:
             workers = min(workers, backlog)
             settings = {**seed["settings"], "scope": "symbols", "codes": [], "symbols": pending,
                         "workers": workers}
+            settings.pop('watch_groups', None)
             runtime_periods={_symbol_key(symbol):sorted({p['frequency'] for p in state['holding_risk_plans'].values()
                 if p.get('active') and f"{p['market']}:{p['code']}"==_symbol_key(symbol)}) for symbol in pending}
             runtime_periods={k:v for k,v in runtime_periods.items() if set(v)-set(seed['settings']['frequencies'])}
@@ -2649,7 +2917,7 @@ class SignalMonitor:
                 'critical_cursor': critical_cursor, 'fair_plan': fair_plan,
                 'service_lanes': {task['key']: task['lane'] for task in tasks},
                 'service_deadlines': {task['key']: task['deadline'] for task in tasks},
-                'compute_demand': demand, 'screening_active': screening_active,
+                'compute_demand': demand, 'holding_demand': holding_demand, 'screening_active': screening_active,
                 'pressure': pressure,
                 'active_live_symbols': sorted(set(cutoffs) & recent),
                 'pending_live_tasks': max(0, live_work - len(set(cutoffs) & recent)),
@@ -2658,6 +2926,12 @@ class SignalMonitor:
                 'interval':state['settings']['interval_seconds'],'check_requests':dict(self._check_requests),
             }
         self._dispatch_monitor(launch)
+
+    @staticmethod
+    def _batch_limit(plan, capacity):
+        live_pending = any(_symbol_key(s) in plan['recent'] for s in plan['symbols'])
+        waves = live_batch_waves(plan, MONITOR_WORKER_WAVES) if live_pending else MONITOR_BACKGROUND_WAVES
+        return min(MONITOR_BATCH_SIZE, capacity * waves)
 
     @staticmethod
     def _fair_batch(plan, capacity):
@@ -2671,8 +2945,7 @@ class SignalMonitor:
         critical = plan['state'].get('monitor_critical_cursor') or 0
         options = dict(state=plan['state'], targets=plan['targets'], minute_decisions=plan['decisions'],
                        urgent=plan['urgent'], now=plan['now'])
-        live_pending = any(_symbol_key(s) in recent for s in plan['symbols'])
-        limit = min(MONITOR_BATCH_SIZE, capacity*(MONITOR_WORKER_WAVES if live_pending else MONITOR_BACKGROUND_WAVES))
+        limit = SignalMonitor._batch_limit(plan, capacity)
         tasks, cursor = plan_batch(holdings, plan['periods'], limit=limit, cursor=cursor,
                                    critical_cursor=critical, **options)
         remaining = max(0, limit-len(tasks))
@@ -2761,6 +3034,27 @@ class SignalMonitor:
             if field in launch['options']:
                 launch['options'][field] = {key: value for key, value in launch['options'][field].items() if key not in removed}
 
+    @staticmethod
+    def _bind_warning_evidence(launch, state, stamp):
+        settings, options = launch['settings'], launch['options']
+        settings.pop('_warning_evidence_periods', None)
+        selected = {
+            _symbol_key(symbol): set(options.get('due_periods', {}).get(
+                _symbol_key(symbol), settings['frequencies']
+                + options.get('monitor_periods', {}).get(_symbol_key(symbol), [])))
+            for symbol in settings['symbols']
+        }
+        periods = {}
+        for warning in (*state.get('signals', {}).values(), *state.get('unverified_signals', {}).values()):
+            needs_proof = warning.get('stage') in {'warning', 'approaching'} or (
+                warning.get('stage') == 'invalidated' and stamp - (warning.get('invalidated_at') or 0) < 1800)
+            key, frequency = _symbol_key(warning), warning.get('frequency')
+            if (needs_proof and warning.get('signal_type') in {'native_point_preview', 'consolidation_divergence'}
+                    and frequency in selected.get(key, ())):
+                periods.setdefault(key, set()).add(frequency)
+        if periods:
+            settings['_warning_evidence_periods'] = {key: sorted(value) for key, value in periods.items()}
+
     def _dispatch_monitor(self, launch):
         # Launches are serialized with enable/pause, but their process/file I/O
         # must leave the shared state available to readers and new requests.
@@ -2783,14 +3077,23 @@ class SignalMonitor:
                 capacity = self._monitor_capacity(launch.get('compute_demand', len(launch['cutoffs'])),
                                                   launch.get('screening_active', False),
                                                   overdue_pressure=launch.get('pressure', {}).get('overdue_pressure', False),
-                                                  service_estimate=launch.get('pressure'))
+                                                  service_estimate=launch.get('pressure'), holding_demand=launch.get('holding_demand', 0))
                 if capacity < 1:
                     return
                 if launch.get('pressure'):
                     launch['pressure']['overdue_pressure'] = self._last_compute_limits.get('overdue_pressure', False)
                 launch['settings']['workers'] = min(launch['settings']['workers'], capacity)
                 self._trim_launch(launch, launch['settings']['workers'])
-                launched=monitor.start(launch['settings'],**launch['options'])
+                # Memory admission may reselect symbols and periods. Bind
+                # warning evidence to the final batch, not its earlier plan.
+                with self._lock:
+                    self._bind_warning_evidence(launch, self._load(), self.now().timestamp())
+                    from chanlun.screening.source_prefetch import control_value, make_hint
+                    hint = make_hint(launch, self._load(),
+                        control_value(self._load(), self._control_version, os.environ.get('CHANLUN_BUILD_REVISION')),
+                        self._fair_batch, batch_limit=self._batch_limit)
+                launched=monitor.start(launch['settings'],**launch['options'],
+                                       **({'source_prefetch': hint} if hint is not None else {}))
             except Exception as error:
                 self._record_start_failure('live',context,error)
                 raise TaskStartError('live',error) from error
@@ -2865,7 +3168,7 @@ class SignalMonitor:
                 self._save()
                 self._startup_retries.pop('live',None)
 
-    def _record_failures(self, keys, stamp, run_id):
+    def _record_failures(self, keys, stamp, run_id, *, periods_by_symbol=None):
         """Bound recovery at one clock; a new clock or forced check resets it."""
         state = self._load()
         pool = set((state.get("seed") or {}).get("codes", []))
@@ -2874,7 +3177,9 @@ class SignalMonitor:
             if type(cutoff) is not int:
                 continue
             records = _period_retries(state['retry_symbols'].get(key, {}))
-            for frequency in state.get('active_periods', {}).get(key, []) or [None]:
+            periods = ((state.get('active_periods', {}).get(key, []) or [None]) if periods_by_symbol is None
+                       else periods_by_symbol.get(key, ()))
+            for frequency in periods:
                 previous = records.get(frequency, records.get(None, {}))
                 target = state.get('active_period_targets', {}).get(f'{key}:{frequency}')
                 same_clock = (previous.get('period_cutoff') == target if type(target) is int
@@ -2965,8 +3270,15 @@ class SignalMonitor:
         return {**status,'status':'failed','error':'本轮监听结果无法核验，未完成标的将重新检查',
                 'result_read_failed':True}
 
+    @staticmethod
+    def _scheduler_status(manager):
+        if callable(getattr(type(manager),'scheduler_status',None)):
+            return manager.scheduler_status()
+        return manager.status()
+
     def _consume_monitor(self):
-        status = self.monitor.status()
+        status = self._scheduler_status(self.monitor)
+        prepared_checks = None
         with self._lock:
             state = self._load()
             if status.get("run_id") == state.get("processed_run") or status["status"] == "idle":
@@ -2982,7 +3294,22 @@ class SignalMonitor:
             result=self._retire_unreadable_monitor(status)
         else:
             try:
-                result = self.monitor.committed_results(after) if yielded or status["status"] in ACTIVE | {"completed"} else status
+                if (getattr(self.monitor,'background_committed_reads',False) is True
+                        and (yielded or status['status'] in ACTIVE | {'completed'})):
+                    key=(status.get('run_id'), status.get('current_source_revision') or status.get('source_revision'),
+                         after,self._control_version,state.get('active_seed'),status.get('completed',0))
+                    def read_monitor_proofs():
+                        value=self.monitor.committed_results(after)
+                        if value is None:
+                            return None,{},{}
+                        return value,self._prepare_risk_checks(value),self._prepare_warning_checks(value)
+                    bundle=self._monitor_result_reader.read(key,read_monitor_proofs)
+                    if bundle is None:
+                        return
+                    result,risk_results,warning_results=bundle
+                    prepared_checks=(risk_results,warning_results)
+                else:
+                    result = self.monitor.committed_results(after) if yielded or status["status"] in ACTIVE | {"completed"} else status
             except MonitorResultsReadError as exc:
                 result=self._monitor_read_failure(status,after,exc)
         if result is None:
@@ -2991,7 +3318,8 @@ class SignalMonitor:
             result={**result,'background_yielded':True}
         # Decompression and cold structural replays must not hold the global
         # state lock used by HTTP reads and notification validity checks.
-        risk_results = self._prepare_risk_checks(result)
+        risk_results,warning_results = (prepared_checks if prepared_checks is not None else
+            (self._prepare_risk_checks(result),self._prepare_warning_checks(result)))
         stamp = int(self.now().timestamp())
         with self._lock:
             state = self._load()
@@ -3129,13 +3457,15 @@ class SignalMonitor:
             if regressed:
                 result = {**result, "errors": [*result.get("errors", []), *regressed]}
             scan_types=set((state.get('seed') or {}).get('settings',{}).get('point_types',POINT_TYPES))
-            signals = {_signal(r)["id"]: _signal(r) for r in [*result.get("selected", []), *result.get("observations", [])]
-                       if _symbol_key(r) in pool and _symbol_key(r) in checked
-                       and r.get("frequency") in frequencies
-                       and r.get('point',{}).get('point_type') in (
-                           set(POINT_TYPES) if _symbol_key(r) in state['holding_symbols']
-                           else scan_types)
-                       and (_symbol_key(r), r.get("frequency")) in verified}
+            signals = {}
+            for row in [*result.get('selected', []), *result.get('observations', [])]:
+                symbol = _symbol_key(row)
+                allowed_types = POINT_TYPES if symbol in state['holding_symbols'] else scan_types
+                if (symbol in pool and symbol in checked and row.get('frequency') in frequencies
+                        and row.get('point', {}).get('point_type') in allowed_types
+                        and (symbol, row.get('frequency')) in verified):
+                    item = _signal(row)
+                    signals[item['id']] = item
             consolidation_choices = {}
             prior = {**state["unverified_signals"], **state["signals"]}
             for row in result.get("consolidation_alerts", []):
@@ -3202,14 +3532,18 @@ class SignalMonitor:
             self._record_source_preparation(preparation_keys, result.get('errors', []), stamp, result['run_id'])
             self._record_failures(retry_keys - preparation_keys,
                                    stamp, result["run_id"])
-            for key in checked:
-                if key not in retry_keys:
-                    _clear_period_retries(state, key, periods_for(key))
             suspended = {key for key in checked if not _available_monitor_periods(state, key, revision)}
             if suspended:
                 state['force_pending_symbols'] = [key for key in state.get('force_pending_symbols', [])
                                                   if key not in suspended]
             previous_signals = {**state["unverified_signals"], **state["signals"]}
+            def warning_check(previous):
+                checked_warning = warning_results.get(previous['id'])
+                if checked_warning and checked_warning['original'] == previous:
+                    return checked_warning['assessment'], checked_warning['continued']
+                from chanlun.core.strict_structure.warning_lifecycle import SCHEMA, REASONS
+                return {'schema':SCHEMA, 'state':'pending', 'reason_code':'EVIDENCE_UNAVAILABLE',
+                        'reason':REASONS['EVIDENCE_UNAVAILABLE']}, None
             for identity, item in signals.items():
                 legacy = item.get("legacy_id")
                 if legacy and legacy != identity and legacy in previous_signals:
@@ -3219,7 +3553,7 @@ class SignalMonitor:
                 previous = known.get(identity)
                 reclassified=self._historical_reclassification(
                     state['selection_checks'].get(f"{_symbol_key(item)}:{item['frequency']}",{}),
-                    result.get('source_revision'),item.get('available_at'))
+                    result.get('source_revision'),item.get('available_at'),item.get('price_basis_revision'))
                 period_since = state.get('notification_frequency_since', {}).get(item['frequency'], 0)
                 historical_period = bool(period_since and (item.get('available_at') or 0) < period_since)
                 symbol_since = state.get('notification_symbol_since', {}).get(_symbol_key(item), 0)
@@ -3238,19 +3572,33 @@ class SignalMonitor:
                     if previous and previous.get('stage') in {'invalidated','left'}:
                         item['lifecycle_cycle'] += 1
                     prior_preview = previous_signals.get(identity, {})
-                    old_stop = ((prior_preview.get('exit_plan') or {}).get('stop_loss') or {}).get('price')
-                    new_anchor = item.get('anchor_price')
-                    if (prior_preview.get('stage') == 'approaching' and item['point_type'][0] in {'1','2'}
+                    if (prior_preview.get('stage') == 'approaching'
                             and item.get('price_basis_revision') == prior_preview.get('price_basis_revision')
-                            and all(type(value) in (int,float) and math.isfinite(value) for value in (old_stop,new_anchor))
-                            and (new_anchor < old_stop if item['point_type'].endswith('buy') else new_anchor > old_stop)):
-                        item['lifecycle_cycle'] += 1
-                        item['preview_repriced'] = True
+                            and item.get('anchor_price') != prior_preview.get('anchor_price')):
+                        item.update(candidate_updated=True, warning_state='candidate_updated',
+                                    candidate_previous_price=prior_preview.get('anchor_price'), candidate_updated_at=stamp)
+                    for field in ('warning_reference', 'warning_hypothesis'):
+                        if prior_preview.get('stage') == 'approaching' and prior_preview.get(field):
+                            item[field] = deepcopy(prior_preview[field])
                 linked_preview = next((old for old in previous_signals.values()
                     if old.get('signal_type') == 'native_point_preview' and old.get('preview_key')
                     and old['preview_key'] == item.get('preview_key') and _symbol_key(old) == _symbol_key(item)
                     and old['frequency'] == item['frequency']), None) if item['stage'] == 'confirmed' else None
+                if linked_preview is None and item['stage'] == 'confirmed' and item.get('preview_key'):
+                    from chanlun.core.strict_structure.identity import stable_structure_id
+                    from chanlun.core.strict_structure.native_point_preview import PREVIEW_RULE
+                    preview_identity = _signal_identity({**item, 'point':{
+                        'point_id':stable_structure_id(PREVIEW_RULE, item['preview_key'])}})
+                    linked_preview = known.get(preview_identity, {}).get('resolved_preview')
                 if item.get("signal_type") == "consolidation_divergence":
+                    prior_warning = previous_signals.get(identity, {})
+                    if prior_warning.get('stage') == 'warning':
+                        for field in ('warning_reference', 'warning_hypothesis'):
+                            if prior_warning.get(field):
+                                item[field] = deepcopy(prior_warning[field])
+                        if item.get('anchor_price') != prior_warning.get('anchor_price'):
+                            item.update(candidate_updated=True, warning_state='candidate_updated',
+                                        candidate_previous_price=prior_warning.get('anchor_price'), candidate_updated_at=stamp)
                     cycle = (previous or {}).get("lifecycle_cycle", 0)
                     if item["stage"] == "warning" and previous and previous.get("stage") in {"invalidated", "left"}:
                         cycle += 1
@@ -3276,6 +3624,10 @@ class SignalMonitor:
                         item['warning_reactivated'] = recovery_cutoff is not None
                         notification_authorized &= not item['warning_recovery_pending']
                 notification_state = signal_status_key(item)
+                from chanlun.screening.timeframe_policy import enabled as timeframe_enabled
+                trade_rejection = trade_notification_rejection(item,
+                    policy_enabled=timeframe_enabled((state.get('seed') or {}).get('settings', {})))
+                notification_authorized &= trade_rejection is None
                 timely = notification_is_live({**item, 'recorded_at':stamp}, stamp)
                 # An unchanged, previously authorized occurrence stays known
                 # during a market break. Age alone must not manufacture a new
@@ -3294,7 +3646,7 @@ class SignalMonitor:
                 if linked_preview:
                     item['first_warned_at'] = linked_preview.get('first_warned_at')
                     item['confirmed_preview_id'] = linked_preview['id']
-                if item["stage"] in {"warning", "approaching"} and (previous is None or previous.get("stage") in {"invalidated", "left"} or item.get('preview_repriced')
+                if item["stage"] in {"warning", "approaching"} and (previous is None or previous.get("stage") in {"invalidated", "left"}
                         or previous.get('notification_authorized') is False and notification_authorized):
                     item["first_warned_at"] = stamp
                 if not item["first_warned_at"] and item.get("signal_type") == "consolidation_divergence":
@@ -3318,6 +3670,8 @@ class SignalMonitor:
                         event['notification_suppressed_reason']='CONFIRMED_BEFORE_PERIOD_ENABLED'
                     elif historical_member:
                         event['notification_suppressed_reason']='CONFIRMED_BEFORE_POOL_ADMISSION'
+                    elif trade_rejection:
+                        event['notification_suppressed_reason'] = trade_rejection
                     stamp_notification(event, stamp)
                     events.insert(0, event)
                     if event.get("external_notifications", True):
@@ -3336,6 +3690,15 @@ class SignalMonitor:
                         and not (previous.get("signal_type") == "consolidation_divergence" and (
                             (previous.get("market", "a"), previous["code"], previous["frequency"]) in failed_consolidation
                             or (previous.get("market", "a"), previous["code"], None) in failed_consolidation))):
+                    if previous.get('signal_type') in {'native_point_preview', 'consolidation_divergence'}:
+                        assessment, _ = warning_check(previous)
+                        retired = basis_change_exit(previous, assessment, result['run_id'], stamp)
+                        if retired is not None:
+                            events.insert(0, retired)
+                            known[identity] = {**known.get(identity, {}), 'stage': 'left',
+                                'updated_at': stamp, 'state_changed_at': stamp,
+                                'exit_reasons': retired['exit_reasons'], 'notification_authorized': False}
+                            continue
                     if previous.get('signal_type') == 'native_point_preview' and previous.get('stage') in {'approaching','invalidated'}:
                         period = next((p for p in result.get('verified_periods', [])
                             if _symbol_key(p) == _symbol_key(previous) and p['frequency'] == previous['frequency']), None)
@@ -3348,13 +3711,29 @@ class SignalMonitor:
                             continue
                         cutoff = period['source_closed_at']
                         if previous['stage'] == 'approaching':
+                            assessment, continued = warning_check(previous)
+                            if assessment['state'] == 'pending':
+                                pending_point_previews.add(identity)
+                                continue
+                            if assessment['state'] == 'confirmed':
+                                known[identity] = {**known.get(identity, {}), 'stage': 'confirmed', 'updated_at': stamp,
+                                    'resolved_preview':{k:previous.get(k) for k in
+                                        ('id','preview_key','code','market','frequency','first_warned_at')}}
+                                continue
+                            if continued is not None and assessment['state'] in {'observing', 'candidate_updated'}:
+                                signals[identity] = continued
+                                continue
                             item = {**previous,'stage':'invalidated','point_status':'invalidated','selection_status':'invalidated',
                                 'source_closed_at':cutoff,'available_at':cutoff,'invalidated_at':stamp,'state_changed_at':stamp,
-                                'latest_close':period.get('latest_close'),'invalidation_reason':'本轮已完成结构核验，原未确认买卖点条件不再满足',
-                                'invalidation_reference':deepcopy(previous),'evidence_run_id':result['run_id'],'evidence':None}
+                                'latest_close':period.get('latest_close'),'invalidation_reason':assessment['reason'],
+                                'invalidation_reason_code':assessment['reason_code'],'invalidation_checked_at':cutoff,
+                                'warning_assessment':assessment,
+                                'invalidation_reference':deepcopy(previous),'evidence_run_id':result['run_id'],
+                                'evidence':deepcopy(period.get('evidence'))}
                             authorized = known.get(identity,{}).get('notification_authorized',False)
                             authorized &= not self._historical_reclassification(state['selection_checks'].get(
-                                f"{_symbol_key(previous)}:{previous['frequency']}",{}),result.get('source_revision'),cutoff)
+                                f"{_symbol_key(previous)}:{previous['frequency']}",{}),result.get('source_revision'),cutoff,
+                                period.get('price_basis_revision'))
                             event = {**item,'change':'changed','recorded_at':stamp,'run_id':result['run_id'],
                                      'external_notifications':authorized}
                             stamp_notification(event, stamp)
@@ -3365,7 +3744,12 @@ class SignalMonitor:
                                 'updated_at':stamp,'lifecycle_cycle':item.get('lifecycle_cycle',0)}
                             signals[identity] = item
                         elif stamp-previous.get('invalidated_at',0)<1800:
-                            signals[identity] = {**previous,'source_closed_at':cutoff,'latest_close':period.get('latest_close')}
+                            assessment, _ = warning_check(previous)
+                            if assessment['state'] == 'invalidated':
+                                from .warning_lifecycle import invalidation_update
+                                signals[identity] = {**previous, **invalidation_update(assessment, period, result['run_id'])}
+                            elif assessment['state'] != 'confirmed':
+                                pending_point_previews.add(identity)
                         continue
                     if previous.get("signal_type") == "consolidation_divergence" and previous.get("stage") in {"warning", "invalidated"}:
                         period = next((period for period in result.get("verified_periods", [])
@@ -3375,6 +3759,16 @@ class SignalMonitor:
                             continue
                         cutoff = period["source_closed_at"]
                         if previous["stage"] == "warning":
+                            assessment, continued = warning_check(previous)
+                            if assessment['state'] == 'pending':
+                                pending_point_previews.add(identity)
+                                continue
+                            if assessment['state'] == 'confirmed':
+                                known[identity] = {**known.get(identity, {}), 'stage': 'confirmed', 'updated_at': stamp}
+                                continue
+                            if continued is not None and assessment['state'] in {'observing', 'candidate_updated'}:
+                                signals[identity] = continued
+                                continue
                             item = {**previous, "stage": "invalidated", "point_status": "invalidated",
                                     "selection_status": "invalidated", "source_closed_at": cutoff,
                                     "available_at": cutoff, "invalidated_at": stamp,
@@ -3382,12 +3776,15 @@ class SignalMonitor:
                                     'invalidation_reference':deepcopy(previous),
                                     'current_price_quantum':period.get('structure_price_quantum'),
                                     'current_price_basis_revision':period.get('price_basis_revision'),
-                                    "state_changed_at": stamp, **_invalidation_evidence(previous, period)}
+                                    "state_changed_at": stamp, 'warning_assessment':assessment,
+                                    'invalidation_reason':assessment['reason'], 'invalidation_reason_code':assessment['reason_code'],
+                                    'invalidation_checked_at':cutoff, 'latest_close':period.get('latest_close'),
+                                    'metrics_at':cutoff, **{k:assessment.get(k) for k in ('macd_area_a','macd_area_c','macd_area_ratio')}}
                             event = {**item, "change": "changed", "recorded_at": stamp, "run_id": result["run_id"],
                                      "external_notifications": known.get(identity, {}).get("notification_authorized", False)}
                             if self._historical_reclassification(
                                     state['selection_checks'].get(f"{_symbol_key(previous)}:{previous['frequency']}",{}),
-                                    result.get('source_revision'),cutoff):
+                                    result.get('source_revision'),cutoff,period.get('price_basis_revision')):
                                 event.update(external_notifications=False,
                                              notification_suppressed_reason='ALGORITHM_RECLASSIFICATION')
                             stamp_notification(event, stamp)
@@ -3400,7 +3797,12 @@ class SignalMonitor:
                                                **{k: item.get(k) for k in ("first_detected_at", "first_warned_at", "state_changed_at")}}
                             signals[identity] = item
                         elif stamp - previous.get("invalidated_at", 0) < 1800:
-                            signals[identity] = {**previous, "source_closed_at": cutoff, "latest_close": period.get("latest_close")}
+                            assessment, _ = warning_check(previous)
+                            if assessment['state'] == 'invalidated':
+                                from .warning_lifecycle import invalidation_update
+                                signals[identity] = {**previous, **invalidation_update(assessment, period, result['run_id'])}
+                            elif assessment['state'] != 'confirmed':
+                                pending_point_previews.add(identity)
                         continue
                     rejection = next((r for r in result.get('recent_rejections',[]) if r.get('market','a') == previous.get('market','a')
                         and r.get('code') == previous['code'] and r.get('frequency') == previous['frequency']
@@ -3415,6 +3817,15 @@ class SignalMonitor:
                                        "lifecycle_cycle": previous.get('lifecycle_cycle', known.get(identity,{}).get('lifecycle_cycle',0)),
                                        **{key: previous.get(key) or known.get(identity,{}).get(key)
                                           for key in ('first_detected_at','first_warned_at')}}
+            pending_preview_periods = {}
+            for identity in pending_point_previews:
+                item = previous_signals[identity]
+                pending_preview_periods.setdefault(_symbol_key(item), set()).add(item['frequency'])
+            for key in checked:
+                if key not in retry_keys:
+                    _clear_period_retries(state, key, periods_for(key) - pending_preview_periods.get(key, set()))
+            self._record_failures(set(pending_preview_periods) - retry_keys, stamp, result['run_id'],
+                                  periods_by_symbol=pending_preview_periods)
             # Failed evidence is hidden until a successful check can resolve
             # it. Keep its identity privately so recovery can record a real
             # exit, or restore an unchanged point without another discovery.
@@ -3436,6 +3847,10 @@ class SignalMonitor:
             errors = [e for e in state.get("errors", []) if _symbol_key(e) not in checked
                       or e.get('frequency') and not touched(e,checked)]
             errors.extend(result.get("errors", []))
+            errors.extend({'market': key.split(':', 1)[0], 'code': key.split(':', 1)[1],
+                           'frequency': frequency, 'reasons': ['POINT_PREVIEW_CHECK_PENDING'],
+                           'error': '未确认预警尚未完成复核，保留原记录；按周期重试，连续失败后等待新时点或手动复核'}
+                          for key, periods in pending_preview_periods.items() for frequency in sorted(periods))
             valid_cutoffs = {key: value for key, value in state.get("active_cutoffs", {}).items()
                              if key in checked and tuple(key.split(":", 1)) not in failed}
             state["checked_cutoffs"].update(valid_cutoffs)
@@ -3450,10 +3865,20 @@ class SignalMonitor:
                 identities = [item["id"] for item in signals.values()
                               if _symbol_key(item) == symbol and item["frequency"] == period["frequency"]
                               and item.get("signal_type") != "consolidation_divergence"]
+                inactive = sorted(identity for identity in identities
+                                  if signals[identity].get('stage') in {'invalidated', 'left'})
+                pending = sorted(identity for identity in pending_point_previews
+                                 if _symbol_key(previous_signals[identity]) == symbol
+                                 and previous_signals[identity]['frequency'] == period['frequency'])
                 state["selection_checks"][period_key] = {
                     "symbol": symbol, "cutoff": period["source_closed_at"], "checked_at": stamp,
                     "revision": result.get("source_revision"), "identities": identities, "error": False,
+                    **({'price_basis_revision':period['price_basis_revision']} if period.get('price_basis_revision') else {}),
                     "input_fingerprint": period.get('input_fingerprint') or (period.get('evidence') or {}).get('input_fingerprint'),
+                    # Inactive events remain available to notification/history
+                    # consumers; incomplete preview checks prove no exit.
+                    **({'inactive_identities': inactive} if inactive else {}),
+                    **({'pending_identities': pending} if pending else {}),
                 }
                 record_costs(state, [period])
                 pending_age = state.get('monitor_pending_deadlines', {}).get(period_key, {})
@@ -3542,11 +3967,27 @@ class SignalMonitor:
                     'scheduled_at':state.get('active_scheduled_at',result.get('started_at')),
                     'detected_at':self.now().timestamp(),
                 }
+            waiting=state.setdefault('source_waiting_periods',{})
+            for period in result.get('verified_periods',[]):
+                waiting.pop(f"{_symbol_key(period)}:{period['frequency']}",None)
+            real_errors=[]
+            for error in errors:
+                key=f"{_symbol_key(error)}:{error.get('frequency','')}"
+                if error.get('reasons')==['DATA_SOURCE_PREPARING']:
+                    waiting[key]={k:error.get(k) for k in ('market','code','name','frequency','source_preparation','error')}
+                else:
+                    if not error.get('frequency'):
+                        for scope in list(waiting):
+                            if scope.rsplit(':',1)[0]==_symbol_key(error):
+                                waiting.pop(scope,None)
+                    else:
+                        waiting.pop(key,None)
+                    real_errors.append(error)
             state.update(signals=signals, events=events[:500],
                          known=dict(sorted(known.items(), key=lambda item: item[1]["updated_at"], reverse=True)[:10000]),
                          monitor_cursor={"run_id": result["run_id"], "completed": through},
-                         last_cutoffs=latest_cutoffs, errors=errors,
-                         last_error="部分标的行情或计算异常，请查看问题列表" if errors else "")
+                         last_cutoffs=latest_cutoffs, errors=real_errors,
+                         last_error="部分标的行情或计算异常，请查看问题列表" if real_errors else "")
             retain_notifications(state,stamp,changed_events+risk_changes)
             pool_changed = resolve_pending(state, checked, result.get('source_revision'))
             self._save()
@@ -3554,13 +3995,27 @@ class SignalMonitor:
             # before enqueue is recovered by _publish_notifications; enqueue
             # must never expose a fact which exists only in process memory.
             notifications_enabled = state.get('dingtalk_enabled')
-            analytics_events = deepcopy(events)
-            if after < through < result.get("completed", 0):
+            analytics_events = self._snapshot_analytics_events(events)
+            committed = result.get("completed", 0)
+            # An asynchronous proof may describe an earlier committed prefix.
+            # The current status can reveal more work for that same run and
+            # source, without widening the proof just consumed.
+            if (status.get("run_id") == result.get("run_id")
+                    and result.get("source_revision")
+                    and status.get("source_revision") == result.get("source_revision")
+                    and status.get("current_source_revision", status.get("source_revision"))
+                        == result.get("current_source_revision", result.get("source_revision"))
+                    and type(status.get("completed")) is int):
+                committed = max(committed, status["completed"])
+            if after < through < committed:
                 # Preserve bounded reads but drain an already committed
                 # backlog without another fixed three-second polling sleep.
                 self._wake.set()
         if pool_changed:
             self._sync_watchlist()
+        wake = getattr(self._notifications,'wake_validation',None)
+        if callable(wake):
+            wake({(_symbol_key(p),p['frequency']) for p in result.get('verified_periods',[])})
         try:
             from .higher_context import prefetch
             prefetch(self.screening,result)
@@ -3576,6 +4031,38 @@ class SignalMonitor:
         self.analytics.record(analytics_events,result.get('verified_periods',()),run_id=result['run_id'],revision=result.get('source_revision',''))
         if state.get("processed_run") == result["run_id"]:
             self._prune_runs()
+
+    def _snapshot_analytics_events(self, events):
+        from .signal_analytics import SignalAnalytics, snapshot_events as snapshot_analytics_events
+        analytics = self.analytics
+        if (type(analytics) is SignalAnalytics
+                and getattr(analytics.record, '__func__', None) is SignalAnalytics.record):
+            return snapshot_analytics_events(events)
+        return deepcopy(events)  # Preserve the payload contract for custom consumers.
+
+    def _prepare_warning_checks(self, result):
+        """Read large frozen sources outside the HTTP/notification state lock."""
+        if not result.get('source_current'):
+            return {}
+        periods = {(_symbol_key(p), p['frequency']):p for p in result.get('verified_periods', [])}
+        present = {_signal_identity(row) for row in [*result.get('selected', []), *result.get('observations', [])]}
+        present.update(_consolidation_signal(row)['id'] for row in result.get('consolidation_alerts', []))
+        with self._lock:
+            state = self._load()
+            if not state['enabled'] or result.get('run_id') != state.get('active_monitor_run'):
+                return {}
+            previous = {**state['unverified_signals'], **state['signals']}
+            pending = [deepcopy(item) for identity, item in previous.items()
+                       if identity not in present and (_symbol_key(item), item['frequency']) in periods
+                       and item.get('signal_type') in {'native_point_preview', 'consolidation_divergence'}
+                       and item.get('stage') in {'approaching', 'warning', 'invalidated'}]
+        from .warning_lifecycle import recheck_warning
+        cache, output = {}, {}
+        for item in pending:
+            period = periods[_symbol_key(item), item['frequency']]
+            assessment, continued = recheck_warning(item, period, result['run_id'], self.monitor.root, cache)
+            output[item['id']] = {'original':item, 'assessment':assessment, 'continued':continued}
+        return output
 
     def _prepare_risk_checks(self, result):
         from .holding_risk import check
@@ -3596,7 +4083,7 @@ class SignalMonitor:
                          result.get('settings',{}).get('frequencies',state.get('monitor_frequencies',[])))}
             previous = deepcopy(state['selection_checks'])
         periods = {f"{_symbol_key(p)}:{p['frequency']}": p for p in result.get('verified_periods',[])}
-        active_ids = {_signal(row)['id'] for row in result.get('selected',[])+result.get('observations',[])}
+        active_ids = {_signal_identity(row) for row in result.get('selected',[])+result.get('observations',[])}
         output = {}
         for key,plan in plans.items():
             period = periods.get(key)
@@ -3627,6 +4114,8 @@ class SignalMonitor:
                             raise ValueError('monitor evidence owner is missing')
                         values.append(item.get('evidence_run_id'))
                     values.append((item.get('invalidation_reference') or {}).get('evidence_run_id'))
+                    values.append((item.get('warning_reference') or {}).get('evidence_run_id'))
+                    values.append(((item.get('invalidation_reference') or {}).get('warning_reference') or {}).get('evidence_run_id'))
             values.extend(plan.get('evidence_run_id') for plan in state['holding_risk_plans'].values() if plan.get('active'))
             for record in state['holding_evidence'].values():
                 if record.get('evidence') and not record.get('evidence_run_id'):
@@ -3655,6 +4144,14 @@ class SignalMonitor:
             root = self.monitor.root.resolve()
             if not root.is_dir():
                 return
+            if time.monotonic()-getattr(self,'_warning_cleanup_at',0)>3600:
+                from .warning_evidence import cleanup
+                with self._lock:
+                    saved=self._load()
+                    origins=deepcopy({k:saved.get(k,{ } if k!='events' else []) for k in
+                                      ('signals','unverified_signals','pending_notifications','events')})
+                cleanup(root,origins,now=self.now().timestamp())
+                self._warning_cleanup_at=time.monotonic()
             runs = []
             for path in root.iterdir():
                 try:

@@ -110,8 +110,8 @@ def test_reenabled_period_rejects_a_previously_queued_confirmation(setup):
     service._consume_monitor()
     event, = [e for e in state['events'] if e.get('point_id') == 'old-queued']
     expected = {('a:SH.600088', '1m'): cutoff}
-    valid, pending = service._validate_notification_state([event], 'revision', True, None, expected)
+    valid, pending = service._validate_notification_state([event], 'revision', True, {'a:SH.600088'}, expected)
     assert len(valid) == 1 and not pending
     state['notification_frequency_since']['1m'] = cutoff
-    valid, pending = service._validate_notification_state([event], 'revision', True, None, expected)
+    valid, pending = service._validate_notification_state([event], 'revision', True, {'a:SH.600088'}, expected)
     assert not valid and not pending

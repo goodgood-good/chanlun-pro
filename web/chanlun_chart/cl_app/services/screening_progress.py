@@ -11,7 +11,7 @@ import threading
 from chanlun.screening.evidence import evidence_paths
 
 
-LISTS = ("selected", "observations", "entry_waiting", "consolidation_alerts", "verified_periods",
+LISTS = ("selected", "observations", "historical_confirmed", "entry_waiting", "consolidation_alerts", "verified_periods",
          "u295_lower_structural_witnesses", "recent_rejections", "processed_symbols", "processed_periods",
          "empty_result_symbols", "errors")
 COUNTS = ("semantic_exclusion_count", "lifetime_exclusion_count", "selection_policy_exclusion_count")
@@ -86,12 +86,13 @@ def _guard(directory, base, through):
         actual = index + 1
         item = json.loads(line)
         for row in item["rows"]:
-            periods = {row["frequency"]}
+            manifests = [(row['frequency'], row.get('evidence', {}))]
             if row.get("confirmation_evidence"):
-                periods.add("1m")
-            for period in periods:
-                manifest = row.get("confirmation_evidence", {}) if period != row["frequency"] else row.get("evidence", {})
-                for path in evidence_paths(directory, row["code"], period, manifest.get("market", row.get("market", item.get("market", "a")))):
+                manifests.append(('1m', row['confirmation_evidence']))
+            if row.get('background_evidence'):
+                manifests.append(('30m', row['background_evidence']))
+            for period, manifest in manifests:
+                for path in evidence_paths(directory, row["code"], period, manifest.get("market", row.get("market", item.get("market", "a"))), manifest.get('namespace')):
                     touched[str(path)] = None
     if actual != through:
         raise ValueError("已完成进度对应的结果尚未完整写入，请稍后刷新")

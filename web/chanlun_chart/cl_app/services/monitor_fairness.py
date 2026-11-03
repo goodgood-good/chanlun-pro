@@ -9,6 +9,21 @@ LANES = ('hot', 'critical', 'cold')
 SERVICE_SECONDS = 60
 
 
+def live_batch_waves(plan, maximum=4):
+    """Keep workers fed while bounding queued computation to a live slice.
+
+    An overdue queue needs throughput, not a fresh run for every worker wave.
+    Holding preemption and the existing live slice still bound urgent handoffs.
+    """
+    costs = plan.get('period_costs', {})
+    live = [(key, frequency) for key, frequencies in plan['periods'].items()
+            if key in plan.get('recent', ()) for frequency in frequencies]
+    measured = [costs.get(frequency, {}).get('seconds', 0) for _, frequency in live]
+    measured = [value for value in measured
+                if type(value) in (int, float) and math.isfinite(value) and value > 0]
+    return min(maximum, max(1, int(30 / max(measured)))) if measured else maximum
+
+
 def task_lane(frequency, minute_decision):
     if frequency != '1m':
         return 'critical'
@@ -70,31 +85,52 @@ def remember_pending(state, periods, targets, decisions, revision, now):
 
 def record_costs(state, periods):
     """Successful committed worker timings only; never infer time from candles."""
+    from chanlun.screening.worker_transport import TIMING_SCOPE
     costs = state.setdefault('monitor_period_costs', {})
     for period in periods:
         timeline = period.get('processing_timeline', {})
-        start, finish = timeline.get('calculation_started_at'), timeline.get('calculation_finished_at')
-        if (type(start) not in (int, float) or type(finish) not in (int, float)
-                or not math.isfinite(start) or not math.isfinite(finish) or not 0 < finish-start <= 180):
+        if not isinstance(timeline, dict):
             continue
+        if timeline.get('measurement_scope') not in (None, TIMING_SCOPE):
+            continue
+        complete = timeline.get('measurement_scope') == TIMING_SCOPE
+        if complete:
+            timings = period.get('timings_ms')
+            if not isinstance(timings, dict):
+                continue
+            total = timings.get('total')
+            if type(total) not in (int, float) or not math.isfinite(total) or not 0 < total <= 180000:
+                continue
+            sample = total / 1000
+        else:
+            start, finish = timeline.get('calculation_started_at'), timeline.get('calculation_finished_at')
+            if (type(start) not in (int, float) or type(finish) not in (int, float)
+                    or not math.isfinite(start) or not math.isfinite(finish) or not 0 < finish-start <= 180):
+                continue
+            sample = finish - start
         frequency = period.get('frequency')
         if frequency not in ('1m', '5m', '30m'):
             continue
         previous = costs.get(frequency, {})
-        sample = finish-start
+        if previous.get('measurement_scope') == TIMING_SCOPE and not complete:
+            continue
+        if complete and previous.get('measurement_scope') != TIMING_SCOPE:
+            previous = {}
         costs[frequency] = {'seconds': round(.8*previous['seconds']+.2*sample, 6)
                            if previous.get('samples') else sample,
-                           'samples': min(100000, previous.get('samples', 0)+1)}
+                           'samples': min(100000, previous.get('samples', 0)+1),
+                           **({'measurement_scope': TIMING_SCOPE} if complete else {})}
 
 
-def service_pressure(state, periods, targets, decisions, recent, now, capacity):
-    """Estimate live service demand; closed markets never trigger a boost."""
+def service_pressure(state, periods, targets, decisions, recent, now, capacity, *, recurring_keys=None):
+    """Estimate recurring demand separately from unexpired closing work."""
     costs = state.get('monitor_period_costs', {})
+    recurring_keys = recent if recurring_keys is None else recurring_keys
     recurring, due_work, oldest = 0., 0., 0.
-    seed = state.get('seed') or {}
+    from .monitor_scope import independent_monitor_periods
     for key in recent:
         decision = decisions.get(key, {})
-        for frequency in seed.get('settings', {}).get('frequencies', []):
+        for frequency in independent_monitor_periods(state, key) if key in recurring_keys else ():
             seconds = costs.get(frequency, {}).get('seconds', .25)
             cadence = 300 if frequency == '1m' and decision.get('cold') else int(frequency[:-1])*60
             recurring += seconds / cadence
@@ -206,6 +242,7 @@ def plan_batch(symbols, periods, *, state, targets, minute_decisions, urgent,
     queues = defaultdict(list)
     holding_tasks = defaultdict(list)
     held = set(state.get('holding_symbols', []))
+    notification_periods = set(state.get('notification_priority_periods', ()))
     for symbol in symbols:
         key = f"{symbol.get('market', 'a')}:{symbol['code']}"
         decision = minute_decisions.get(key, {})
@@ -213,7 +250,8 @@ def plan_batch(symbols, periods, *, state, targets, minute_decisions, urgent,
             lane = task_lane(frequency, decision)
             deadline = task_deadline(state, key, frequency, targets.get(f'{key}:{frequency}'), decision, now)
             priority = (key not in held, key not in urgent, symbol.get('origin') != 'watchlist',
-                        deadline, state.get('attempted_cutoffs', {}).get(key, 0), key, frequency)
+                        deadline, f'{key}:{frequency}' not in notification_periods,
+                        state.get('attempted_cutoffs', {}).get(key, 0), key, frequency)
             task = {'symbol': symbol, 'key': key, 'frequency': frequency,
                     'lane': lane, 'deadline': deadline, 'priority': priority}
             if key in held:

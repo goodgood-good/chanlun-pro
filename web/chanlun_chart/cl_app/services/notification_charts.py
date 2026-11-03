@@ -40,11 +40,62 @@ def preparing_history_periods(coverage):
             if coverage.get(period, {}).get('state') not in ('invalid', 'unsupported')]
 
 
+def history_source_limited(history, present, missing, initial_hash):
+    """A delivered three-panel chart can have a terminal history-source limit."""
+    outstanding = missing_history_periods(history)
+    return bool(initial_hash and not missing and {'1m', '5m', '30m'} <= set(present)
+                and outstanding and all(history[p].get('state') == 'unsupported' for p in outstanding))
+
+
+def migrate_history_limits(db):
+    if db.execute("SELECT 1 FROM settings WHERE k='history_limits_v1'").fetchone():
+        return
+    for row in db.execute("SELECT * FROM jobs WHERE status='failed' AND error LIKE '历史范围受限：%'").fetchall():
+        try:
+            limited = history_source_limited(json.loads(row['history_coverage']),
+                json.loads(row['present_periods']), json.loads(row['missing_periods']), row['initial_image_hash'])
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        if limited:
+            db.execute("UPDATE jobs SET status='limited' WHERE id=? AND status='failed'", (row['id'],))
+    db.execute("INSERT INTO settings VALUES ('history_limits_v1',1)")
+
+
+def migrate_longbridge_history(db, outbox):
+    from chanlun import config
+    key = 'longbridge_history_v1'
+    if (str(config.US_HISTORY_KLINE_SOURCE).lower() != 'longbridge'
+            or db.execute('SELECT 1 FROM settings WHERE k=?', (key,)).fetchone()):
+        return
+    for row in db.execute("SELECT * FROM jobs WHERE status IN ('limited','failed','expired') "
+                          "AND initial_image_hash!='' AND created>?",
+                          (outbox.now()-ChartStore.lifetime,)).fetchall():
+        try:
+            event, history = json.loads(row['event']), json.loads(row['history_coverage'])
+            if event.get('market') != 'us' or not missing_history_periods(history):
+                continue
+            if any(value.get('state') == 'invalid' for value in history.values()):
+                continue
+            receipt = outbox.chart_completion_receipt(event)
+            if receipt is None or receipt['image_hash'] != row['initial_image_hash']:
+                continue
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        db.execute("UPDATE jobs SET status='pending',attempts=0,next_try=0,history_stalls='0',"
+                   "history_progress='',error='历史来源已支持，等待补齐' WHERE id=?", (row['id'],))
+    db.execute('INSERT INTO settings VALUES (?,1)', (key,))
+
+
 def _frequency_priority(payload):
     try:
         return int(json.loads(payload).get('frequency') in ('5m', '30m'))
     except (ValueError, TypeError, AttributeError, RecursionError):
         return 0
+
+
+def _historical_view(payload):
+    try:return int(json.loads(payload).get('historical_chart_only') is True)
+    except (ValueError,TypeError,AttributeError):return 0
 
 
 class RenderedChart(bytes):
@@ -95,6 +146,11 @@ class ChartStore:
         return value
 
     def publish(self, png):
+        from chanlun.persistence.file_lock import interprocess_file_lock
+        with interprocess_file_lock(self.root / '.publish-cleanup.lock', timeout_seconds=5):
+            return self._publish(png)
+
+    def _publish(self, png):
         if not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) > 8 * 1024 * 1024:
             raise ValueError("invalid chart image")
         key = self._secret(create=True)
@@ -146,10 +202,24 @@ class ChartStore:
         except (OSError, ValueError, TypeError):
             return None
 
-    def cleanup(self):
-        if self.root.is_dir():
+    def cleanup(self, *, protected_hashes=None):
+        # Standalone callers cannot prove that old pixels are unreferenced.
+        if protected_hashes is None or not self.root.is_dir():
+            return
+        if (not isinstance(protected_hashes, (set, frozenset)) or any(
+                not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value)
+                for value in protected_hashes)):
+            raise ValueError('Image cleanup requires verified reference identities')
+        from chanlun.persistence.file_lock import interprocess_file_lock
+        with interprocess_file_lock(self.root / '.publish-cleanup.lock', timeout_seconds=.1):
             for path in self.root.glob("*.png"):
-                if path.resolve().parent == self.root.resolve() and self.now() - path.stat().st_mtime > self.lifetime + 86400:
+                if (path.stem in protected_hashes or path.is_symlink()
+                        or not re.fullmatch(r'[a-f0-9]{64}', path.stem)
+                        or path.resolve().parent != self.root.resolve()):
+                    continue
+                # Re-read age under the same lock as publish(), which may have
+                # refreshed an existing content hash after the reference scan.
+                if self.now() - path.stat().st_mtime > self.lifetime + 86400:
                     path.unlink(missing_ok=True)
                     path.with_suffix('.json').unlink(missing_ok=True)
 
@@ -163,20 +233,36 @@ class ChartStore:
             return None
 
 
-def render_signal_chart(event, runs_root, *, completion=False, history_period=None):
+def render_signal_chart(event, runs_root, *, completion=False, history_period=None, previous_history=None):
     """Export the real TradingView renderer using verified, frozen evidence."""
     from .tradingview_snapshot import capture, prepare_history_layout, PanelImageCache
     cache = PanelImageCache(event, Path(runs_root).parent / 'chart_panel_cache')
     reused = cache.read()
+    summary=bool(event.get('warning_hypothesis') or (event.get('invalidation_reference') or {}).get('warning_hypothesis'))
     payload = prepare_history_layout(event, runs_root, reused_images=reused, history_period=history_period,
-                                     initial_only=not completion, defer_context=completion)
+                                     initial_only=not completion, defer_context=completion,
+                                     previous_history=previous_history,
+                                     **({'allow_summary_reference':True} if summary else {}))
     if completion and preparing_history_periods(payload['history_coverage']):
         raise ChartHistoryPending(payload['history_coverage'])
     return capture(payload, panel_sink=cache.save,
                    completion_event=event if completion else None)
 
 
-def load_chart_evidence(event, runs_root):
+def load_chart_evidence(event, runs_root, *, allow_summary_reference=False):
+    try:
+        return _load_chart_evidence(event, runs_root,allow_summary_reference=allow_summary_reference)
+    except (OSError, ValueError, KeyError) as original:
+        from .notification_evidence import NotificationEvidence
+        archive = NotificationEvidence(Path(runs_root).parent / 'notification_evidence')
+        try:
+            with archive.materialized_runs(event) as (mounted, _):
+                return _load_chart_evidence(event, mounted,allow_summary_reference=allow_summary_reference)
+        except (OSError, ValueError, KeyError) as archived:
+            raise original from archived
+
+
+def _load_chart_evidence(event, runs_root, *, allow_summary_reference=False):
     """Reject a stale or mismatched event before opening a browser."""
     run_id = event.get("evidence_run_id", "")
     if not re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -208,6 +294,34 @@ def load_chart_evidence(event, runs_root):
             raise ValueError('risk chart reversal does not match frozen evidence')
         return frame,snapshot,points[0]
     consolidation = event.get("signal_type") == "consolidation_divergence"
+    if (event.get('warning_assessment') or {}).get('schema') == 'warning-lifecycle-v1':
+        from .warning_lifecycle import warning_reference, read_warning_source
+        from chanlun.core.strict_structure.warning_lifecycle import bind_warning, assess_warning
+        reference = warning_reference(event.get('invalidation_reference') or event)
+        summary_only=False
+        try:
+            _, original = read_warning_source(reference, runs_root, {})
+            hypothesis = bind_warning(original, reference)
+        except (OSError,ValueError,KeyError):
+            hypothesis=event.get('warning_hypothesis') or (event.get('invalidation_reference') or {}).get('warning_hypothesis')
+            if not allow_summary_reference or not isinstance(hypothesis,dict):raise
+            summary_only=True
+        verified = assess_warning(hypothesis, snapshot, frame)
+        if verified != event['warning_assessment']:
+            raise ValueError('warning lifecycle disagrees with frozen evidence')
+        if event.get('stage') == 'invalidated':
+            if verified['state'] != 'invalidated' or event.get('invalidation_reason_code') != verified['reason_code']:
+                raise ValueError('warning invalidation disagrees with frozen evidence')
+            return frame, snapshot, {'anchor_at':snapshot['source_closed_at'], 'anchor_price':float(frame.close.iloc[-1]),
+                'reference_anchor_at':reference['anchor_at'], 'reference_anchor_price':reference['anchor_price'],
+                'reference_basis_current':not summary_only and reference.get('price_basis_revision') == snapshot['price_basis_revision'],
+                'reference_summary_only':summary_only}
+        if (verified['state'] not in {'observing', 'candidate_updated'}
+                or event.get('anchor_price') != verified['anchor_price'] or event.get('anchor_at') != verified['anchor_at']):
+            raise ValueError('warning candidate disagrees with frozen evidence')
+        return frame, snapshot, {'anchor_at':verified['anchor_at'], 'anchor_price':verified['anchor_price'],
+            'status':'approaching', 'confirmed_at':None, 'formal_point_issued':False,
+            'reference_summary_only':summary_only}
     if consolidation and event.get('stage') == 'invalidated':
         from .signal_monitor import _invalidation_evidence
         reference=event.get('invalidation_reference')
@@ -281,6 +395,7 @@ class NotificationCharts:
             db.row_factory=sqlite3.Row
             db.create_function('holding_priority', 1, lambda payload: queued_priority(payload, holding_symbols))
             db.create_function('frequency_priority', 1, _frequency_priority)
+            db.create_function('chart_view_only',1,_historical_view)
             db.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,event TEXT,status TEXT,created REAL,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0,error TEXT DEFAULT '',updated REAL)")
             if 'updated' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
                 try:
@@ -302,6 +417,8 @@ class NotificationCharts:
             db.execute("INSERT OR IGNORE INTO settings VALUES ('enabled_at',?)",(self.created_at,))
             db.execute("CREATE TABLE IF NOT EXISTS evidence_archive_jobs(id TEXT PRIMARY KEY,status TEXT,attempts INTEGER DEFAULT 0,next_try REAL DEFAULT 0,error TEXT DEFAULT '')")
             db.execute("INSERT OR IGNORE INTO settings VALUES ('archive_enabled_at',?)",(self.created_at,))
+            migrate_history_limits(db)
+            migrate_longbridge_history(db, self.outbox)
             with db:
                 yield db
         finally:
@@ -313,6 +430,7 @@ class NotificationCharts:
             path=(self.root/'chart_jobs.sqlite3').resolve()
             db=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=0.1)
             db.row_factory=sqlite3.Row
+            db.create_function('chart_view_only',1,_historical_view)
             return db
 
         db=connect()
@@ -362,7 +480,7 @@ class NotificationCharts:
                     continue
                 if (not (event.get("stage") in {"warning","confirmed"}
                           or event.get('stage') == 'approaching' and event.get('signal_type') == 'native_point_preview'
-                         or event.get('stage') == 'invalidated' and event.get('signal_type') == 'consolidation_divergence'
+                         or event.get('stage') == 'invalidated' and event.get('signal_type') in {'consolidation_divergence','native_point_preview'}
                          or event.get('stage') == 'triggered' and event.get('signal_type') == 'holding_risk')
                         or event.get('recorded_at', 0) < enabled_at and not event.get('inline_chart')
                         or not event.get("evidence") or not event.get("evidence_run_id")):
@@ -382,7 +500,7 @@ class NotificationCharts:
         with self._db() as db:
             db.execute("UPDATE settings SET v=? WHERE k='enabled_at'", (since,))
             db.execute("UPDATE jobs SET status='expired',error='通知开关已更新，旧图表不再补发' "
-                       "WHERE status IN ('pending','running') AND created<?", (since,))
+                       "WHERE status IN ('pending','running') AND initial_image_hash='' AND chart_view_only(event)=0 AND created<?", (since,))
 
     def recover(self):
         if not self.outbox.path.exists():
@@ -419,6 +537,31 @@ class NotificationCharts:
                 if status!='sent':
                     continue
             self.enqueue(events,stamp)
+
+    def recover_retained_invalidation_views(self):
+        """Backfill an already-delivered text record without another push."""
+        marker='native_invalidation_views_v1'
+        with self._db() as db:
+            if db.execute('SELECT 1 FROM settings WHERE k=?',(marker,)).fetchone():return
+        if not self.outbox.path.is_file():return
+        with self.outbox._read_connect() as db:
+            rows=db.execute("SELECT p.events,o.sent FROM outbox o JOIN signal_payloads p ON p.outbox_id=o.id "
+                "WHERE o.kind='signals' AND o.status='sent' AND o.sent>=?",(self.outbox.now()-self.store.lifetime,)).fetchall()
+        for raw,sent in rows:
+            try:events=json.loads(raw)
+            except (ValueError,TypeError):continue
+            for original in events if isinstance(events,list) else []:
+                if (not isinstance(original,dict) or original.get('signal_type')!='native_point_preview'
+                        or original.get('stage')!='invalidated'):continue
+                event={**original,'historical_chart_only':True}
+                receipt=self.outbox.retained_signal_receipt(event)
+                if receipt is None:continue
+                from .dingtalk_notifications import signal_key
+                with self._db() as db:
+                    db.execute("INSERT OR IGNORE INTO jobs(id,event,status,created) VALUES (?,?,'pending',?)",
+                        (signal_key(event),json.dumps(event,ensure_ascii=False),sent))
+        with self._db() as db:db.execute('INSERT OR IGNORE INTO settings VALUES (?,1)',(marker,))
+        self._history_wake.set()
 
     @staticmethod
     def _validate_job_event(event, identity=None):
@@ -477,9 +620,10 @@ class NotificationCharts:
             db.execute('BEGIN IMMEDIATE')
             if lane == 'history' and db.execute(
                     "SELECT 1 FROM jobs WHERE status IN ('pending','running') AND initial_image_hash='' "
-                    "AND next_try<=? LIMIT 1", (now,)).fetchone():
+                    "AND chart_view_only(event)=0 AND next_try<=? LIMIT 1", (now,)).fetchone():
                 return False
-            condition = "initial_image_hash=''" if lane == 'initial' else "initial_image_hash!=''"
+            condition = ("initial_image_hash='' AND chart_view_only(event)=0" if lane=='initial' else
+                         "(initial_image_hash!='' OR chart_view_only(event)=1)")
             if skip_waiting:
                 condition += " AND error!='等待信号有效性复核'"
             row=db.execute("SELECT * FROM jobs WHERE status IN ('pending','running') AND next_try<=? "
@@ -498,10 +642,6 @@ class NotificationCharts:
                 db.execute("UPDATE jobs SET status='failed',error='图表任务数据损坏',updated=? WHERE id=?",(self.outbox.now(),row['id']))
             return True
 
-        def check_deadline():
-            if not notification_is_live(event, self.outbox.now()):
-                raise _ChartExpired()
-
         missing = json.loads(row['missing_periods'] or '[]')
         present = json.loads(row['present_periods'] or '[]')
         history = json.loads(row['history_coverage'] or '{}')
@@ -509,6 +649,7 @@ class NotificationCharts:
         progress = row['history_progress'] or ''
         attempts = row['attempts'] + 1
         initial_hash = row['initial_image_hash'] or self.outbox.initial_chart_hash(event)
+        view_only=event.get('historical_chart_only') is True
         if lane == 'initial' and initial_hash:
             # The first receipt can survive a crash before the chart job write.
             # Move recovered completion work out of the latency-sensitive lane.
@@ -517,6 +658,15 @@ class NotificationCharts:
                            "WHERE id=? AND status='running'", (initial_hash,row['attempts'],row['id']))
             self._history_wake.set()
             return False
+        receipt = (self.outbox.retained_signal_receipt(event) if view_only else
+                   self.outbox.chart_completion_receipt(event) if initial_hash else None)
+        deadline = (receipt['deadline'] if receipt and (view_only or receipt['image_hash'] == initial_hash)
+                    else notification_deadline(event))
+
+        def check_deadline():
+            if self.outbox.now() >= deadline:
+                raise _ChartExpired()
+
         retry_delay = 30
         selected = None
 
@@ -526,7 +676,8 @@ class NotificationCharts:
             outstanding = missing_history_periods(history)
             states = {history.get(period, {}).get('state') for period in outstanding}
             if states & {'invalid', 'unsupported'} and not preparing_history_periods(history):
-                return 'failed', '历史范围受限：' + '、'.join(
+                status = 'limited' if history_source_limited(history, present, missing, initial_hash) else 'failed'
+                return status, '历史范围受限：' + '、'.join(
                     period + ('来源暂不支持' if history[period].get('state') == 'unsupported' else '历史校验未通过')
                     for period in outstanding if history[period].get('state') in {'invalid', 'unsupported'})
             if 'render_error' in states:
@@ -534,7 +685,7 @@ class NotificationCharts:
             if selected and history.get(selected, {}).get('state') == 'source_error':
                 delay = history[selected].get('next_retry', 30)
                 if type(delay) in (int, float) and math.isfinite(delay):
-                    retry_delay = min(max(30, delay), max(0, notification_deadline(event) - self.outbox.now()))
+                    retry_delay = min(max(30, delay), max(0, deadline - self.outbox.now()))
                 return ('failed' if row['attempts'] >= 2 else 'pending'), '历史来源请求失败，等待有界重试'
             signature = hashlib.sha256(json.dumps({p: history.get(p, {}).get('progress_token')
                 for p in ('1m', '5m', '30m')}, sort_keys=True).encode()).hexdigest()
@@ -547,13 +698,13 @@ class NotificationCharts:
             retry_delay = 5 if advanced else min(300, 15 * 2 ** stalls)
             return 'pending', '历史范围正在补齐：' + '、'.join(outstanding)
 
-        if not notification_is_live(event, now):
+        if now >= deadline:
             status,error='expired','图表任务已过期'
         else:
             phase='信号复核'
             try:
                 worker_progress.phase('signal_validation')
-                if self.outbox.signal_validator:
+                if not initial_hash and not view_only and self.outbox.signal_validator:
                     valid,pending=self.outbox.signal_validator(self.outbox._holding_hints([event], holding_symbols))
                     check_deadline()
                     if pending:
@@ -578,10 +729,11 @@ class NotificationCharts:
                 outstanding = preparing_history_periods(history)
                 ordered = ('5m', '30m', '1m')
                 selected = next((ordered[(turn + offset) % 3] for offset in range(3)
-                    if ordered[(turn + offset) % 3] in outstanding), None) if initial_hash else None
+                    if ordered[(turn + offset) % 3] in outstanding), None) if initial_hash or view_only else None
                 if selected:
                     turn = (ordered.index(selected) + 1) % 3
-                png=(self.renderer(event,self.root/'runs',completion=bool(initial_hash),history_period=selected)
+                png=(self.renderer(event,self.root/'runs',completion=bool(initial_hash or view_only),history_period=selected,
+                                   previous_history=history)
                      if self.renderer is render_signal_chart else self.renderer(event,self.root/'runs'))
                 check_deadline()
                 coverage = getattr(png, 'coverage', None)
@@ -592,7 +744,7 @@ class NotificationCharts:
                 phase='图片发布'
                 worker_progress.phase('image_publish')
                 url=self.store.publish(png)
-                if self.check_public:
+                if self.check_public and not initial_hash and not view_only:
                     phase='公网访问校验'
                     worker_progress.phase('public_image_check')
                     import requests
@@ -604,7 +756,9 @@ class NotificationCharts:
                 worker_progress.phase('image_enqueue')
                 image_hash = hashlib.sha256(png).hexdigest()
                 previous = self.store.coverage(initial_hash) if initial_hash else None
-                if initial_hash and (missing or preparing_history_periods(history)):
+                if view_only:
+                    accepted=self.outbox.save_retained_chart_view(event,url)
+                elif initial_hash and (missing or preparing_history_periods(history)):
                     accepted = True  # Do not send a second partial copy.
                 elif initial_hash and (image_hash == initial_hash or previous
                                       and previous.get('schema') == 'notification-chart-coverage-v2'
@@ -619,7 +773,11 @@ class NotificationCharts:
                     if accepted and not initial_hash:
                         initial_hash = image_hash
                 if not accepted:
-                    status,error='expired','通知已过期或开关已更新'
+                    if initial_hash and notification_is_live(event, self.outbox.now()):
+                        status,error='pending','等待原图送达后保存补全图'
+                        attempts, retry_delay = row['attempts'], 2
+                    else:
+                        status,error='expired','通知已过期或开关已更新'
                 elif missing and not preparing_history_periods(history):
                     status = 'failed' if row['attempts'] >= 2 else 'pending'
                     error = '辅助周期未补齐：' + '、'.join(missing) + ('；已达到本次重试上限' if status == 'failed' else '；将重试补齐')
@@ -629,7 +787,7 @@ class NotificationCharts:
                 else:
                     status,error='ready',''
             except ChartHistoryPending as exc:
-                if notification_is_live(event, self.outbox.now()):
+                if self.outbox.now() < deadline:
                     status, error = history_outcome(exc.coverage)
                 else:
                     status, error = 'expired', '图表任务已过期'
@@ -638,23 +796,55 @@ class NotificationCharts:
             except Exception as exc:
                 status='failed' if row['attempts']>=2 else 'pending'
                 error=phase+'失败（'+type(exc).__name__+'）'
+                if view_only and row['attempts']>=2 and phase=='冻结证据绘图' and isinstance(exc,(FileNotFoundError,ValueError,KeyError)):
+                    status,error='limited','历史现场证据缺失或无法核验，无法恢复附图；原通知文字保留'
         with self._db() as db:
             finished=self.outbox.now()
-            next_try = min(finished + retry_delay, notification_deadline(event)) if status == 'pending' else finished + retry_delay
+            next_try = min(finished + retry_delay, deadline) if status == 'pending' else finished + retry_delay
             db.execute("UPDATE jobs SET status=?,error=?,next_try=?,updated=?,missing_periods=?,present_periods=?,initial_image_hash=?,"
                        "history_coverage=?,missing_history_periods=?,history_progress=?,history_turn=?,history_stalls=?,attempts=? "
                        "WHERE id=? AND status='running'",
                        (status,error,next_try,finished,json.dumps(missing),json.dumps(present),initial_hash or '',
                         json.dumps(history),json.dumps(missing_history_periods(history)),progress,turn,stalls,attempts,row['id']))
-        if not initial_hash or status == 'expired':
+        if not view_only and (not initial_hash or status == 'expired'):
             self.outbox.finish_inline_chart(event,status,error)
         elif status == 'pending':
             self._history_wake.set()
         return True
 
+    @contextmanager
+    def _read_image_outbox(self):
+        # Cleanup must not run the outbox's compatibility migrations. An
+        # absent/old/unreadable schema means image references are unknown.
+        db = sqlite3.connect(self.outbox.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=.1)
+        try:
+            db.execute('BEGIN')
+            yield db
+        finally:
+            db.close()
+
     def cleanup(self):
         """Expire historical diagnostics even when no new charts are generated."""
-        self.store.cleanup()
+        image_cleanup_error = ''
+        try:
+            # Commit job retirement before deleting any image. Otherwise a
+            # later transaction rollback could restore a job referencing a
+            # PNG already removed from disk.
+            with self._db() as db:
+                db.execute("DELETE FROM jobs WHERE status IN ('ready','limited','failed','expired') AND COALESCE(updated,created)<?",
+                           (self.outbox.now()-8*86400,))
+                db.execute('DELETE FROM evidence_archive_jobs WHERE id NOT IN (SELECT id FROM jobs)')
+            from .notification_image_retention import protected_image_hashes
+            try:
+                signing_key = self.store._secret()
+            except (OSError, ValueError):
+                signing_key = None
+            with self._read_db() as jobs, self._read_image_outbox() as outbox:
+                protected = protected_image_hashes(jobs, outbox, now=self.outbox.now(), signing_key=signing_key,
+                    archive_roots=(self.root/'notification_evidence', self.root/'notification_history'))
+                self.store.cleanup(protected_hashes=protected)
+        except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, RecursionError):
+            image_cleanup_error = '图片引用暂不可核对，已保留原图'
         from .notification_history import HistoryArchive
         HistoryArchive.cleanup(self.root/'notification_history', now=self.outbox.now())
         cache_root = self.root / 'chart_panel_cache'
@@ -662,7 +852,7 @@ class NotificationCharts:
             for folder in cache_root.iterdir():
                 if (folder.is_dir() and not folder.is_symlink() and re.fullmatch(r'[a-f0-9]{64}', folder.name)
                         and folder.resolve().parent == cache_root.resolve()
-                        and self.outbox.now() - folder.stat().st_mtime > 2 * 86400):
+                        and self.outbox.now() - folder.stat().st_mtime > self.store.lifetime + 86400):
                     for saved in folder.iterdir():
                         if saved.is_file() and not saved.is_symlink() and saved.resolve().parent == folder.resolve():
                             saved.unlink(missing_ok=True)
@@ -670,24 +860,19 @@ class NotificationCharts:
                         folder.rmdir()
                     except OSError:
                         pass
-        if (self.root/'chart_jobs.sqlite3').exists():
-            with self._db() as db:
-                db.execute("DELETE FROM jobs WHERE status IN ('ready','failed','expired') AND COALESCE(updated,created)<?",
-                           (self.outbox.now()-8*86400,))
-                db.execute('DELETE FROM evidence_archive_jobs WHERE id NOT IN (SELECT id FROM jobs)')
         try:
             self.archive.cleanup()
         except (OSError,ValueError,TypeError,KeyError):
-            self._archive_cleanup_error='通知证据清理暂不可用'
+            self._archive_cleanup_error=image_cleanup_error or '通知证据清理暂不可用'
         else:
-            self._archive_cleanup_error=''
+            self._archive_cleanup_error=image_cleanup_error
 
     def archive_one(self):
         now=self.outbox.now()
         with self._db() as db:
             row=db.execute("SELECT j.*,COALESCE(a.attempts,0) archive_attempts FROM jobs j "
                 "LEFT JOIN evidence_archive_jobs a ON a.id=j.id WHERE j.id NOT LIKE 'recovery:%' "
-                "AND j.created>=(SELECT v FROM settings WHERE k='archive_enabled_at') "
+                "AND (j.created>=(SELECT v FROM settings WHERE k='archive_enabled_at') OR chart_view_only(j.event)=1) "
                 "AND COALESCE(a.status,'retry')='retry' AND COALESCE(a.next_try,0)<=? "
                 "ORDER BY COALESCE(a.next_try,0),j.created,j.rowid LIMIT 1",(now,)).fetchone()
             if row is None:
@@ -703,7 +888,10 @@ class NotificationCharts:
                 event=json.loads(row['event'])
                 self._validate_job_event(event,row['id'])
                 self.history_progress.phase('evidence_archive')
-                self.archive.capture(event,self.root/'runs',row['created'])
+                summary=bool(event.get('warning_hypothesis') or
+                        (event.get('invalidation_reference') or {}).get('warning_hypothesis'))
+                self.archive.capture(event,self.root/'runs',row['created'],
+                    **({'allow_partial':True} if summary else {}))
                 status,error='saved',''
         except (OSError,sqlite3.Error) as exc:
             status='unavailable' if attempts>=3 else 'retry'
@@ -722,7 +910,7 @@ class NotificationCharts:
         with self._read_db() as db:
             rows=db.execute("SELECT j.event FROM jobs j LEFT JOIN evidence_archive_jobs a ON a.id=j.id "
                 "WHERE j.id NOT LIKE 'recovery:%' AND COALESCE(a.status,'retry')='retry' "
-                "AND j.created>=(SELECT v FROM settings WHERE k='archive_enabled_at') AND j.created>?",
+                "AND (j.created>=(SELECT v FROM settings WHERE k='archive_enabled_at') OR chart_view_only(j.event)=1) AND j.created>?",
                 (self.outbox.now()-self.archive.lifetime,)).fetchall()
         refs=set()
         for row in rows:
@@ -742,7 +930,7 @@ class NotificationCharts:
             with self._read_db() as db:
                 counts=dict(db.execute("SELECT COALESCE(a.status,'retry'),COUNT(*) FROM jobs j "
                     "LEFT JOIN evidence_archive_jobs a ON a.id=j.id WHERE j.id NOT LIKE 'recovery:%' "
-                    "AND j.created>=(SELECT v FROM settings WHERE k='archive_enabled_at') AND j.created>? "
+                    "AND (j.created>=(SELECT v FROM settings WHERE k='archive_enabled_at') OR chart_view_only(j.event)=1) AND j.created>? "
                     "GROUP BY COALESCE(a.status,'retry')",(self.outbox.now()-self.archive.lifetime,)).fetchall())
             return {'saved':counts.get('saved',0),'pending':counts.get('retry',0),
                     'unavailable':counts.get('unavailable',0),'keep_days':7,'error':error}
@@ -764,6 +952,7 @@ class NotificationCharts:
         except (OSError,sqlite3.Error):
             return {'pending':0,'failed':0,'last_error':'图表任务存储暂不可用'}
         return {'pending':counts.get('pending',0)+counts.get('running',0),'failed':counts.get('failed',0),
+                'limited':counts.get('limited',0),
                 'last_success_at':last_success,
                 'evidence_archive':self.archive_snapshot(),
                 'history_worker': self.history_progress.snapshot(),
@@ -782,7 +971,8 @@ class NotificationCharts:
             cleaned=0
             wake = self._wake if lane == 'initial' else self._history_wake
             progress = self.progress if lane == 'initial' else self.history_progress
-            condition = "initial_image_hash=''" if lane == 'initial' else "initial_image_hash!=''"
+            condition = ("initial_image_hash='' AND chart_view_only(event)=0" if lane=='initial' else
+                         "(initial_image_hash!='' OR chart_view_only(event)=1)")
             while not self._stop.is_set():
                 wake.clear()
                 wait_seconds = 2.0
@@ -795,6 +985,8 @@ class NotificationCharts:
                         if enabled():
                             if lane == 'initial':
                                 self.recover()
+                            else:
+                                self.recover_retained_invalidation_views()
                             processed = self.process_one(lane)
                             if lane == 'initial':
                                 self._runtime_error=''

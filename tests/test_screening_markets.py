@@ -184,10 +184,11 @@ def test_run_status_preserves_actual_cutoffs_for_every_market_and_period(tmp_pat
 def test_monitor_reuses_verified_catalog_and_preserves_holding_priority(tmp_path,monkeypatch):
     from cl_app.services.screening import validate_settings
     symbols=[{'market':'us','code':'TSLA.US','name':'held','origin':'watchlist'},
+             {'market':'a','code':'SH.600088','name':'*ST持仓','origin':'watchlist'},
              {'market':'a','code':'SH.600000','name':'other'}]
     settings=validate_settings({'scope':'symbols','symbols':symbols,'frequencies':['5m']})
     runner.write_json(tmp_path/'request.json',{'settings':settings,'observed_at':'2026-09-17T23:14:00+08:00',
-                      'holding_snapshot':{'schema':'monitor-holdings-v1','keys':['us:TSLA.US']}})
+                      'holding_snapshot':{'schema':'monitor-holdings-v1','keys':['us:TSLA.US','a:SH.600088']}})
     monkeypatch.setattr(runner,'bounded_catalog',lambda *_:pytest.fail('verified monitor scope must not start another catalog process'))
     captured=[]
     def scan(stocks,*args,**kwargs):
@@ -195,8 +196,8 @@ def test_monitor_reuses_verified_catalog_and_preserves_holding_priority(tmp_path
         return iter([({**stock,'rows':[{'frequency':'5m','selected':[],'data_errors':[]}]},[]) for stock in stocks])
     monkeypatch.setattr(runner,'bounded_scan',scan)
     runner.run_screening(tmp_path)
-    assert [s['code'] for s in captured]==['TSLA.US','SH.600000']
-    assert [s['holding'] for s in captured]==[True,False]
+    assert [s['code'] for s in captured]==['TSLA.US','SH.600088','SH.600000']
+    assert [s['holding'] for s in captured]==[True,True,False]
 
 
 def test_calendar_cache_reuses_symbols_but_never_shares_mutable_history():

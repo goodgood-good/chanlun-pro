@@ -38,7 +38,7 @@
 .notification-heading h2{font-size:15px;margin:0;letter-spacing:-.3px}
 .notification-heading p{margin:0;color:var(--muted);font-size:11px}
 .notification-heading button{white-space:nowrap}
-.notification-filters{display:grid;grid-template-columns:minmax(170px,2fr) repeat(5,minmax(90px,1fr));gap:10px;padding:0 22px 16px;border-bottom:1px solid var(--line)}
+.notification-filters{display:grid;grid-template-columns:minmax(170px,2fr) repeat(6,minmax(90px,1fr));gap:10px;padding:0 22px 16px;border-bottom:1px solid var(--line)}
 .notification-filters label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted);min-width:0}
 .notification-filters input,.notification-filters select{width:100%;min-width:0;font-size:12px;padding:7px 8px;background:var(--bg)}
 #notifications-filters-toggle{display:none}
@@ -47,8 +47,14 @@
 .notification-snapshot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 22px;background:var(--soft);border-bottom:1px solid var(--line);font-size:11px;color:var(--muted)}
 .notification-snapshot[hidden],#notifications-newer[hidden]{display:none!important}
 .notification-snapshot button{padding:4px 8px;font-size:11px;white-space:nowrap}
-.notification-columns{display:grid;grid-template-columns:minmax(310px,.82fr) minmax(0,1.4fr);align-items:stretch;min-height:0;height:clamp(390px,calc(100vh - 355px),760px)}
-.notification-list-column{border-right:1px solid var(--line);min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+.notification-columns{display:grid;grid-template-columns:var(--notification-list-width,320px) 10px minmax(0,1fr);align-items:stretch;min-height:0;height:clamp(390px,calc(100vh - 355px),760px)}
+.notification-list-column{min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+.notification-list-resizer{position:relative;cursor:col-resize;touch-action:none;background:var(--bg);border-inline:1px solid var(--line);outline:none}
+.notification-list-resizer::after{content:"";position:absolute;top:50%;left:3px;width:2px;height:42px;transform:translateY(-50%);border-radius:2px;background:var(--muted);opacity:.5}
+.notification-list-resizer:hover,.notification-list-resizer:focus-visible,.notification-columns.is-resizing .notification-list-resizer{background:var(--soft)}
+.notification-list-resizer:hover::after,.notification-list-resizer:focus-visible::after,.notification-columns.is-resizing .notification-list-resizer::after{background:var(--accent);opacity:1}
+.notification-resize-shield{position:fixed;inset:0;z-index:100000;cursor:col-resize;touch-action:none;user-select:none}
+body.notification-resizing,body.notification-resizing *{cursor:col-resize!important;user-select:none!important}
 .notification-list-caption{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:13px 18px;border-bottom:1px solid var(--line);font-size:12px}
 .notification-list-caption strong{font-weight:600}
 .notification-list{flex:1;overflow:auto;scrollbar-gutter:stable;min-height:0}
@@ -56,6 +62,7 @@
 .notification-row:hover{background:var(--bg)}
 .notification-row[aria-pressed=true]{background:var(--soft);box-shadow:inset 3px 0 var(--accent)}
 .notification-row-head,.notification-row-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.notification-row-head,.notification-row-meta{flex-wrap:wrap}
 .notification-row-head strong{font-size:14px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .notification-row-head time{font-size:11px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
 .notification-row-code{display:block;font-size:11px;color:var(--muted);margin:2px 0 8px}
@@ -109,7 +116,7 @@
 .notification-image-dialog header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:13px;position:sticky;top:-12px;background:var(--panel);padding:6px 0;z-index:1}
 .notification-image-dialog img{display:block;width:100%;height:auto}
 .notification-section .muted{font-size:12px}
-@media(max-width:1060px){.notification-columns{grid-template-columns:minmax(290px,.9fr) minmax(0,1.2fr)}.notification-filters{grid-template-columns:repeat(4,1fr)}.notification-search{grid-column:1/-1}.notification-detail{padding:18px}.notification-summary article{padding:12px}.notification-summary strong{font-size:24px}}
+@media(max-width:1060px){.notification-filters{grid-template-columns:repeat(4,1fr)}.notification-search{grid-column:1/-1}.notification-detail{padding:18px}.notification-summary article{padding:12px}.notification-summary strong{font-size:24px}}
 @media(min-width:1400px){.notification-facts{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:760px){
  .cp-monitor main{padding:14px 12px}.cp-monitor .hero{align-items:start;margin-bottom:12px}.cp-monitor .hero h1{font-size:22px}.cp-monitor .hero p{font-size:12px}.cp-monitor .hero .tag{font-size:10px;padding:5px 8px;margin-top:4px}
@@ -120,7 +127,7 @@
  .notification-filters{padding:0 13px 12px;gap:8px;grid-template-columns:repeat(2,minmax(0,1fr))}.notification-filters label{font-size:10px}.notification-filters input,.notification-filters select{font-size:12px;padding:7px}
  .notification-filters .notification-extra-filter{display:none}.notification-filters[data-expanded=true] .notification-extra-filter{display:flex}
  #notifications-filters-toggle{display:block;align-self:end;min-height:35px;font-size:12px;padding:7px}
- .notification-columns{display:block;min-height:0;height:auto}.notification-list-column{border-right:0}.notification-list{max-height:420px}.notification-row{padding:11px 13px}.notification-row-head strong{font-size:13px}.notification-row-head time{font-size:10px}.notification-row-summary{font-size:11px;-webkit-line-clamp:1}.notification-row-code{margin:1px 0 5px;font-size:10px}
+ .notification-columns{display:block;min-height:0;height:auto}.notification-list-resizer{display:none}.notification-list-column{border-right:0}.notification-list{max-height:420px}.notification-row{padding:11px 13px}.notification-row-head strong{font-size:13px}.notification-row-head time{font-size:10px}.notification-row-summary{font-size:11px;-webkit-line-clamp:1}.notification-row-code{margin:1px 0 5px;font-size:10px}
  .notification-list-caption{padding:10px 13px}.notification-detail{padding:16px 13px 20px;border-top:1px solid var(--line);overflow:visible}.notification-detail-heading{margin-bottom:13px}.notification-detail-title{position:static;padding:0}.notification-detail-title h3{font-size:20px}.notification-facts{padding:12px;gap:10px;grid-template-columns:1fr 1fr}.notification-detail-empty{min-height:180px}#notifications-back{display:block}
  .notification-message{padding-left:13px;padding-right:13px}.notification-inbox.panel{border-radius:10px}.notification-snapshot{padding:8px 13px;flex-wrap:wrap}
 }
@@ -165,7 +172,38 @@
 .notification-policy-actions { display: flex; margin-top: 12px; }
 #notification-policy-save { min-height: 44px; max-width: 100%; }
 #notification-policy-message { min-height: 1.6em; overflow-wrap: anywhere; }
+.notification-channels-form { margin: 18px 0; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.notification-detail-tabs { display:flex; gap:6px; margin:12px 0 16px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+#notification-detail-content[hidden],#notification-chart-panel[hidden],#notification-chart-controls[hidden],#notification-chart-selector-label[hidden]{display:none!important}
+.notification-detail-tabs button { min-height:40px; padding:8px 18px; background:var(--panel); color:var(--muted); border:1px solid var(--line); border-radius:7px; }
+.notification-detail-tabs button[aria-selected="true"] { color:var(--accent); background:var(--soft); border-color:var(--accent); font-weight:600; }
+.notification-chart-controls { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+.notification-chart-controls label { flex:1; min-width:0; display:flex; gap:8px; align-items:center; }
+.notification-chart-controls select { min-width:0; max-width:100%; flex:1; }
+.notification-chart-host { min-width:0; }
+.notification-chart-iframe { display:block; width:100%; height:720px; border:1px solid var(--line); border-radius:8px; background:white; }
+@media(min-width:761px){
+  .notification-columns:has(#notification-chart-panel:not([hidden])){min-height:720px}
+  .notification-detail:has(#notification-chart-panel:not([hidden])){display:flex;flex-direction:column;overflow:hidden}
+  .notification-detail:has(#notification-chart-panel:not([hidden]))>.notification-detail-heading{flex-shrink:0;margin-bottom:6px}
+  .notification-detail-tabs,.notification-chart-controls{flex-shrink:0}
+  #notification-chart-panel{display:flex;flex-direction:column;flex:1;min-height:0}
+  .notification-chart-host{flex:1;min-height:0;overflow:auto}
+  .notification-chart-iframe{height:100%;min-height:440px}
+}
+@media(max-width:760px){.notification-chart-iframe{height:76vh;min-height:480px}.notification-chart-controls label{flex-basis:100%}}
+#notification-channels-fields { padding: 0; margin: 0; border: 0; min-width: 0; }
+.notification-channel-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.notification-channel-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
+.notification-channel-card legend { padding: 0 6px; font-weight: 600; }
+.notification-channel-card p { margin: 0 0 4px; }
+.notification-channel-card > input { width: 100%; min-width: 0; min-height: 42px; box-sizing: border-box; }
+.notification-channel-status { overflow-wrap: anywhere; font-size: 13px; }
+.notification-channel-card .notification-channel-check { display: flex; align-items: center; gap: 8px; min-height: 36px; font-size: 13px; }
+.notification-channel-check input { width: 16px; height: 16px; min-height: 0; margin: 0; flex: 0 0 auto; }
+#notification-channels-message { min-height: 1.6em; overflow-wrap: anywhere; }
 @media (max-width: 760px) {
+  .notification-channel-grid { grid-template-columns: minmax(0, 1fr); }
   .notification-policy-groups { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .notification-policy .notification-policy-group { padding: 10px; }
   .notification-policy-choices { gap: 6px; }

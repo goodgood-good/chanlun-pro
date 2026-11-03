@@ -171,7 +171,7 @@ def configured(tmp_path, monkeypatch):
     return tmp_path, capacity.budget_request()
 
 
-@pytest.mark.parametrize("maximum,reserved,boost", [(4, 3, False), (16, 12, False), (16, 15, True)])
+@pytest.mark.parametrize("maximum,reserved,boost", [(4, 1, False), (16, 4, False), (16, 12, True)])
 def test_spawned_live_demand_waits_for_old_work_then_gets_reserved_fixed_slots(
     configured, monkeypatch, maximum, reserved, boost
 ):
@@ -323,8 +323,10 @@ def test_scan_can_borrow_a_free_slot_while_old_monitor_keeps_borrowed_low_slot(c
     actors = Actors(root, 4)
     old_names = ['old0', 'old1', 'old2', 'old3']
     try:
-        for name in old_names + ['new0', 'new1']:
+        for name in old_names:
             actors.add(name, monitor=True)
+        for name in ['new0', 'new1']:
+            actors.add(name)
         actors.add('scan')
         actors.receive('ready', actors.items)
         actors.start(*old_names)

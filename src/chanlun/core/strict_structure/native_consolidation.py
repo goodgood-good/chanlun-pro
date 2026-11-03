@@ -18,7 +18,7 @@ from chanlun.core.strict_structure.strength import (
 )
 
 
-NATIVE_CONSOLIDATION_RULE_BASIS = "user_declared_native_consolidation_macd_v1"
+NATIVE_CONSOLIDATION_RULE_BASIS = "user_declared_native_consolidation_macd_v2"
 
 
 def build_native_consolidation_alerts(units, centers, strength, *, as_of):
@@ -117,6 +117,8 @@ def build_native_consolidation_alerts(units, centers, strength, *, as_of):
                 "anchor_at": int(evidence.anchor_at.timestamp()), "anchor_tick": evidence.anchor_tick,
                 "confirmed_at": int(known_at.timestamp()), "available_at": int(known_at.timestamp()),
                 "macd_area_a": area_a, "macd_area_c": area_c, "macd_area_ratio": area_c / area_a,
+                "strength_source": evidence.strength_source,
+                "strength_frequency": getattr(strength, 'frequency', None),
                 "price_extreme_confirmed": evidence.price_extreme_confirmed,
             }
     return sorted(output.values(), key=lambda alert: (alert["available_at"], alert["alert_id"]))[-200:]

@@ -3,17 +3,15 @@
 新上市合约首查入库1根后, 第二次调用 db_klines.iloc[-2] IndexError → except
 吞掉返回 None → tenacity 重试3次同崩 → RetryError; 且增量拉取+insert 在崩点
 之后永远执行不到, 本地库恒1根不可自愈(需手工删库)。
-修复=恰1根时退用 iloc[-1] 作增量起点。ccxt 未装, 注入 stub 后 object.__new__
-绕过网络构造(同 test_binance_order_normalize 模式)。
+修复=恰1根时退用 iloc[-1] 作增量起点。通过 object.__new__ 隔离网络构造，
+不向其他测试注入假的 ccxt 模块。
 """
-import sys
-import types
+from importlib import import_module
 
 import pandas as pd
 import pytest
 
-if "ccxt" not in sys.modules:
-    sys.modules["ccxt"] = types.ModuleType("ccxt")
+import_module('ccxt')
 
 from chanlun.exchange.exchange_binance import ExchangeBinance
 from chanlun.exchange.exchange_binance_spot import ExchangeBinanceSpot

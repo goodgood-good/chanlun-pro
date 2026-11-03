@@ -46,7 +46,7 @@ class Element {
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0]||null; }
 }
-function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=false, sessionStorage=null, user='tester') {
+function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=false, sessionStorage=null, user='tester', fixedRoles=false) {
   const elements = new Map();
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   for (const [id, value] of Object.entries({scope:'all_a', codes:'', recent:'5', anchor:'20', workers:'12', 'max-gain':'10','chart-layout':'single',
@@ -97,7 +97,7 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
     document: {
       body, getElementById:id=>strictTemplate&&!templateIds.has(id)?null:get(id), createElement:() => new Element(),
       addEventListener(name, fn) { (documentEvents[name] ||= []).push(fn); },
-      querySelector:s => s==='main' ? {dataset:{user}} : {content:'test-csrf'},
+      querySelector:s => s==='main' ? {dataset:{user,...(fixedRoles?{timeframePolicy:'30m_background_5m_trade_1m_short_v2'}:{})}} : {content:'test-csrf'},
       querySelectorAll:s => {
         if(s==='[data-frequency]')return periods;
         if(s.includes('[data-signal-')) {
@@ -122,6 +122,18 @@ function page(fetch, preferences, autoQuotes=false, strictTemplate=false, phone=
 const response = (value, status=200) => ({ok:status>=200&&status<300, status, redirected:false, json:async () => value});
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(setImmediate); };
 
+test('period progress explains work before every period of a symbol finishes',async()=>{
+  const latest=withCandidate();
+  Object.assign(latest.status,{status:'running',progress_unit:'symbol_period',completed:4,total:6,
+    completed_symbols:0,total_symbols:2,reused_selections:3,
+    period_progress:{'5m':{completed:2,total:2},'30m':{completed:2,total:2},'1m':{completed:0,total:2}}});
+  const ui=page(async url=>dispatch(latest,url));await settle();
+  assert.match(ui.get('run-detail').textContent,/已扫描 4 \/ 6/);
+  assert.match(ui.get('run-detail').textContent,/全部周期完成 0 \/ 2/);
+  assert.match(ui.get('run-detail').textContent,/5m 2\/2.*30m 2\/2.*1m 0\/2/);
+  assert.match(ui.get('run-detail').textContent,/复用已核验结果 3 项/);
+});
+
 test('noon time budget shows a partial stop and keeps already verified candidates visible',async()=>{
   const latest=withCandidate();
   Object.assign(latest.status,{status:'cancelled',stop_reason:'time_budget',deadline_kind:'noon',completed:6000,total:10000});
@@ -129,8 +141,89 @@ test('noon time budget shows a partial stop and keeps already verified candidate
   assert.match(ui.get('run-status').textContent,/午间限时结束.*保留部分结果/);
   assert.doesNotMatch(ui.get('run-status').textContent,/本次筛选完成/);
   assert.match(ui.get('run-detail').textContent,/6000.*10000/);
-  assert.match(ui.get('run-detail').textContent,/20 分钟.*共用预算/);
+  assert.doesNotMatch(ui.get('run-detail').textContent,/20 分钟.*共用预算/);
   assert.ok(displayedIds(ui).length>0);
+});
+
+test('resumed noon screening shows preserved progress while still running',async()=>{
+  const latest=withCandidate();
+  Object.assign(latest.status,{status:'running',resume_count:1,resume_from_completed:9904,completed:10000,total:10794});
+  const ui=page(async url=>dispatch(latest,url));await settle();
+  assert.match(ui.get('run-detail').textContent,/续算本轮剩余任务.*已保留 9904 项/);
+  assert.match(ui.get('run-detail').textContent,/10000.*10794/);
+  assert.doesNotMatch(ui.get('run-status').textContent,/本次筛选完成/);
+});
+
+test('the active fixed-role page migrates a saved 30m view to 5m and keeps point preferences',async()=>{
+  assert.match(template,/data-timeframe-policy="30m_background_5m_trade_1m_short_v2"/);
+  const session=sessionFixture();saveView(session,{signal_period:'30m',signal_points:['3buy']});
+  const ui=page(async url=>dispatch(withCandidate(),url),undefined,false,true,false,session,'tester',true);
+  await settle();
+  assert.deepEqual(selectedSignals(ui),{signal_period:'5m',signal_points:['3buy']});
+  assert.equal(ui.get('legacy-period-30m').hidden,true);
+  assert.equal(ui.signalPeriods.find(r=>r.dataset.signalPeriod==='30m').disabled,true);
+});
+
+test('the active page always requests the trade and background clocks with optional full short scanning',async()=>{
+  let submitted;const latest=result();
+  const ui=page(async(url,options)=>{
+    if(url==='/screening/start'){submitted=JSON.parse(options.body);return response({...latest.status,run_id:'next',status:'starting'});}
+    return dispatch(latest,url);
+  },undefined,false,true,false,null,'tester',true);
+  await settle();ui.get('scan-short-term').checked=true;
+  await ui.get('screen-form').listeners.submit({preventDefault(){}});
+  assert.deepEqual(submitted.frequencies,['5m','1m']);
+  assert.equal(submitted.timeframe_policy,'30m_background_5m_trade_1m_short_v2');
+});
+
+test('a confirmed main point without lower proof is waiting in the active view and keeps countertrend context',async()=>{
+  const latest=withCandidate(),row=latest.candidates[0];
+  Object.assign(row,{stage:'approaching',timeframe_policy:'30m_background_5m_trade_1m_short_v2',operating_role:'trade',
+    selection_missing_conditions:['lower_1m_confirmation'],nested_confirmation:{state:'waiting',frequency:'1m'},
+    background_30m:{direction:'down',alignment:'countertrend'}});
+  row.point.status='confirmed';
+  const ui=page(async url=>dispatch(latest,url),undefined,false,true,false,null,'tester',true);await settle();
+  assert.ok(displayedIds(ui).length>0);
+  assert.match(elementText(ui.get('signal-list')),/5m 交易级别.*30m 中枢下移.*逆势风险/);
+  choose(ui,'point-status-filter','confirmed');assert.deepEqual(displayedIds(ui),[]);
+  choose(ui,'point-status-filter','waiting_lower');assert.deepEqual(displayedIds(ui),[row.id]);
+  assert.match(ui.get('decision-title').textContent,/1m.*待齐/);
+});
+
+test('a frozen old-policy main point stays visible for review but cannot pass the confirmed-trade filter',async()=>{
+  const latest=withCandidate(),row=latest.candidates[0];
+  Object.assign(row,{operating_role:'trade',trade_confirmation_pending:true,selection_missing_conditions:['lower_1m_confirmation']});
+  row.point.status=row.stage='confirmed';
+  const ui=page(async url=>dispatch(latest,url),undefined,false,true,false,null,'tester',true);await settle();
+  assert.match(elementText(ui.get('signal-list')),/旧规则.*待区间复核/);
+  choose(ui,'point-status-filter','confirmed');assert.deepEqual(displayedIds(ui),[]);
+  choose(ui,'point-status-filter','waiting_lower');assert.deepEqual(displayedIds(ui),[row.id]);
+});
+
+test('five confirmed 5m first buys remain inspectable while zero have lower confirmation',async()=>{
+  const latest=withCandidate(),base=latest.candidates[0];
+  latest.candidates=Array.from({length:13},(_,i)=>({...base,id:'first-'+i,code:'fixture-'+i,
+    timeframe_policy:'30m_background_5m_trade_1m_short_v2',operating_role:'trade',stage:'approaching',
+    nested_confirmation:{state:'waiting',frequency:'1m'},
+    point:{...base.point,point_type:'1buy',status:i<5?'confirmed':'approaching'}}));
+  const before=JSON.stringify(latest.candidates),session=sessionFixture();
+  const ui=page(async url=>dispatch(latest,url),undefined,false,true,false,session,'tester',true);await settle();
+  chooseSignal(ui,'5m',['1buy']);
+  assert.match(elementText(ui.get('point-counts')),/一买 13 · 5m 结构已确认 5 · 5m 交易已确认 0/);
+  choose(ui,'point-status-filter','confirmed');assert.deepEqual(displayedIds(ui),[]);
+  choose(ui,'point-status-filter','main_confirmed');
+  assert.deepEqual(displayedIds(ui),Array.from({length:5},(_,i)=>'first-'+i));
+  assert.match(elementText(ui.get('signal-list')),/5m 已确认 · 待 1m 确认/);
+  assert.match(ui.get('active-filter-summary').textContent,/本周期结构已确认/);
+  choose(ui,'point-status-filter','waiting_lower');assert.equal(displayedIds(ui).length,5);
+  choose(ui,'point-status-filter','main_forming');assert.equal(displayedIds(ui).length,8);
+  assert.equal(JSON.stringify(latest.candidates),before,'display filters cannot authorize or rewrite a trade');
+});
+
+test('structural confirmation filter persists independently of trade confirmation',()=>{
+  const saved=normalizeViewState({version:4,filters:{signal_period:'5m',signal_points:['1buy'],point_status:'main_confirmed'}});
+  assert.equal(saved.filters.point_status,'main_confirmed');
+  assert.deepEqual(saved.filters.signal_points,['1buy']);
 });
 const SIGNAL_PERIODS=['1m','5m','30m'];
 const SIGNAL_POINTS=['1buy','2buy','3buy','1sell','2sell','3sell'];
@@ -150,10 +243,11 @@ function setSignal(ui,point,checked=true){
 }
 function chooseSignal(ui,period,points){
   setPeriod(ui,period);
-  ui.get('signal-clear').click();
+  preset(ui,'none');
   for(const point of points)setSignal(ui,point);
 }
 function preset(ui,value){
+  if(value==='none'){for(const cell of ui.signalCells)if(cell.checked)setSignal(ui,cell.dataset.signalPoint,false);return;}
   const button=ui.signalPresets.find(item=>item.dataset.signalPreset===value);
   assert.ok(button,`missing actual preset ${value}`);button.click();
 }
@@ -273,7 +367,8 @@ test('an empty page continues checking a late previous cache even without new sc
     status:{...latest.status,previous_results_loading:false,previous_result_count:1}};
   await ui.timers[0]();await settle();
   assert.equal(reads,count+1);
-  assert.equal(ui.get('signal-list').children.length,1);
+  assert.equal(ui.get('signal-list').children.length,0);
+  assert.equal(ui.get('previous-list').children.length,1);
 });
 
 test('running partial results retain counts and candidate detail while more evidence is loading',async()=>{
@@ -333,8 +428,12 @@ test('a failed refresh cannot leave candidates from a superseded '+field+' activ
   latest={...latest,status:{...latest.status,[field]:after}};fail=true;
   await ui.timers[0]();await settle();
   assert.equal(ui.get('signal-list').children.length,0);
-  assert.equal(ui.get('selected-detail').hidden,true);
-  assert.match(ui.get('queue-empty').textContent,/读取|核验/);
+  assert.equal(ui.get('previous-list').children.length,1);
+  assert.equal(ui.get('selected-detail').hidden,false);
+  assert.equal(ui.get('review-fields').disabled,true);
+  assert.equal(ui.get('chart-source').disabled,true);
+  assert.match(ui.get('previous-list').querySelector('.queue-refresh').textContent,/数据受限/);
+  assert.equal(ui.get('queue-empty').hidden,true);
   assert.equal(reads,2);
   fail=false;latest={...latest,candidates:[{...latest.candidates[0],id:'newly-verified',name:'new fixture'}]};
   await ui.timers[0]();await settle();
@@ -515,63 +614,62 @@ test('a delayed poll cannot overwrite a run started from the latest-results page
   assert.equal(ui.get('chart-frame').src,'about:blank');
 });
 
-test('native center screening submits one physical period and no recursive grade', async () => {
+test('the form has fixed period roles and no retired algorithm controls',async()=>{
   const latest=result();let submitted;
-  const ui=page(async (url, options) => {
-    if(url==='/screening/start'){
-      submitted=JSON.parse(options.body);
-      return response({...latest.status,run_id:'next',status:'starting'});
-    }
+  const ui=page(async(url,options)=>{
+    if(url==='/screening/start'){submitted=JSON.parse(options.body);return response({...latest.status,status:'starting'});}
     return dispatch(latest,url);
-  });
+  },undefined,false,true);
   await settle();
-  ui.get('screen-strategy').value='direct_structural';
-  ui.get('screen-strategy').listeners.change();
-  ui.get('screen-frequency').value='1m';
-  ui.get('screen-grade').value='1';
-  ui.get('screen-risk-period').value='1m';
-  assert.equal(ui.get('direct-frequency-label').hidden,false);
-  assert.equal(ui.get('nested-period-note').hidden,true);
-  assert.equal(ui.get('direct-explanation').hidden,false);
-  assert.equal(ui.get('nested-explanation').hidden,true);
+  for(const id of ['screen-strategy','screen-frequency','screen-grade','screen-risk-period','weak-second'])
+    assert.equal(templateIds.has(id),false);
   await ui.get('screen-form').listeners.submit({preventDefault(){}});
   assert.equal(submitted.strategy,'direct_structural');
-  assert.deepEqual(submitted.frequencies,['1m']);
+  assert.deepEqual(submitted.frequencies,['5m']);
   assert.deepEqual(submitted.structural_levels,[0]);
+  assert.deepEqual(submitted.point_types,SIGNAL_POINTS);
   assert.equal(submitted.minimum_operating_frequency,undefined);
-
-  let nestedSubmitted;
-  const nested=page(async (url,options)=>{
-    if(url==='/screening/start'){
-      nestedSubmitted=JSON.parse(options.body);
-      return response({...latest.status,run_id:'nested',status:'starting'});
-    }
-    return dispatch(latest,url);
-  });
-  await settle();
-  nested.get('screen-risk-period').value='1m';
-  await nested.get('screen-form').listeners.submit({preventDefault(){}});
-  assert.equal(nestedSubmitted.strategy,'direct_structural');
-  assert.deepEqual(nestedSubmitted.frequencies,['5m']);
-  assert.equal(nestedSubmitted.minimum_operating_frequency,undefined);
 });
 
-test('native center screening submits every selected K-line period', async () => {
+test('the explicit short-term switch adds an independent 1m scan',async()=>{
   const latest=result();let submitted;
-  const ui=page(async (url,options)=>{
-    if(url==='/screening/start'){
-      submitted=JSON.parse(options.body);
-      return response({...latest.status,run_id:'next',status:'starting'});
-    }
+  const ui=page(async(url,options)=>{
+    if(url==='/screening/start'){submitted=JSON.parse(options.body);return response({...latest.status,status:'starting'});}
     return dispatch(latest,url);
   });
-  await settle();
-  ui.get('screen-frequency').selectedOptions=[
-    {value:'1m'},{value:'5m'},{value:'30m'},
-  ];
+  await settle();ui.get('scan-short-term').checked=true;
   await ui.get('screen-form').listeners.submit({preventDefault(){}});
-  assert.deepEqual(submitted.frequencies,['1m','5m','30m']);
-  assert.deepEqual(submitted.structural_levels,[0]);
+  assert.deepEqual(submitted.frequencies,['5m','1m']);
+});
+
+test('a named scan group is explicit and independent of the group opened for charts',async()=>{
+  const latest=result();let submitted;
+  const ui=page(async(url,options)=>{
+    if(url==='/get_zixuan_groups/a')return response([{name:'开图组'},{name:'扫描组'}]);
+    if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:[]});
+    if(url==='/screening/start'){submitted=JSON.parse(options.body);return response({...latest.status,status:'starting'});}
+    return dispatch(latest,url);
+  },undefined,false,true);await settle();
+  choose(ui,'scope','watchlist_groups');
+  ui.get('screen-watch-groups').selectedOptions=[{value:'扫描组'}];
+  await ui.get('screen-form').listeners.submit({preventDefault(){}});
+  assert.equal(submitted.scope,'watchlist');assert.deepEqual(submitted.watch_groups,['扫描组']);
+  assert.equal(ui.get('watch-group').value,'开图组');
+});
+
+for(const [market,codes,expected] of [
+  ['us','aapl.us, MSFT.US',[{market:'us',code:'AAPL.US'},{market:'us',code:'MSFT.US'}]],
+  ['mixed','a:SH.600088, us:AAPL.US',[{market:'a',code:'SH.600088'},{market:'us',code:'AAPL.US'}]],
+])test('explicit market scope sends only the selected symbols: '+market,async()=>{
+  const latest=result();let submitted;
+  const ui=page(async(url,options)=>{
+    if(url==='/screening/start'){submitted=JSON.parse(options.body);return response({...latest.status,status:'starting'});}
+    return dispatch(latest,url);
+  },undefined,false,true);await settle();
+  choose(ui,'scope','codes');choose(ui,'code-market',market);ui.get('codes').value=codes;
+  await ui.get('screen-form').listeners.submit({preventDefault(){}});
+  assert.equal(submitted.scope,'symbols');assert.deepEqual(submitted.codes,[]);
+  assert.deepEqual(submitted.symbols,expected);
 });
 
 test('selected minimum-period MACD risk is visible without renaming a formal point', async () => {
@@ -587,9 +685,7 @@ test('selected minimum-period MACD risk is visible without renaming a formal poi
   assert.match(ui.get('selected-tags').textContent,/三买.*已确认/);
   assert.ok(ui.get('evidence-risk').children.some(e=>/MACD 黄白线均在零轴下/.test(e.textContent)));
   assert.match(ui.get('stage-counts').textContent,/筛选已通过 1/);
-  ui.get('risk-filter').value='not_triggered';ui.get('risk-filter').listeners.change();
-  assert.equal(ui.get('visible-count').textContent,'0 条');
-  ui.get('risk-filter').value='avoid';ui.get('risk-filter').listeners.change();
+  assert.equal(templateIds.has('risk-filter'),false);
   assert.equal(ui.get('visible-count').textContent,'1 条');
 });
 
@@ -640,6 +736,51 @@ function withCandidate() {
   return data;
 }
 
+test('history has independent point and price filters and retains successor timing',async()=>{
+  const latest=withCandidate(),base=latest.candidates[0];
+  latest.historical_candidates=[{...base,id:'retired-first',origin:'history',historical_only:true,stage:'historical',
+    point:{...base.point,point_type:'1buy',status:'confirmed'},
+    filter_facts:{times:{structure:200},ages:{structure:0},absolute_distance_pct:null},
+    history:{reasons:['FIRST_ADVANCED_TO_SECOND'],simultaneous_confirmation:true,
+      successors:[{point_type:'2buy',anchor_at:160,available_at:200}]}}];
+  const ui=page(async url=>dispatch(latest,url),undefined,false,true);await settle();
+  chooseSignal(ui,'5m',['3buy']);choose(ui,'gain-filter','1');
+  const count=ui.get('signal-count').textContent;
+  ui.get('historical-results').click();
+  assert.deepEqual(displayedIds(ui),['retired-first']);
+  assert.equal(ui.get('gain-filter').value,'all');
+  assert.equal(ui.get('distance-filter-label').hidden,true);
+  assert.equal(ui.get('point-status-filter').disabled,true);
+  choose(ui,'age-filter','4');assert.deepEqual(displayedIds(ui),['retired-first']);
+  assert.equal(ui.get('chart-source').value,'evidence');
+  assert.ok(ui.get('evidence-established').children.some(e=>/同一时刻/.test(e.textContent)));
+  assert.equal(ui.get('signal-count').textContent,count);
+  ui.get('current-results').click();
+  assert.deepEqual(selectedSignals(ui),{signal_period:'5m',signal_points:['3buy']});
+  assert.equal(ui.get('gain-filter').value,'1');
+});
+
+test('compact historical rows load authenticated detail and enable historical review',async()=>{
+  const latest=withCandidate();latest.status.result_reader_revision='reader';
+  const historical={...latest.candidates[0],id:'retired-compact',origin:'history',historical_only:true,
+    stage:'historical',detail_loaded:false,candidate_evidence_version:'history-proof',
+    point:{...latest.candidates[0].point,point_id:'H',point_type:'1buy',status:'confirmed'},
+    history:{reasons:['FIRST_ADVANCED_TO_SECOND'],successors:[]},evidence_chart_available:true};
+  latest.historical_candidates=[historical];let reads=0;
+  const ui=page(async url=>{
+    if(url.startsWith('/screening/candidate')){
+      reads++;return response({source:latest.source,result_reader_revision:'reader',
+        candidate:{...historical,detail_loaded:true,audit:{cold_rebuild:true}}});
+    }
+    return dispatch(latest,url);
+  },undefined,false,true);await settle();
+  ui.get('historical-results').click();await settle();
+  assert.equal(reads,1);assert.equal(ui.get('review-fields').disabled,false);
+  assert.match(ui.get('decision-title').textContent,/已退出/);
+  assert.ok(ui.get('evidence-established').children.some(e=>/独立重算通过/.test(e.textContent)));
+  await ui.timers[0]();await settle();assert.equal(reads,1);
+});
+
 function crossPeriodCandidates() {
   const data=withCandidate(),base=data.candidates[0];
   data.status.settings={...data.status.settings,frequencies:['1m','5m','30m'],point_types:['1buy','2buy','3buy','1sell','2sell','3sell']};
@@ -653,7 +794,7 @@ for(const phone of [false,true])test('single period and six point controls apply
   const latest=crossPeriodCandidates(),calls=[];
   const ui=page(async(url,options)=>{calls.push({url,method:options?.method||'GET'});return dispatch(latest,url);},undefined,false,true,phone);
   await settle();
-  assert.equal(ui.signalCells.length,6);assert.equal(ui.signalPeriods.length,3);assert.equal(ui.signalPresets.length,4);
+  assert.equal(ui.signalCells.length,6);assert.equal(ui.signalPeriods.length,3);assert.equal(ui.signalPresets.length,3);
   assert.deepEqual(selectedSignals(ui),defaultSignals());assert.deepEqual(displayedIds(ui),['a5']);
   assert.ok(ui.signalPeriods.every(radio=>radio.type==='radio'));
   assert.match(template,/<section\b[^>]*class="[^"]*chart-filters/);
@@ -679,7 +820,7 @@ for(const phone of [false,true])test('single period and six point controls apply
 
 test('each preset replaces only point types and precisely matches its pressed state in every period',async()=>{
   const latest=crossPeriodCandidates(),ui=page(async url=>dispatch(latest,url));await settle();
-  for(const period of SIGNAL_PERIODS)for(const type of ['all','buy','sell','none']){
+  for(const period of SIGNAL_PERIODS)for(const type of ['all','buy','sell']){
     chooseSignal(ui,period,['1buy','3sell']);preset(ui,type);
     const points=type==='all'?SIGNAL_POINTS:type==='none'?[]:SIGNAL_POINTS.filter(point=>point.endsWith(type));
     assert.deepEqual(selectedSignals(ui),{signal_period:period,signal_points:points});
@@ -699,7 +840,7 @@ test('individual type adjustments preserve one active radio and clear unmatched 
   }
   setSignal(ui,'3sell');assert.deepEqual(displayedIds(ui),['a5']);
   setSignal(ui,'1buy',false);setSignal(ui,'3buy',false);setSignal(ui,'3sell',false);
-  assert.equal(ui.get('signal-clear').getAttribute('aria-pressed'),'true');
+  assert.ok(ui.signalPresets.every(button=>button.getAttribute('aria-pressed')==='false'));
 });
 
 test('switching physical periods preserves explicit empty points until a point or preset is chosen',async()=>{
@@ -713,57 +854,38 @@ test('switching physical periods preserves explicit empty points until a point o
   assert.deepEqual(selectedSignals(ui),{signal_period:'30m',signal_points:['1buy','2buy','3buy']});
 });
 
-test('current, retained and watchlist rows retain independent visibility and count labels',async()=>{
+test('watch groups open charts without entering current or retained candidate counts',async()=>{
   const latest=withCandidate(),current=latest.candidates[0];
-  latest.candidates=[current,
-    {...current,id:'old-pending',refresh_state:'pending',result_source:'older',evidence_available:false},
-    {...current,id:'old-limited',refresh_state:'limited',result_source:'older',evidence_available:false},
-    {...current,id:'unverified',evidence_available:false},
-    {...current,id:'wrong-source',result_source:'different'},
-    {...current,id:'inactive',stage:'closed'}];
-  const watches=[{market:'a',code:current.code,name:'watch same symbol'},{market:'us',code:'AAPL.US',name:'watch only'}];
+  latest.candidates=[current,{...current,id:'old-pending',refresh_state:'pending',result_source:'older',evidence_available:false}];
   const ui=page(async url=>{
     if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
-    if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:watches});
+    if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:[{market:'us',code:'AAPL.US',name:'Apple'}]});
     return dispatch(latest,url);
   });await settle();
-  assert.deepEqual(displayedIds(ui),['candidate','old-pending','old-limited']);
+  assert.deepEqual(displayedIds(ui),['candidate']);
+  assert.deepEqual(ui.get('previous-list').children.map(row=>row.dataset.id),['old-pending']);
   ui.get('include-previous').click();assert.deepEqual(displayedIds(ui),['candidate']);
-  ui.get('signal-clear').click();assert.deepEqual(displayedIds(ui),[]);
-  choose(ui,'origin-filter','all');
-  assert.deepEqual(displayedIds(ui),['watch:a:SH.600000','watch:us:AAPL.US'],'watch placeholders never borrow signal predicates');
-  setSignal(ui,'3buy');ui.get('include-previous').click();
-  assert.deepEqual(displayedIds(ui),['candidate','old-pending','old-limited','watch:a:SH.600000','watch:us:AAPL.US']);
-  const counts=ui.get('visible-breakdown').textContent;
-  assert.match(counts,/(?:本轮|当前)[^0-9]*1|1[^0-9]*(?:本轮|当前)/);
-  assert.match(counts,/(?:历史|上次|旧结果)[^0-9]*2|2[^0-9]*(?:历史|上次|旧结果)/);
-  assert.match(counts,/关注[^0-9]*2|2[^0-9]*关注/);
-  choose(ui,'origin-filter','watchlist');assert.deepEqual(displayedIds(ui),['watch:a:SH.600000','watch:us:AAPL.US']);
+  const before=ui.get('signal-count').textContent;
+  ui.get('watch-list').children[0].listeners.click();
+  assert.deepEqual(displayedIds(ui),['candidate']);
+  assert.equal(ui.get('signal-count').textContent,before);
+  assert.match(ui.get('selected-title').textContent,/AAPL/);
+  assert.equal(templateIds.has('origin-filter'),false);
 });
 
-test('watch-only disables signal controls without discarding their canonical state and watch navigation resets all',async()=>{
+test('watch chart navigation preserves the selected period points and refinements',async()=>{
   const latest=crossPeriodCandidates(),ui=page(async url=>{
     if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
     if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:[{market:'us',code:'AAPL.US',name:'Apple'}]});
     return dispatch(latest,url);
   },undefined,false,true);await settle();
-  ui.get('signal-clear').click();setSignal(ui,'3sell');ui.get('include-previous').click();
-  choose(ui,'origin-filter','watchlist');
-  const before=selectedSignals(ui);
-  assert.deepEqual(displayedIds(ui),['watch:us:AAPL.US']);
-  assert.ok(ui.signalCells.every(control=>control.disabled));
-  for(const control of [...ui.signalPeriods,...ui.signalPresets,ui.get('include-previous')])assert.equal(control.disabled,true);
-  assert.equal(ui.get('reset').disabled,false,'full reset remains available for a nondefault watch-only scope');
-  for(const control of [...ui.signalPeriods,...ui.signalPresets])control.click();
-  assert.deepEqual(selectedSignals(ui),before,'disabled bulk commands must not mutate saved choices');
-  choose(ui,'origin-filter','all');
-  assert.deepEqual(selectedSignals(ui),before);assert.equal(ui.get('include-previous').checked,false);
+  chooseSignal(ui,'5m',['3sell']);choose(ui,'market-filter','a');choose(ui,'gain-filter','3');
+  const before=selectedSignals(ui),ids=displayedIds(ui);
+  ui.get('watch-list').children[0].listeners.click();
+  assert.deepEqual(selectedSignals(ui),before);assert.deepEqual(displayedIds(ui),ids);
+  assert.equal(ui.get('market-filter').value,'a');assert.equal(ui.get('gain-filter').value,'3');
+  assert.match(ui.get('selected-title').textContent,/AAPL/);
   assert.ok(ui.signalCells.every(control=>!control.disabled));
-  assert.deepEqual(displayedIds(ui),['a5','watch:us:AAPL.US']);
-  ui.get('watch-list').children[0].click();await settle();
-  assert.deepEqual(selectedSignals(ui),defaultSignals());
-  assert.equal(ui.get('include-previous').checked,true);assert.equal(ui.signalPeriods.filter(radio=>radio.checked).length,1);
-  assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
 });
 
 test('the always-visible summary describes selected pairs and advanced filters',async()=>{
@@ -776,10 +898,10 @@ test('the always-visible summary describes selected pairs and advanced filters',
   assert.ok(templateIds.has('active-filter-summary'));
   assert.ok(template.indexOf('id="active-filter-summary"')<template.indexOf('id="signal-list"'));
   assert.doesNotMatch(template.match(/<[^>]*\bid="active-filter-summary"[^>]*>/)[0],/\bhidden\b/);
-  ui.get('signal-clear').click();setPeriod(ui,'30m');setSignal(ui,'3buy');setSignal(ui,'3sell');
+  preset(ui,'none');setPeriod(ui,'30m');setSignal(ui,'3buy');setSignal(ui,'3sell');
   for(const text of ['三卖','30m','三买'])assert.ok(summary().includes(text));
   assert.doesNotMatch(summary(),/5m/);
-  choose(ui,'market-filter','a');choose(ui,'center-order-filter','first');choose(ui,'age-filter','3');
+  choose(ui,'market-filter','a');choose(ui,'center-order-filter','first');choose(ui,'age-filter','2');
   choose(ui,'gain-filter','3');choose(ui,'review-filter','pending');choose(ui,'sort-filter','distance');
   ui.get('signal-search').value='SH.600000';ui.get('signal-search').listeners.input();
   sectorCard(ui,'technology').click();
@@ -787,7 +909,7 @@ test('the always-visible summary describes selected pairs and advanced filters',
     assert.ok(summary().includes(text),`active summary must retain ${text}`);
   assert.deepEqual(selectedSignals(ui),{signal_period:'30m',signal_points:['3buy','3sell']});
   ui.get('reset').click();
-  assert.deepEqual(selectedSignals(ui),defaultSignals());
+  assert.deepEqual(selectedSignals(ui),{...defaultSignals(),signal_period:'30m'});
   assert.doesNotMatch(summary(),/SH\.600000|科技|首中枢|3%|待复核|靠近拐点/);
 });
 
@@ -841,14 +963,15 @@ test('uncomputed choices identify absent coverage while retained rows are separa
   let latest=crossPeriodCandidates();
   latest.status.settings.frequencies=['1m','5m'];latest.candidates=latest.candidates.filter(row=>row.frequency!=='30m');
   const ui=page(async url=>dispatch(latest,url));await settle();
-  ui.get('signal-clear').click();setPeriod(ui,'30m');setSignal(ui,'3buy');
+  preset(ui,'none');setPeriod(ui,'30m');setSignal(ui,'3buy');
   assert.deepEqual(displayedIds(ui),[]);
   assert.match(ui.get('signal-coverage-message').textContent,/30m 三买/);
   assert.match(ui.get('active-filter-summary').textContent,/三买/);
   latest={...latest,candidates:[...latest.candidates,{...crossPeriodCandidates().candidates[2],refresh_state:'pending',result_source:'older'}]};
   await ui.get('refresh').listeners.click();await settle();
-  assert.deepEqual(displayedIds(ui),['a30']);
-  assert.match(ui.get('visible-breakdown').textContent,/历史|上次|旧结果/);
+  assert.deepEqual(displayedIds(ui),[]);
+  assert.deepEqual(ui.get('previous-list').children.map(row=>row.dataset.id),['a30']);
+  assert.match(ui.get('previous-summary').textContent,/上批结果.*匹配 1/);
   ui.get('include-previous').click();assert.deepEqual(displayedIds(ui),[]);
 });
 
@@ -857,7 +980,7 @@ test('coverage follows the single selected period and its point choices',async()
   latest.status.settings.frequencies=['30m'];latest.status.settings.point_types=['3buy'];
   latest.candidates=latest.candidates.filter(row=>row.frequency==='30m');
   const ui=page(async(url,options)=>{calls.push({url,method:options?.method||'GET'});return dispatch(latest,url);});await settle();
-  ui.get('signal-clear').click();setPeriod(ui,'30m');setSignal(ui,'3buy');setPeriod(ui,'30m');setSignal(ui,'3sell');
+  preset(ui,'none');setPeriod(ui,'30m');setSignal(ui,'3buy');setPeriod(ui,'30m');setSignal(ui,'3sell');
   assert.deepEqual(displayedIds(ui),['a30','b30']);
   const coverage=ui.get('signal-coverage-message').textContent;
   assert.match(coverage,/30m 三卖/);assert.doesNotMatch(coverage,/30m 三买/);
@@ -867,7 +990,7 @@ test('coverage follows the single selected period and its point choices',async()
   assert.match(ui.get('signal-coverage-message').textContent,/1m/);
   assert.doesNotMatch(ui.get('signal-coverage-message').textContent,/30m/);
   setSignal(ui,'3sell',false);
-  assert.match(ui.get('signal-coverage-message').textContent,/1m 三买/);
+  assert.match(ui.get('signal-coverage-message').textContent,/没有独立扫描 1m/);
   assert.match(ui.get('active-filter-summary').textContent,/三买/);
   setPeriod(ui,'5m');preset(ui,'all');assert.match(ui.get('signal-coverage-message').textContent,/5m 全部类型/);
   setPeriod(ui,'30m');preset(ui,'buy');assert.match(ui.get('signal-coverage-message').textContent,/30m.*一买.*二买/);
@@ -877,7 +1000,7 @@ test('coverage follows the single selected period and its point choices',async()
 test('export freezes the canonical period points and history while subsequent controls keep working',async()=>{
   const latest=crossPeriodCandidates();latest.compact=true;let release;
   const ui=page(async url=>url==='/screening/workbench?compact=0'?new Promise(resolve=>{release=resolve;}):dispatch(latest,url));await settle();
-  ui.get('signal-clear').click();setPeriod(ui,'30m');setSignal(ui,'3buy');
+  preset(ui,'none');setPeriod(ui,'30m');setSignal(ui,'3buy');
   const exportJob=ui.get('export').listeners.click();await settle();
   setSignal(ui,'3sell');preset(ui,'buy');chooseSignal(ui,'1m',['1buy']);ui.get('include-previous').click();
   assert.equal(ui.get('export').disabled,true,'changing displayed filters cannot reopen an inflight export');
@@ -894,7 +1017,7 @@ test('export rechecks selected rows against fresh full results of the same run',
   const latest=crossPeriodCandidates();latest.compact=true;
   const full={...latest,compact:false,candidates:latest.candidates.filter(row=>row.id!=='a30')};
   const ui=page(async url=>url==='/screening/workbench?compact=0'?response(full):dispatch(latest,url));await settle();
-  ui.get('signal-clear').click();setPeriod(ui,'30m');setSignal(ui,'3buy');
+  preset(ui,'none');setPeriod(ui,'30m');setSignal(ui,'3buy');
   assert.deepEqual(displayedIds(ui),['a30','b30']);
   await ui.get('export').listeners.click();
   const exported=JSON.parse(await ui.exports[0].text());
@@ -929,8 +1052,9 @@ test('a new scan keeps the previous candidate and chart while its response is pe
   });await settle();
   const chart=ui.get('chart-frame').src;
   const starting=ui.get('screen-form').listeners.submit({preventDefault(){}});await settle();
-  assert.equal(ui.get('signal-list').children.length,1);
-  assert.match(ui.get('signal-list').querySelector('.queue-refresh').textContent,/上次结果.*待本轮更新/);
+  assert.equal(ui.get('signal-list').children.length,0);
+  assert.equal(ui.get('previous-list').children.length,1);
+  assert.match(ui.get('previous-list').querySelector('.queue-refresh').textContent,/上次结果.*待本轮更新/);
   assert.equal(ui.get('chart-frame').src,chart);
   assert.equal(ui.get('signal-count').textContent,0);
   assert.equal(ui.get('review-fields').disabled,true);
@@ -938,9 +1062,11 @@ test('a new scan keeps the previous candidate and chart while its response is pe
   const fresh={...old,id:'fresh',code:'SH.600001',name:'new result',refresh_state:undefined,result_source:'next'};
   release(response({...latest,candidates:[fresh,old],status:{...latest.status,completed:1,previous_result_count:1,current_result_count:1}}));
   await starting;await settle();
-  assert.equal(ui.get('signal-list').children.length,2);
+  assert.equal(ui.get('signal-list').children.length,1);
+  assert.equal(ui.get('previous-list').children.length,1);
   assert.equal(ui.get('signal-count').textContent,1);
-  assert.equal(ui.get('signal-list').querySelectorAll('.queue-refresh').length,1);
+  assert.equal(ui.get('signal-list').querySelectorAll('.queue-refresh').length,0);
+  assert.equal(ui.get('previous-list').querySelectorAll('.queue-refresh').length,1);
 });
 
 test('an automatic new run and failed fetch retain labelled previous results until replacement',async()=>{
@@ -950,7 +1076,8 @@ test('an automatic new run and failed fetch retain labelled previous results unt
     ?response({error:'temporary result read failure'},503):dispatch(latest,url));await settle();
   latest={...latest,source:'next',status:{...latest.status,run_id:'next',status:'running',completed:0}};fail=true;
   await ui.timers[0]();await settle();
-  assert.equal(ui.get('signal-list').children.length,1);
+  assert.equal(ui.get('signal-list').children.length,0);
+  assert.equal(ui.get('previous-list').children.length,1);
   assert.match(ui.get('decision-title').textContent,/上次结果/);
   assert.equal(ui.get('review-fields').disabled,true);
   fail=false;latest={...latest,candidates:[],status:{...latest.status,status:'completed',completed:1}};
@@ -963,11 +1090,34 @@ test('reopening a running scan displays server-retained rows without requesting 
   const latest=withCandidate();latest.status={...latest.status,status:'running',previous_result_count:1,current_result_count:0,results_loading:true,results_available:false};
   latest.candidates[0]={...latest.candidates[0],refresh_state:'pending',result_source:'old',detail_loaded:true};
   const ui=page(async url=>dispatch(latest,url));await settle();
-  assert.equal(ui.get('signal-list').children.length,1);
+  assert.equal(ui.get('signal-list').children.length,0);
+  assert.equal(ui.get('previous-list').children.length,1);
+  assert.equal(ui.get('previous-results').open,true);
+  assert.equal(ui.get('previous-results-top').children[0],ui.get('previous-results'));
+  assert.equal(ui.get('queue-empty').hidden,true);
+  assert.equal(ui.get('current-pagination').hidden,true);
+  assert.match(ui.get('visible-count').textContent,/上批匹配 1/);
   assert.match(ui.get('selected-tags').textContent,/上次结果/);
   assert.equal(ui.get('chart-source').disabled,true);
   assert.equal(ui.get('review-fields').disabled,true);
   assert.match(ui.get('page-message').textContent,/逐步替换/);
+});
+
+test('a hidden retained view can be recovered before the new batch produces its first result',async()=>{
+  const latest=withCandidate();latest.status={...latest.status,status:'running',completed:0,previous_result_count:1,current_result_count:0};
+  latest.candidates[0]={...latest.candidates[0],refresh_state:'pending',result_source:'old',detail_loaded:true};
+  const ui=page(async url=>dispatch(latest,url));await settle();
+  ui.get('include-previous').click();
+  chooseSignal(ui,'1m',['1buy']);
+  assert.equal(ui.get('previous-list').children.length,0);
+  assert.equal(ui.get('queue-show-available').hidden,false);
+  assert.match(ui.get('queue-show-available').textContent,/显示 5m 上批 1 条/);
+  ui.get('queue-show-available').click();await settle();
+  assert.equal(ui.get('signal-list').children.length,0);
+  assert.equal(ui.get('previous-list').children.length,1);
+  assert.equal(ui.get('queue-empty').hidden,true);
+  assert.equal(ui.get('signal-count').textContent,0);
+  assert.equal(ui.get('review-fields').disabled,true);
 });
 
 test('the actual template supports rendering a completed result without invented elements',async()=>{
@@ -978,6 +1128,25 @@ test('the actual template supports rendering a completed result without invented
   assert.equal(ui.get('signal-count').textContent,1);
   assert.equal(ui.get('signal-list').children.length,1);
   assert.equal(ui.get('run-status').textContent,'本次筛选完成');
+});
+
+test('third-sell first-center control and evidence use verified history for native signals',async()=>{
+  const data=withCandidate(),later=data.candidates[0];
+  later.point={...later.point,point_type:'3sell',status:'confirmed',evidence_scope:'native_center_signal',center_id:'c',
+    center_ordinal:1,center_zd_price:26.2,center_zg_price:26.45};
+  const proof={schema:'native-first-center-sequence-v2',state:'first',ordinal:1,direction:'down',
+    center_id:'c',known_at:200,origin_center_id:'c',preceding_center_ids:[],
+    origin_witness:{kind:'opposite_departure_and_separated_centers'}};
+  later.center_sequence={...proof,state:'later',ordinal:3,preceding_center_ids:['earlier','middle']};
+  data.candidates=[later,{...later,id:'verified-first',center_sequence:proof},
+    {...later,id:'unverified',center_sequence:null}];
+  const ui=page(async url=>dispatch(data,url));await settle();
+  assert.equal(ui.get('signal-list').children.length,3);
+  assert.match(ui.get('evidence-established').children.map(e=>e.textContent).join(' '),/下跌操作段第 3 个中枢/);
+  assert.doesNotMatch(ui.get('evidence-established').children.map(e=>e.textContent).join(' '),/向上序列第 1 个中枢/);
+  choose(ui,'center-order-filter','first');
+  assert.deepEqual(displayedIds(ui),['verified-first']);
+  assert.match(ui.get('evidence-established').children.map(e=>e.textContent).join(' '),/首中枢.*序列已核验/);
 });
 
 test('third-class counts distinguish confirmed points from incomplete lower confirmation', async () => {
@@ -1009,7 +1178,9 @@ test('current-run statistics exclude both pending and limited retained third-cla
     {...current,id:'old-pending',code:'SH.600001',refresh_state:'pending',result_source:'previous'},
     {...current,id:'old-limited',code:'SH.600002',refresh_state:'limited',result_source:'previous',point:{...current.point,point_type:'3sell'}}];
   const ui=page(async url=>dispatch(latest,url),undefined,false,true);await settle();
-  assert.equal(ui.get('signal-list').children.length,3,'retained context may still appear in the default queue');
+  assert.equal(ui.get('signal-list').children.length,1,'current pagination excludes previous results');
+  assert.equal(ui.get('previous-list').children.length,2);
+  assert.equal(ui.get('previous-results').open,false,'completed runs collapse previous context');
   assert.equal(ui.get('symbol-count').textContent,1);
   assert.equal(ui.get('signal-count').textContent,1);
   assert.match(ui.get('third-breakdown').textContent,/三类买卖点提醒 1 条/);
@@ -1020,6 +1191,29 @@ test('current-run statistics exclude both pending and limited retained third-cla
   assert.equal(ui.get('signal-list').children.length,0);
   assert.equal(ui.get('signal-count').textContent,1,'display filters do not rewrite whole-run statistics');
   assert.match(ui.get('third-breakdown').textContent,/三类买卖点提醒 1 条/);
+});
+
+test('previous results have independent pages, readonly selection and a separate export payload',async()=>{
+  const latest=withCandidate(),base=latest.candidates[0];
+  latest.status.status='running';
+  latest.candidates=[...Array.from({length:61},(_,i)=>({...base,id:'current-'+i})),
+    ...Array.from({length:71},(_,i)=>({...base,id:'previous-'+i,refresh_state:'pending',result_source:'old'}))];
+  const ui=page(async url=>dispatch(latest,url));await settle();
+  assert.equal(ui.get('visible-count').textContent,'61 条');
+  assert.equal(ui.get('signal-list').children.length,50);
+  assert.equal(ui.get('previous-list').children.length,50);
+  ui.get('previous-next').click();
+  assert.equal(ui.get('previous-list').children.length,21);
+  assert.match(ui.get('queue-page').textContent,/1 \/ 2/);
+  assert.equal(ui.get('review-fields').disabled,true);
+  ui.get('queue-next').click();
+  assert.equal(ui.get('signal-list').children.length,11);
+  assert.match(ui.get('previous-page').textContent,/2 \/ 2/);
+  await ui.get('export').listeners.click();
+  const exported=JSON.parse(await ui.exports[0].text());
+  assert.equal(exported.candidates.length,61);
+  assert.equal(exported.previous_candidates.length,71);
+  assert.ok(exported.previous_candidates.every(row=>row.result_source==='old'));
 });
 
 test('confirmed higher third buy keeps an entry-proof waiting stage', async () => {
@@ -1038,7 +1232,7 @@ test('confirmed higher third buy keeps an entry-proof waiting stage', async () =
   assert.match(ui.get('stage-counts').textContent,/筛选已通过 0 · 条件待齐 1/);
   assert.match(ui.get('third-breakdown').textContent,/入场证待核 1/);
   assert.ok(ui.get('evidence-missing').children.some(e=>e.textContent==='次次级入场证仍待核验'));
-  ui.get('stage-filter').value='forming';ui.get('stage-filter').listeners.change();
+  choose(ui,'point-status-filter','main_confirmed');
   assert.equal(ui.get('visible-count').textContent,'1 条');
 });
 
@@ -1184,7 +1378,7 @@ test('old interval events and delayed ready callbacks cannot change a replacemen
   const replacement=chartWidget('30');loadChart(ui,[replacement]);
   pending.ready();old.activeChart().setResolution('1');lateEvent('1');
   assertPeriod(ui,'30m');assert.equal(pending.listeners.size,0);assert.equal(replacement.listeners.size,1);
-  ui.get('stage-filter').value='forming';ui.get('stage-filter').listeners.change();
+  choose(ui,'point-status-filter','main_forming');
   assert.equal(replacement.listeners.size,0);assert.equal(ui.get('chart-frame').src,'about:blank');
 });
 
@@ -1230,9 +1424,9 @@ test('waiting candidates use the shared analysis chart and never claim confirmat
   assert.doesNotMatch(ui.get('decision-detail').textContent,/确认间隔/);
   assert.match(ui.get('stage-counts').textContent,/筛选已通过 0 · 条件待齐 1/);
   assert.ok(ui.get('evidence-missing').children.some(e=>e.textContent==='等待末段完成并锁定'));
-  ui.get('stage-filter').value='confirmed';ui.get('stage-filter').listeners.change();
+  choose(ui,'point-status-filter','confirmed');
   assert.equal(ui.get('selected-detail').hidden,true);
-  ui.get('stage-filter').value='forming';ui.get('stage-filter').listeners.change();
+  choose(ui,'point-status-filter','main_forming');
   assert.equal(ui.get('selected-detail').hidden,false);
 });
 
@@ -1516,7 +1710,7 @@ test('watchlist fetch failure remains explicit when quotes refresh and differs f
   assert.equal(ui.get('watch-quote-status').textContent,'');
 });
 
-test('same-group watch refresh follows the selected target when eighty new rows move it to another page',async()=>{
+test('watch group refresh keeps the selected chart without changing candidate pagination',async()=>{
   const latest=result(),target={market:'a',code:'SH.600099',name:'Selected target'};
   let stocks=[target],groupReads=0;
   const ui=page(async url=>{
@@ -1526,16 +1720,17 @@ test('same-group watch refresh follows the selected target when eighty new rows 
   });await settle();
   ui.get('watch-list').children[0].click();await settle();
   const id='watch:a:SH.600099',chart=ui.get('chart-frame').src;
-  assert.match(ui.get('queue-page').textContent,/1 \/ 1/);
-  assert.equal(ui.get('signal-list').children.find(row=>row.dataset.id===id).classList.contains('active'),true);
+  assert.equal(ui.get('queue-page').textContent,'0 条');
+  assert.equal(ui.get('watch-list').children.find(row=>row.dataset.watchId===id).getAttribute('aria-pressed')==='true',true);
   stocks=[...Array.from({length:80},(_,index)=>({market:'a',code:'SH.'+String(600000+index),name:'Added '+index})),target];
   ui.get('watch-refresh').click();await settle();
   assert.equal(groupReads,2);
   assert.equal(ui.get('watch-group').value,'我的关注');
-  assert.match(ui.get('queue-page').textContent,/2 \/ 2/);
+  assert.equal(ui.get('queue-page').textContent,'0 条');
   assert.equal(ui.get('selected-title').textContent,'Selected target · SH.600099');
   assert.equal(ui.get('chart-frame').src,chart);
-  assert.deepEqual(ui.get('signal-list').children.filter(row=>row.classList.contains('active')).map(row=>row.dataset.id),[id]);
+  assert.deepEqual(displayedIds(ui),[]);
+  assert.equal(ui.get('watch-list').children.length,81);
 });
 
 test('failed same-group refresh retains loaded members and counts with an explicit stale label',async()=>{
@@ -1547,20 +1742,20 @@ test('failed same-group refresh retains loaded members and counts with an explic
     if(url.startsWith('/get_zixuan_stocks/a/'))return fail?response({error:'temporary group failure'},503):response({data:stocks});
     return dispatch(data,url);
   },undefined,false,true,false,session);await settle();
-  assert.deepEqual(displayedIds(ui),['watch:a:SH.600099','watch:us:AAPL.US']);
+  assert.deepEqual(displayedIds(ui),['candidate']);
   assert.equal(ui.get('watch-market-counts').textContent,'A 股 1 · 美股 1');
   const selected=ui.get('selected-title').textContent,view=session.getItem(viewKey('tester'));
   fail=true;ui.get('watch-refresh').click();await settle();
   assert.equal(ui.get('watch-status').textContent,'temporary group failure');
   assert.match(ui.get('watch-count').textContent,/读取失败.*上次 2 个标的/);
   assert.equal(ui.get('watch-market-counts').textContent,'A 股 1 · 美股 1');
-  assert.equal(ui.get('watch-list').children.length,2);assert.deepEqual(displayedIds(ui),['watch:a:SH.600099','watch:us:AAPL.US']);
+  assert.equal(ui.get('watch-list').children.length,2);assert.deepEqual(displayedIds(ui),['candidate']);
   assert.equal(ui.get('selected-title').textContent,selected);assert.equal(session.getItem(viewKey('tester')),view);
   fail=false;ui.get('watch-refresh').click();await settle();
   assert.equal(ui.get('watch-count').textContent,'我的关注 · 2 个标的');assert.doesNotMatch(ui.get('watch-status').textContent,/failure/);
 });
 
-test('watchlist navigation clears stale age gain lower-confirmation and point-status refinements',async()=>{
+test('watch chart navigation preserves age distance lower-check and status filters',async()=>{
   const latest=withCandidate();
   const ui=page(async url=>{
     if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
@@ -1572,18 +1767,19 @@ test('watchlist navigation clears stale age gain lower-confirmation and point-st
   }
   assert.equal(ui.get('signal-list').children.length,0);
   ui.get('watch-list').children[0].click();await settle();
-  for(const id of ['age-filter','gain-filter','lower-status-filter'])assert.equal(ui.get(id).value,'all');
-  assert.equal(ui.get('point-status-filter').value,'all');
-  assert.equal(ui.get('origin-filter').value,'all');
+  assert.equal(ui.get('age-filter').value,'0');
+  assert.equal(ui.get('gain-filter').value,'1');
+  assert.equal(ui.get('lower-status-filter').value,'confirmed');
+  assert.equal(ui.get('point-status-filter').value,'forming');
   assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
-  assert.equal(ui.get('signal-list').children.find(row=>row.dataset.id==='watch:us:AAPL.US').classList.contains('active'),true);
+  assert.equal(ui.get('watch-list').children.find(row=>row.dataset.watchId==='watch:us:AAPL.US').getAttribute('aria-pressed'),'true');
 });
 
 for(const phone of [false,true])
-for(const filters of [[['risk-filter','avoid']],[['higher-context-filter','aligned']],[['risk-filter','avoid'],['higher-context-filter','aligned']]])
-test(`${phone?'phone':'desktop'} watchlist clicks clear ${filters.map(([id])=>id).join(' and ')} and keep the requested stock`,async()=>{
+for(const filters of [[['background-filter','countertrend']],[['higher-context-filter','aligned']],[['background-filter','countertrend'],['higher-context-filter','aligned']]])
+test(`${phone?'phone':'desktop'} watchlist clicks preserve ${filters.map(([id])=>id).join(' and ')} and keep the requested stock`,async()=>{
   const latest=withCandidate();
-  latest.candidates[0].operational_macd_risk={risk_filter_state:'basic_avoid_on_selected_period'};
+  latest.candidates[0].background_30m={alignment:'countertrend'};
   latest.candidates[0].higher_context={schema:'native-period-link-v1',category:'aligned'};
   const ui=page(async url=>{
     if(url==='/get_zixuan_groups/a')return response([{name:'我的关注'}]);
@@ -1593,13 +1789,12 @@ test(`${phone?'phone':'desktop'} watchlist clicks clear ${filters.map(([id])=>id
   for(const [id,value] of filters){ui.get(id).value=value;ui.get(id).listeners.change();}
   assert.match(ui.get('selected-title').textContent,/SH\.600000/);
   ui.get('watch-list').children[0].listeners.click();await settle();
-  for(const [id] of filters)assert.equal(ui.get(id).value,'all');
-  assert.equal(ui.get('origin-filter').value,'all');
+  for(const [id,value] of filters)assert.equal(ui.get(id).value,value);
   assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
   const chart=new URL(ui.get('chart-frame').src,'http://local');
   assert.equal(chart.searchParams.get('code'),'AAPL.US');
   assert.equal(chart.searchParams.get('market'),'us');
-  assert.equal(ui.get('signal-list').children.find(row=>row.dataset.id==='watch:us:AAPL.US').classList.contains('active'),true);
+  assert.equal(ui.get('watch-list').children.find(row=>row.dataset.watchId==='watch:us:AAPL.US').getAttribute('aria-pressed'),'true');
   if(phone)assert.equal(ui.get('workspace').attributes['data-mobile-view'],'chart');
   ui.get('refresh').listeners.click();await settle();
   assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
@@ -1638,7 +1833,7 @@ test(`${phone?'phone':'desktop'} watchlist chart opens while initial results are
   assert.equal(ui.get('signal-count').textContent,1);
   assert.equal(ui.get('selected-title').textContent,'Apple · AAPL.US');
   assert.equal(ui.get('chart-frame').src,chart);
-  assert.equal(ui.get('signal-list').children.find(row=>row.dataset.id==='watch:us:AAPL.US').classList.contains('active'),true);
+  assert.equal(ui.get('watch-list').children.find(row=>row.dataset.watchId==='watch:us:AAPL.US').getAttribute('aria-pressed'),'true');
   if(phone)assert.equal(ui.get('workspace').attributes['data-mobile-view'],'chart');
   latest={...latest,source:'next',status:{...latest.status,run_id:'next'}};
   await ui.timers[0]();await settle();
@@ -2012,11 +2207,64 @@ test('a saved watchlist selection excluded by default scope cannot block a runni
   assert.equal(session.getItem('screening-selection:tester:a'),'n0');
 });
 
-const viewKey=user=>'screening-view:v4:'+encodeURIComponent(user);
+const viewKey=user=>'screening-view:v5:'+encodeURIComponent(user);
 function saveView(session,filters={},watch_group='',user='tester'){
-  session.setItem(viewKey(user),JSON.stringify({version:4,filters,watch_group}));
+  session.setItem(viewKey(user),JSON.stringify({version:5,filters,watch_group}));
 }
 const readView=(session,user='tester')=>JSON.parse(session.getItem(viewKey(user)));
+
+test('5m buy confirmation survives edits in 1m and a page reload',async()=>{
+  const session=sessionFixture(),data=crossPeriodCandidates(),base=data.candidates[1];
+  data.candidates.push({...base,id:'five-buy',point:{...base.point,point_id:'five-buy',point_type:'1buy'}});
+  const open=()=>page(async url=>dispatch(data,url),undefined,false,true,false,session,'tester',true);
+  const ui=open();await settle();preset(ui,'buy');choose(ui,'point-status-filter','confirmed');
+  const trade=readView(session).filters;
+  assert.deepEqual(displayedIds(ui),['five-buy']);
+  setPeriod(ui,'1m');preset(ui,'all');choose(ui,'point-status-filter','all');
+  const short=readView(session).filters;
+  setPeriod(ui,'5m');
+  assert.deepEqual(displayedIds(ui),['five-buy']);
+  assert.deepEqual(readView(session).filters,trade);
+  assert.deepEqual(selectedSignals(ui),{signal_period:'5m',signal_points:['1buy','2buy','3buy']});
+  assert.equal(ui.get('point-status-filter').value,'confirmed');
+  const reopened=open();await settle();
+  assert.deepEqual(displayedIds(reopened),['five-buy']);
+  setPeriod(reopened,'1m');assert.deepEqual(readView(session).filters,short);
+  setPeriod(reopened,'5m');assert.deepEqual(readView(session).filters,trade);
+});
+
+test('each visited period restores all of its refinements instead of inheriting the other view',async()=>{
+  const session=sessionFixture(),data=crossPeriodCandidates();
+  const ui=page(async url=>dispatch(data,url),undefined,false,true,false,session,'tester',true);await settle();
+  const refinements=[['market-filter','a','us'],['review-filter','reviewed','pending'],
+    ['background-filter','countertrend','aligned'],['time-basis-filter','trade','anchor'],
+    ['center-order-filter','first','all'],['age-filter','2','4'],['gain-filter','3','1'],
+    ['sort-filter','distance','linkage'],['higher-context-filter','mixed','unverified']];
+  for(const [id,trade] of refinements)choose(ui,id,trade);
+  choose(ui,'lower-status-filter','confirmed');ui.get('include-previous').click();
+  const trade=readView(session).filters;
+  setPeriod(ui,'1m');
+  assert.equal(ui.get('lower-status-filter').value,'all');
+  for(const [id,,short] of refinements)choose(ui,id,short);
+  ui.get('include-previous').click();const short=readView(session).filters;
+  setPeriod(ui,'5m');assert.deepEqual(readView(session).filters,trade);
+  for(const [id,value] of refinements)assert.equal(ui.get(id).value,value);
+  assert.equal(ui.get('include-previous').checked,false);
+  setPeriod(ui,'1m');assert.deepEqual(readView(session).filters,short);
+  for(const [id,,value] of refinements)assert.equal(ui.get(id).value,value);
+  assert.equal(ui.get('include-previous').checked,true);
+});
+
+test('empty selections remain local when browser storage is unavailable and reset affects only the open view',async()=>{
+  const ui=page(async url=>dispatch(crossPeriodCandidates(),url),undefined,false,true,false,null,'tester',true);
+  await settle();preset(ui,'none');setPeriod(ui,'1m');preset(ui,'buy');
+  assert.deepEqual(displayedIds(ui),['a1','b1']);
+  setPeriod(ui,'5m');assert.deepEqual(selectedSignals(ui),{signal_period:'5m',signal_points:[]});
+  assert.deepEqual(displayedIds(ui),[]);
+  ui.get('reset').click();assert.deepEqual(displayedIds(ui),['a5']);
+  setPeriod(ui,'1m');assert.deepEqual(selectedSignals(ui),{signal_period:'1m',signal_points:['1buy','2buy','3buy']});
+  assert.deepEqual(displayedIds(ui),['a1','b1']);
+});
 
 test('unconfirmed native signals are visible by default and their status filter survives reload',async()=>{
   const latest=withCandidate(),preview=JSON.parse(JSON.stringify(latest.candidates[0]));
@@ -2028,10 +2276,10 @@ test('unconfirmed native signals are visible by default and their status filter 
   const session=sessionFixture(),ui=page(async url=>dispatch(latest,url),undefined,false,true,false,session);
   await settle();assert.equal(ui.get('point-status-filter').value,'all');
   assert.equal(displayedIds(ui).length,2);assert.match(ui.get('stage-counts').textContent,/未确认预警 1 条/);
-  choose(ui,'point-status-filter','forming');
-  assert.deepEqual(displayedIds(ui),['native-preview']);assert.match(ui.get('active-filter-summary').textContent,/仅未确认/);
+  choose(ui,'point-status-filter','main_forming');
+  assert.deepEqual(displayedIds(ui),['native-preview']);assert.match(ui.get('active-filter-summary').textContent,/结构形成中/);
   const restored=page(async url=>dispatch(latest,url),undefined,false,true,false,session);await settle();
-  assert.equal(restored.get('point-status-filter').value,'forming');
+  assert.equal(restored.get('point-status-filter').value,'main_forming');
   assert.deepEqual(displayedIds(restored),['native-preview']);
   restored.get('reset').click();assert.equal(restored.get('point-status-filter').value,'all');
   assert.equal(displayedIds(restored).length,2);
@@ -2069,7 +2317,7 @@ test('view persistence is account scoped and background refresh does not rewrite
   chooseSignal(first,'1m',['1buy']);choose(first,'market-filter','a');
   first.get('include-previous').click();
   assert.deepEqual(signalFields(readView(session,alice).filters),{signal_period:'1m',signal_points:['1buy']});
-  assert.equal(readView(session,alice).version,4);
+  assert.equal(readView(session,alice).version,5);
   const saved=session.getItem(viewKey(alice)),writes=session.writes.filter(write=>write.key===viewKey(alice)).length;
   await first.timers[0]();await settle();first.get('refresh').click();await settle();
   assert.equal(session.getItem(viewKey(alice)),saved);
@@ -2079,7 +2327,7 @@ test('view persistence is account scoped and background refresh does not rewrite
   assert.equal(session.getItem(viewKey(bob)),null);
   const restored=page(async url=>dispatch(data,url),undefined,false,true,false,session,alice);await settle();
   assert.deepEqual(displayedIds(restored),['a1','b1']);assert.equal(restored.get('market-filter').value,'a');
-  assert.equal(restored.get('include-previous').checked,false);assert.equal(restored.get('advanced-filter-summary').textContent,'更多条件 · 2');
+  assert.equal(restored.get('include-previous').checked,false);assert.equal(restored.get('advanced-filter-summary').textContent,'更多条件 · 1');
 });
 
 for(const [label,legacy,expected,ids] of [
@@ -2096,7 +2344,7 @@ for(const [label,legacy,expected,ids] of [
   assert.deepEqual(selectedSignals(ui),expected);assert.deepEqual(displayedIds(ui),ids);
   assert.equal(ui.get('market-filter').value,'a');assert.equal(ui.get('include-previous').checked,false);
   assert.equal(session.reads.filter(key=>key===oldKey).length,1);assert.equal(session.getItem(viewKey('tester')),null,'background restoration never rewrites preferences');
-  ui.get('include-previous').click();assert.equal(readView(session).version,4);
+  ui.get('include-previous').click();assert.equal(readView(session).version,5);
   assert.deepEqual(signalFields(readView(session).filters),expected);assert.equal('signal_selection' in readView(session).filters,false);
   assert.equal(session.getItem(oldKey),old,'migration must not destroy the old snapshot');
   session.reads.length=0;
@@ -2128,7 +2376,7 @@ test('anonymous pages neither restore nor persist browser storage',async()=>{
   const ui=page(async url=>dispatch(crossPeriodCandidates(),url),undefined,false,true,false,session,'');await settle();
   setPeriod(ui,'1m');ui.get('reset').click();
   assert.deepEqual(session.reads,[]);assert.deepEqual(session.writes,[]);
-  assert.deepEqual(displayedIds(ui),['a5']);
+  assert.deepEqual(displayedIds(ui),['a1','b1']);
 });
 
 for(const stored of ['{broken',JSON.stringify({version:9,filters:{signal_points:[]}}),JSON.stringify({version:2,filters:[]})])
@@ -2144,7 +2392,7 @@ for(const storage of [null,{getItem(){throw Error('denied');},setItem(){throw Er
 test('filtering and reset survive '+(storage?'throwing':'missing')+' session storage',async()=>{
   const ui=page(async url=>dispatch(crossPeriodCandidates(),url),undefined,false,true,false,storage);await settle();
   chooseSignal(ui,'30m',['3buy']);assert.deepEqual(displayedIds(ui),['a30','b30']);
-  ui.get('reset').click();assert.deepEqual(selectedSignals(ui),defaultSignals());assert.equal(ui.get('reset').disabled,true);
+  ui.get('reset').click();assert.deepEqual(selectedSignals(ui),{...defaultSignals(),signal_period:'30m'});assert.equal(ui.get('reset').disabled,true);
 });
 
 test('explicitly empty restored point types stay empty until the shared empty-state reset is used',async()=>{
@@ -2152,9 +2400,9 @@ test('explicitly empty restored point types stay empty until the shared empty-st
   const ui=page(async url=>dispatch(crossPeriodCandidates(),url),undefined,false,true,false,session);await settle();
   assert.deepEqual(displayedIds(ui),[]);assert.deepEqual(selectedSignals(ui),{signal_period:'30m',signal_points:[]});
   assert.equal(ui.get('queue-reset-filters').hidden,false);assert.equal(ui.get('advanced-filter-summary').textContent,'更多条件');
-  ui.get('queue-reset-filters').click();assert.deepEqual(displayedIds(ui),['a5']);
+  ui.get('queue-reset-filters').click();assert.deepEqual(displayedIds(ui),['a30','b30']);
   assert.equal(ui.get('queue-reset-filters').hidden,true);assert.equal(ui.get('reset').disabled,true);
-  assert.deepEqual(signalFields(readView(session).filters),defaultSignals());
+  assert.deepEqual(signalFields(readView(session).filters),{...defaultSignals(),signal_period:'30m'});
 });
 
 test('genuinely empty unfiltered data has no misleading reset action',async()=>{
@@ -2177,7 +2425,7 @@ for(const phone of [false,true])test('restored filters apply before selecting th
   assert.match(ui.get('selected-title').textContent,/^n200 ·/);
   assert.equal(ui.get('signal-list').children.find(card=>card.classList.contains('active')).dataset.id,'n200');
   assert.equal(ui.get('signal-search').value,'SH.');assert.equal(ui.get('market-filter').value,'a');assert.equal(ui.get('age-filter').value,'3');
-  assert.match(ui.get('active-filter-summary').textContent,/科技/);assert.equal(ui.get('advanced-filter-summary').textContent,'更多条件 · 3');
+  assert.match(ui.get('active-filter-summary').textContent,/科技/);assert.equal(ui.get('advanced-filter-summary').textContent,'更多条件 · 2');
 });
 
 test('reset clears visible and hidden refinements, closes advanced conditions, and survives reload',async()=>{
@@ -2186,8 +2434,8 @@ test('reset clears visible and hidden refinements, closes advanced conditions, a
   for(const [id,value] of [['market-filter','us'],['origin-filter','all'],['review-filter','reviewed'],['center-order-filter','first'],
     ['age-filter','3'],['gain-filter','3'],['sort-filter','distance'],['risk-filter','blocked'],['point-status-filter','all'],['lower-status-filter','missing'],['higher-context-filter','unverified']])choose(ui,id,value);
   ui.get('signal-search').value='missing';ui.get('signal-search').listeners.input();ui.get('include-previous').click();
-  ui.get('signal-clear').click();ui.get('advanced-filters').open=true;
-  assert.equal(ui.get('advanced-filter-summary').textContent,'更多条件 · 9','the visible linkage condition counts; hidden legacy predicates do not');
+  preset(ui,'none');ui.get('advanced-filters').open=true;
+  assert.equal(ui.get('advanced-filter-summary').textContent,'更多条件 · 8','the visible linkage condition counts; hidden legacy predicates do not');
   ui.get('reset').click();
   assert.equal(ui.get('advanced-filters').open,false);
   assert.equal(ui.get('reset').disabled,true);assert.equal(ui.get('advanced-filter-summary').textContent,'更多条件');
@@ -2262,7 +2510,7 @@ test('slow group discovery and stock loading restore the saved group without sel
   assert.equal(ui.get('watch-group').value,'长期关注');assert.equal(session.getItem('screening-selection:tester:a'),'watch:us:TSLA.US');
   assert.deepEqual(calls.filter(url=>url.startsWith('/get_zixuan_stocks/a/')),['/get_zixuan_stocks/a/'+encodeURIComponent('长期关注')]);
   stocks(response({data:[{market:'us',code:'TSLA.US',name:'Tesla'}]}));await settle();
-  assert.equal(ui.get('selected-title').textContent,'Tesla · TSLA.US');assert.match(ui.get('queue-page').textContent,/^3 \/ 3/);
+  assert.equal(ui.get('selected-title').textContent,'Tesla · TSLA.US');assert.match(ui.get('queue-page').textContent,/^1 \/ 3/);
   assert.equal(readView(session).watch_group,'长期关注');
   const count=session.writes.filter(write=>write.key===viewKey('tester')).length;
   ui.get('watch-refresh').click();await settle();stocks(response({data:[{market:'us',code:'TSLA.US',name:'Tesla'}]}));await settle();
@@ -2289,16 +2537,18 @@ test('a saved dynamic watch market survives slow group discovery and later reloa
     return dispatch(data,url);
   };
   const ui=page(fetch,undefined,false,true,false,session);await settle();
-  assert.equal(ui.get('market-filter').value,'fx');assert.equal(ui.get('origin-filter').value,'watchlist');
+  assert.equal(ui.get('market-filter').value,'fx');assert.equal(templateIds.has('origin-filter'),false);
   assert.equal(session.getItem('screening-selection:tester:a'),'watch:fx:EURUSD');
   release(response([{name:'外汇关注'}]));await settle();
-  assert.deepEqual(displayedIds(ui),['watch:fx:EURUSD']);assert.equal(ui.get('market-filter').value,'fx');
+  assert.deepEqual(displayedIds(ui),[]);assert.equal(ui.get('market-filter').value,'fx');
+  assert.match(ui.get('selected-title').textContent,/EURUSD/);
   assert.match(ui.get('active-filter-summary').textContent,/外汇/);
   ui.get('signal-search').value='EUR';ui.get('signal-search').listeners.input();
   assert.equal(readView(session).filters.market,'fx');
   const reopened=page(fetch,undefined,false,true,false,session);await settle();
   assert.equal(reopened.get('market-filter').value,'fx');release(response([{name:'外汇关注'}]));await settle();
-  assert.deepEqual(displayedIds(reopened),['watch:fx:EURUSD']);assert.equal(reopened.get('signal-search').value,'EUR');
+  assert.deepEqual(displayedIds(reopened),[]);assert.equal(reopened.get('signal-search').value,'EUR');
+  assert.match(reopened.get('selected-title').textContent,/EURUSD/);
 });
 
 test('a new source preserves saved view refinements but cannot reuse the previous source selection',async()=>{
@@ -2454,13 +2704,14 @@ test('sector ordering uses current time and distinct market symbols before retai
     if(url.startsWith('/get_zixuan_stocks/a/'))return response({data:[{market:'a',code:'SH.600016',name:'watch'}]});
     return dispatch(data,url);
   },undefined,false,true);await settle();choose(ui,'origin-filter','all');
-  assert.deepEqual(sectorIds(ui),['newest','fallback','distinct','duplicates','retained','watch'].map(id));
+  assert.deepEqual(sectorIds(ui),['newest','fallback','distinct','duplicates','retained'].map(id));
   const distinct=elementText(sectorCard(ui,id('distinct'))),duplicates=elementText(sectorCard(ui,id('duplicates')));
   assert.match(distinct,/2\s*只/,'cross-market identical codes are two symbols');
   assert.match(duplicates,/1\s*只/,'many point records from the same symbol count once');
   assert.doesNotMatch(distinct+' '+duplicates,/9999|99999/,'stale catalog counts cannot override live metrics');
-  assert.match(elementText(sectorCard(ui,id('retained'))),/上次|待更新|旧/);assert.match(elementText(sectorCard(ui,id('watch'))),/关注/);
-  ui.get('include-previous').click();assert.deepEqual(sectorIds(ui),['newest','fallback','distinct','duplicates','watch'].map(id));
+  assert.match(elementText(sectorCard(ui,id('retained'))),/上次|待更新|旧/);
+  assert.equal(sectorIds(ui).includes(id('watch')),false);
+  ui.get('include-previous').click();assert.deepEqual(sectorIds(ui),['newest','fallback','distinct','duplicates'].map(id));
   choose(ui,'origin-filter','screening');assert.deepEqual(sectorIds(ui),['newest','fallback','distinct','duplicates'].map(id));
   ui.get('sector-matches-only').click();ui.get('sector-next').click();assert.equal(sectorIds(ui).length,1);
 });

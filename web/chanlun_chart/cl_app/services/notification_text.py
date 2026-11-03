@@ -114,6 +114,8 @@ def heading(row):
         tag = '预警恢复'
     if state == 'approaching' and row.get('preview_repriced'):
         tag = '预警更新（未确认）'
+    if state in {'warning', 'approaching'} and row.get('candidate_updated'):
+        tag = '候选拐点更新（未确认）'
     code = clean(row.get("code", ""), 80)
     name = clean(row.get("name") or code, 28)
     label = name if name == code else f"{name} {code}"
@@ -123,15 +125,19 @@ def heading(row):
 
 
 def signal_status_lines(row):
+    indicator = 'MACD HTF 原始值' if row.get('strength_source') == 'macd_htf' else 'MACD'
     status = row.get("point_status")
     label = STAGES.get(status, status) if status is not None else ("已确认" if row["stage"] == "confirmed" else "筛选条件待齐")
+    if row.get('operating_role') == 'trade' and row.get('stage') == 'approaching':
+        label = ('5m 结构待确认 · 1m 证据已确认' if row.get('lower_confirmation_state') == 'confirmed'
+                 else '5m 已确认 · 1m 待确认' if status == 'confirmed' else '5m 结构待确认')
     lines = [f"{row['frequency']} {POINTS.get(row['point_type'], row['point_type'])} · {label}"]
     if row.get('signal_type') == 'native_point_preview':
-        if row.get('stage') != 'invalidated' and row.get('preview_trigger') == 'macd_first_contraction':
-            lines.append('预判依据：MACD 同向柱开始缩短，当前结构条件满足。')
+        if row.get('stage') != 'invalidated' and row.get('preview_trigger_active') is not False and row.get('preview_trigger') == 'macd_first_contraction':
+            lines.append(f'预判依据：{indicator}同向柱开始缩短，当前结构条件满足。')
         a, c, factor = number(row.get('macd_area_a')), number(row.get('macd_area_c')), number(row.get('estimate_factor'))
         if row.get('stage') != 'invalidated' and a and c is not None and factor:
-            lines.append(f'MACD 已出现面积 C/A：{c/a:.1%}；按×{factor:g}估算：{factor*c/a:.1%}')
+            lines.append(f'{indicator} 已出现面积 C/A：{c/a:.1%}；按×{factor:g}估算：{factor*c/a:.1%}')
         if row.get('stage') == 'invalidated':
             lines.append('失效原因：'+row.get('invalidation_reason','原未确认条件已不成立'))
         else:
@@ -150,25 +156,58 @@ def signal_status_lines(row):
             a, c = number(row.get("macd_area_a")), number(row.get("macd_area_c"))
             ratio = c/a if a and c is not None else None
         if ratio is not None and row.get("stage") != "invalidated":
-            lines.append(f"MACD 同向柱面积比 C/A：{ratio:.1%}")
+            lines.append(f"{indicator} 同向柱面积比 C/A：{ratio:.1%}")
         if row.get("stage") == "warning":
-            if row.get('preview_trigger') == 'macd_first_contraction':
+            if row.get('preview_trigger_active') is False:
+                lines.append('持续观察：累计面积仍小于原参考段，等待结构完成；首次触发条件当前未必满足。')
+            elif row.get('preview_trigger') == 'macd_first_contraction':
                 a, c = number(row.get('macd_area_a')), number(row.get('macd_area_c'))
                 if a and c is not None:
                     lines.append(f'按当前面积×2估算，2C/A：{2*c/a:.1%}')
-                lines.append('预判依据：MACD 同向柱开始缩短，估算面积仍弱于参考段。')
+                lines.append(f'预判依据：{indicator}同向柱开始缩短，估算面积仍弱于参考段。')
             else:
                 lines.append('依据：面积偏弱、动能连续收缩及局部价格转折')
             lines.append('线段尚未完成，预警可被后续走势推翻。')
         elif row.get("stage") == "invalidated":
             lines.append("原预警已撤销，不代表新的买卖点。")
+    if row.get('stage') in {'warning', 'approaching'}:
+        if row.get('candidate_updated'):
+            lines.append('候选拐点更新：' + price(row.get('candidate_previous_price'), row.get('structure_price_quantum'))
+                         + ' → ' + price(row.get('anchor_price'), row.get('structure_price_quantum'))
+                         + '；原结构假设继续观察。')
+        if row.get('preview_trigger_active') is False:
+            lines.append((row.get('warning_assessment') or {}).get('reason', '原结构假设尚未被否定，继续观察；买卖点仍未确认。'))
     lower = row.get("lower_confirmation_state")
+    if row.get('operating_role') == 'short_term':
+        lines.append('1m 短差级别 · 独立于 5m 交易确认')
+    elif row.get('operating_role') == 'trade':
+        lines.append('5m 交易级别 · 需要对应区间内 1m 确认')
+    background = row.get('background_30m') or (row.get('higher_context') or {}).get('background_30m') or {}
+    if not background and row.get('operating_role') in {'trade', 'short_term'}:
+        background = {'direction': 'unknown', 'alignment': 'unverified'}
+    if background:
+        direction = {'up': '中枢上移', 'down': '中枢下移', 'range': '中枢震荡', 'unknown': '待核验'}
+        alignment = {'aligned': '顺势', 'countertrend': '逆势风险', 'range': '震荡背景', 'unverified': '背景待核验'}
+        lines.append('30m 背景：' + direction.get(background.get('direction'), '待核验')
+                     + ' · ' + alignment.get(background.get('alignment'), '背景待核验'))
     if lower is not None:
         lines.append(f"{row.get('lower_frequency') or '1m'} 区间内结构确认：" + ("已确认" if lower == "confirmed" else "等待确认"))
+        if lower == 'confirmed' and row.get('lower_evidence_type') == 'internal_divergence':
+            lines.append('1m 依据：对应区间内的内部力度比较已通过回放核验。')
     following = row.get("following_segment_state")
     if following in {"in_progress", "completed"}:
         direction = {"up": "向上", "down": "向下"}.get(row.get("following_segment_direction"), "")
         lines.append(f"后继{direction}线段：" + ("进行中（尚未完成）" if following == "in_progress" else "已完成"))
+    if row.get('point_type') == '3buy' and row.get('evidence_scope') == 'native_center_signal':
+        from .first_center_sequence import first_verified
+        sequence = row.get('center_sequence')
+        if (first_verified(sequence) and sequence.get('direction') == 'up'
+                and sequence.get('center_id') == row.get('center_id')
+                and sequence.get('known_at') == row.get('point_available_at', row.get('available_at'))):
+            lines.append('上涨操作段首中枢 · 前序证据已核验')
+    if row.get('strength_source') == 'macd_htf':
+        target=row.get('strength_frequency')
+        lines.append('指标口径：MACD HTF 原始值'+(f'（{target}）' if target else '')+'，不含绘图平滑插值')
     return lines
 
 

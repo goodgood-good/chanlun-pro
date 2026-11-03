@@ -17,10 +17,59 @@ from tests.web.test_notification_state_freshness import ready_event
 from tests.web.test_signal_monitor import setup
 
 
+@pytest.mark.parametrize('point', ['1buy', '2buy', '3buy'])
+@pytest.mark.parametrize('stage', ['approaching', 'confirmed', 'invalidated'])
+def test_ordinary_5m_buy_lifecycle_updates_remain_enabled(point, stage):
+    row = {**event(stage), 'frequency': '5m', 'point_type': point}
+    assert point_notification_decision({}, row, set()) == 'allow'
+    for frequency in ('1m', '30m'):
+        assert point_notification_decision({}, {**row, 'frequency': frequency}, set()) == 'deny'
+
+
+def test_grouped_sell_preferences_migrate_once_without_changing_buy_or_holding_windows(setup):
+    service, manual, live, clock = setup
+    state = service._load()
+    saved = {**default_point_notifications(), 'others': ['1buy', '2buy', '3buy', '1sell', '2sell', '3sell']}
+    windows = {'others:5m:1buy': 10, 'holdings:1m:3sell': 20, 'others:5m:1sell': 30}
+    state.update(point_notifications=saved, point_notification_since=windows, point_notification_version=11)
+    service._save()
+    restored = signal_monitor.SignalMonitor(service.root, screening=manual, monitor=live, now=service.now)._load()
+    assert restored['point_notifications'] == default_point_notifications()
+    assert restored['point_notification_since'] == windows
+    assert restored['point_notification_version'] == 12
+    again = signal_monitor.SignalMonitor(service.root, screening=manual, monitor=live, now=service.now)._load()
+    assert again['point_notification_version'] == 12
+    assert again['point_notifications'] == restored['point_notifications']
+    with pytest.raises(ValueError):
+        normalize_point_notifications(saved)
+
+
+@pytest.mark.parametrize('kind', ['text', 'chart'])
+def test_previously_queued_ordinary_5m_sell_is_retired_without_sending(ready_event, monkeypatch, tmp_path, kind):
+    from cl_app.services.dingtalk_notifications import DingTalkOutbox
+    service, _, original = ready_event
+    row = {**original, 'point_type': '3sell', 'holding': False}
+    service._load()['signals'][row['id']] = dict(row)
+    service._load()['seed']['settings']['point_types'].append('3sell')
+    monkeypatch.setattr(signal_monitor, 'holding_symbols', lambda: [])
+    transport = Mock()
+    box = DingTalkOutbox(tmp_path / 'ordinary_sells.sqlite', transport=transport,
+        now=lambda: service.now().timestamp(), signal_validator=service._validate_notification_events)
+    if kind == 'text':
+        box.signal_events([row], since=0)
+    else:
+        box.enqueue_chart(row, 'https://example.invalid/fixture.png')
+    box.deliver_one()
+    with box._connect() as db:
+        assert db.execute('SELECT status FROM outbox').fetchone()[0] == 'expired'
+    transport.send.assert_not_called()
+    transport.send_markdown.assert_not_called()
+
+
 @pytest.mark.parametrize('point', ['1sell', '2sell', '3sell'])
 @pytest.mark.parametrize('hint', [False, True])
-def test_sell_requires_actual_current_holding(point, hint):
-    row = {**event('confirmed'), 'point_type': point, 'holding': hint}
+def test_nontrade_period_sell_requires_actual_current_holding(point, hint):
+    row = {**event('confirmed'), 'frequency': '1m', 'point_type': point, 'holding': hint}
     assert point_notification_decision({}, row, set()) == 'deny'
     assert point_notification_decision({}, row, None) == 'pending'
     assert point_notification_decision({}, row, {'a:SH.600088'}) == 'allow'
@@ -39,12 +88,12 @@ def test_unknown_membership_only_allows_buy_when_both_scopes_allow_it():
     assert point_notification_decision(state, row, None) == 'deny'
 
 
-@pytest.mark.parametrize('field', ['frequencies', 'holdings', 'others'])
+@pytest.mark.parametrize('field', ['frequencies', 'other_frequencies', 'holdings', 'others'])
 def test_empty_selection_is_disabled_and_does_not_change_special_alerts(field):
     policy = default_point_notifications()
     policy[field] = []
     state = {'point_notifications': policy}
-    holding = {'a:SH.600088'} if field == 'holdings' else set()
+    holding = {'a:SH.600088'} if field in {'frequencies', 'holdings'} else set()
     assert point_notification_decision(state, event('confirmed'), holding) == 'deny'
     for special in ['holding_risk', 'consolidation_divergence']:
         assert point_notification_decision(state, {**event('confirmed'), 'signal_type': special}, holding) == 'allow'
@@ -65,7 +114,7 @@ def test_reenabled_combination_starts_now_without_invalidating_other_points():
 
 
 @pytest.mark.parametrize('body', [None, {}, [], {'enabled': True},
-    {'frequencies': [], 'holdings': [], 'others': ['3sell']},
+    {'frequencies': [], 'holdings': [], 'others': ['4sell']},
     {'frequencies': ['1m', '1m'], 'holdings': [], 'others': []},
     {'frequencies': '5m', 'holdings': [], 'others': []},
     {'frequencies': ['60m'], 'holdings': [], 'others': []},
@@ -82,7 +131,7 @@ def test_policy_control_persists_independently_and_projects_once(control):
     reply = client.post('/monitor/notification-policy?view=paged&signals_page=2&signals_size=25', json=policy)
     assert reply.status_code == 200
     body = reply.get_json()
-    assert body['point_notifications'] == policy and body['point_notification_version'] == 1
+    assert body['point_notifications'] == normalize_point_notifications(policy) and body['point_notification_version'] == 1
     assert 'point_notification_since' not in body and len(calls) == 1
     assert body['pagination']['signals']['page'] == 2
     for key in ['enabled', 'dingtalk_enabled', 'settings', 'seed', 'signals', 'known', 'holding_risk_plans']:
@@ -91,7 +140,7 @@ def test_policy_control_persists_independently_and_projects_once(control):
     notifications.begin_window.assert_not_called()
     jobs.cancel.assert_not_called()
     fresh = signal_monitor.SignalMonitor(service.root, screening=jobs, monitor=jobs, notifications=notifications, now=service.now)
-    assert fresh._load()['point_notifications'] == policy
+    assert fresh._load()['point_notifications'] == normalize_point_notifications(policy)
     assert client.post('/monitor/notification-policy', json=policy).status_code == 200
     notifications.invalidate_point_notification_policy.assert_called_once()
 
@@ -100,7 +149,7 @@ def test_invalid_page_and_policy_do_not_mutate(control):
     client, service, _, notifications, calls = control
     before = deepcopy(service._load())
     assert client.post('/monitor/notification-policy?view=paged&signals_size=5000', json=default_point_notifications()).status_code == 400
-    assert client.post('/monitor/notification-policy', json={'frequencies': [], 'holdings': [], 'others': ['3sell']}).status_code == 400
+    assert client.post('/monitor/notification-policy', json={'frequencies': [], 'other_frequencies': ['1m'], 'holdings': [], 'others': ['3sell']}).status_code == 400
     assert service._load() == before and calls == []
     notifications.invalidate_point_notification_policy.assert_not_called()
 
@@ -126,7 +175,7 @@ def test_policy_control_requires_login_and_csrf(monkeypatch):
     fake.configure_point_notifications.assert_not_called()
 
 
-def test_real_validator_reads_holdings_for_a_sell_even_without_a_holding_hint(ready_event, monkeypatch):
+def test_real_validator_requires_actual_holdings_for_a_5m_sell(ready_event, monkeypatch):
     service, _, original = ready_event
     row = {**original, 'point_type': '3sell', 'holding': False}
     state = service._load()

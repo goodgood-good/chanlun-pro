@@ -171,7 +171,7 @@ def test_adapter_only_reads_matching_six_local_five_minute_rows(monkeypatch):
                 for name in ("open", "high", "low", "close", "volume")
             }
             values["time"] = [chosen.date.astype("int64").to_numpy() // 1_000_000]
-            return ([CODE], list(range(len(chosen)))), values
+            return (kwargs['stock_list'], list(range(len(chosen)))), values
 
     monkeypatch.setattr(exchange_qmt, "xtdata", Provider)
     result = exchange_qmt.ExchangeQMT()._klines_once(

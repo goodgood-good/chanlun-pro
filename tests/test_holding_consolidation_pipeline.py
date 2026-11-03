@@ -15,6 +15,9 @@ from cl_app.services.screening import ScreeningManager
 @pytest.fixture
 def holding_run(tmp_path, monkeypatch):
     frame = pd.read_parquet(Path("tests/fixtures/native_30m/SH.600183_30m.parquet"))
+    # The raw daily HTF confirms this recorded comparison at this source bar.
+    # Keep the causal prefix; the old September cutoff used a native-MACD alert.
+    frame = frame.loc[frame.date <= pd.Timestamp(1772694000, unit='s', tz='UTC')].copy()
     frame.attrs.update(structure_price_quantum="0.01", price_basis_revision="recorded-raw")
     context = trading_context(frame.date.iloc[-1].to_pydatetime(), "30m", 20, 60)
     monkeypatch.setattr(runner, "fetch_frame", lambda *_args: frame.copy())
@@ -35,7 +38,8 @@ def test_holding_comparison_and_existing_buy_sell_points_both_pass_saved_reader(
     result = manager._read_results(directory, {"source_current": True, "completed": 1, "settings": {"strategy": "direct_structural"}})
     assert result["selected"] == record["rows"][0]["selected"]
     assert result["consolidation_alerts"]
-    assert not result["observations"]
+    assert [item['point'] for item in result['observations']] == [item['point'] for item in record['rows'][0]['observations']]
+    assert all(item['audit']=={'cold_rebuild':True,'closed_bar_replay':True} for item in result['observations'])
     assert all(candidate["audit"] == {"cold_rebuild": True, "confirmation_replay": True, "confirmation_boundary": True}
                for candidate in result["consolidation_alerts"])
     historical = manager._read_results(directory, {"source_current": False, "frozen_native_review": True,
@@ -67,14 +71,11 @@ def test_verified_holding_comparison_reuses_cached_replay(holding_run, monkeypat
 def test_consolidation_error_does_not_discard_normal_point_results(holding_run, monkeypatch):
     manager, directory, record, frame, stock, settings, context = holding_run
     monkeypatch.setattr(runner, "_select_consolidation_alerts", Mock(side_effect=ValueError("bad extra comparison")))
-    snapshot = runner.snapshot_for(frame, stock["code"], "30m")
-    cutoff = snapshot["levels"][0]["points"][0]["available_at"]
-    prefix = frame.loc[frame.date <= pd.Timestamp(cutoff, unit="s", tz="UTC")].copy()
-    monkeypatch.setattr(runner, "fetch_frame", lambda *_args: prefix.copy())
-    context = trading_context(prefix.date.iloc[-1].to_pydatetime(), "30m", 20, 60)
     result = runner.scan_symbol(stock, settings, {"30m": context}, directory, revision="test")
     row, = result["rows"]
-    assert row["selected"] and not row["data_errors"]
+    before=[item['point'] for group in ('selected','observations') for item in record['rows'][0][group]]
+    assert before and [item['point'] for group in ('selected','observations') for item in row[group]] == before
+    assert not row["data_errors"]
     assert row["consolidation_alerts"] == [] and row["consolidation_error"]
 
 
@@ -82,14 +83,11 @@ def test_non_holding_scan_does_not_run_additional_comparisons(holding_run, monke
     manager, directory, record, frame, stock, settings, context = holding_run
     extra = Mock(side_effect=AssertionError("non-holdings must not calculate extra alerts"))
     monkeypatch.setattr(runner, "_select_consolidation_alerts", extra)
-    snapshot = runner.snapshot_for(frame, stock["code"], "30m")
-    cutoff = snapshot["levels"][0]["points"][0]["available_at"]
-    prefix = frame.loc[frame.date <= pd.Timestamp(cutoff, unit="s", tz="UTC")].copy()
-    monkeypatch.setattr(runner, "fetch_frame", lambda *_args: prefix.copy())
-    context = trading_context(prefix.date.iloc[-1].to_pydatetime(), "30m", 20, 60)
     row, = runner.scan_symbol({key: value for key, value in stock.items() if key != "holding"},
                               settings, {"30m": context}, directory, revision="test")["rows"]
-    assert row["selected"] and not row["data_errors"]
+    before=[item['point'] for group in ('selected','observations') for item in record['rows'][0][group]]
+    assert before and [item['point'] for group in ('selected','observations') for item in row[group]] == before
+    assert not row["data_errors"]
     assert not row.get("consolidation_alerts")
     extra.assert_not_called()
 

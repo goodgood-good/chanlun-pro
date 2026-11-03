@@ -72,6 +72,23 @@ def _strict_signature(cd: CL) -> tuple[object, ...]:
     return (_line_signature(cd.get_bis()), _line_signature(cd.get_xds()), cd.get_native_centers())
 
 
+@pytest.mark.parametrize('label', ['start', 'end'])
+@pytest.mark.parametrize('zone', ['UTC', 'Asia/Shanghai', 'America/New_York'])
+def test_completed_bar_clocks_preserve_offset_and_dst_fold(label, zone):
+    from datetime import timedelta
+    frame = _generate_klines(80, 123)
+    # The New York view crosses the repeated autumn hour. Both instants must
+    # retain the same event clocks as the original per-bar offset arithmetic.
+    frame['date'] = pd.date_range('2026-11-01 05:25', periods=len(frame), freq='min', tz='UTC').tz_convert(zone)
+    frame.attrs['bar_time_label'] = label
+    cd = CL('TEST', FREQUENCY, _config(), market='us').process_klines_batch(frame, last_bar_closed=True)
+    offset = timedelta(minutes=1) if label == 'start' else timedelta()
+    for bar in cd.get_src_klines():
+        expected = bar.date + offset
+        actual = cd._stroke_close_times[bar.date]
+        assert (actual.timestamp(), actual.fold, actual.tzinfo) == (expected.timestamp(), expected.fold, expected.tzinfo)
+
+
 
 @pytest.mark.parametrize("seed", (3, 11, 29, 101))
 def test_incremental_strict_evidence_equals_cold_batch(seed: int) -> None:

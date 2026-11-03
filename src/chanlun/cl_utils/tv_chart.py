@@ -23,6 +23,7 @@ def cl_data_to_tv_chart(
     code: str,
     frequency: str,
     strict_runtime,
+    _facts_only: bool = False,
 ) -> Union[dict, None]:
     """Display native bars, strokes, segments and their centers."""
 
@@ -41,15 +42,16 @@ def cl_data_to_tv_chart(
 
     klines = frame.copy(deep=False)
     kline_ts = klines["date"].map(fun.datetime_to_int).tolist()
-    kline_cs = klines["close"].tolist()
-    kline_os = klines["open"].tolist()
-    kline_hs = klines["high"].tolist()
-    kline_ls = klines["low"].tolist()
-    kline_vs = (
-        klines["volume"].tolist()
-        if "volume" in klines.columns
-        else [0.0] * len(klines)
-    )
+    if not _facts_only:
+        kline_cs = klines["close"].tolist()
+        kline_os = klines["open"].tolist()
+        kline_hs = klines["high"].tolist()
+        kline_ls = klines["low"].tolist()
+        kline_vs = (
+            klines["volume"].tolist()
+            if "volume" in klines.columns
+            else [0.0] * len(klines)
+        )
 
     def _enabled(name: str) -> bool:
         return config.get(name) in ("1", 1, True)
@@ -62,7 +64,7 @@ def cl_data_to_tv_chart(
     fx_data = []
     bi_chart_data = []
     xd_chart_data = []
-    if runtime_available:
+    if runtime_available and not _facts_only:
         if _enabled("chart_show_fx"):
             valid_fxs = {}
             for bi in strict_cd.get_bis():
@@ -189,7 +191,7 @@ def cl_data_to_tv_chart(
         strict_htf = {}
         chart_htf = None
 
-    result = {
+    result = {} if _facts_only else {
         "t": kline_ts,
         "c": kline_cs,
         "o": kline_os,
@@ -204,6 +206,11 @@ def cl_data_to_tv_chart(
         "higher_macd_dif": np.round((chart_htf or {}).get("dif", []), 6).tolist(),
         "higher_macd_dea": np.round((chart_htf or {}).get("dea", []), 6).tolist(),
         "higher_macd_hist": np.round((chart_htf or {}).get("hist", []), 6).tolist(),
+        # Full precision raw HTF measurements; the smooth columns above remain
+        # the visual overlay and must never be used as trading evidence.
+        "higher_macd_raw_dif": list((strict_htf or {}).get("dif", [])),
+        "higher_macd_raw_dea": list((strict_htf or {}).get("dea", [])),
+        "higher_macd_raw_hist": list((strict_htf or {}).get("hist", [])),
         "fxs": fx_data,
         "bis": bi_chart_data,
         "xds": xd_chart_data,

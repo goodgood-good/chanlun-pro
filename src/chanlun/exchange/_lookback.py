@@ -29,9 +29,10 @@ _LOOKBACK_DAYS_RAW: dict[str, int] = {
 
 # 暴露 read-only 视图, 避免调用方意外 mutate
 DEFAULT_LOOKBACK_DAYS: Mapping[str, int] = MappingProxyType(_LOOKBACK_DAYS_RAW)
+EQUITY_LOOKBACK_OVERRIDES: Mapping[str, int] = MappingProxyType({"1m": 60, "5m": 365})
 
 
-def get_lookback_days(frequency: str) -> int:
+def get_lookback_days(frequency: str, *, market: str | None = None) -> int:
     """返回 frequency 对应的默认回看天数。
 
     Args:
@@ -41,7 +42,8 @@ def get_lookback_days(frequency: str) -> int:
         ValueError: frequency 未知 (避免静默返回 0 导致空数据)。
     """
     try:
-        return DEFAULT_LOOKBACK_DAYS[frequency]
+        days = DEFAULT_LOOKBACK_DAYS[frequency]
+        return EQUITY_LOOKBACK_OVERRIDES.get(frequency, days) if market in {"a", "us"} else days
     except KeyError:
         known = sorted(DEFAULT_LOOKBACK_DAYS.keys())
         raise ValueError(
@@ -50,7 +52,7 @@ def get_lookback_days(frequency: str) -> int:
         ) from None
 
 
-def get_lookback_timedelta(frequency: str) -> timedelta:
+def get_lookback_timedelta(frequency: str, *, market: str | None = None) -> timedelta:
     """返回现行周期对应的默认回看时长；未知周期直接拒绝。"""
 
-    return timedelta(days=get_lookback_days(frequency))
+    return timedelta(days=get_lookback_days(frequency, market=market))

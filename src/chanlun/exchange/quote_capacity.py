@@ -20,10 +20,43 @@ _worker_pid = None
 _run_dir = None
 _slot_stack = None
 _lock = threading.RLock()
+_request = threading.local()
+
+
+class QuoteConnectionCancelled(RuntimeError):
+    """The owning calculation stopped; another attempt cannot revive it."""
+
+
+class QuoteConnectionBusy(TimeoutError):
+    """Local quote admission is pending; no provider request has failed."""
+    retryable = False
+    code = 'quote_connection_capacity_busy'
+    retry_after = 2
 
 
 def is_worker_quote_process():
     return _worker_pid == os.getpid()
+
+
+def worker_quote_cancelled():
+    event=getattr(_request,'cancel',None)
+    return bool(event is not None and event.is_set()) or (
+        is_worker_quote_process() and (_run_dir is None or (_run_dir/'cancel').exists()))
+
+
+def current_quote_cancel_event():
+    """Carry a request's cancellation through provider executor boundaries."""
+    return getattr(_request,'cancel',None)
+
+
+@contextmanager
+def quote_request_scope(cancel):
+    previous=getattr(_request,'cancel',None)
+    _request.cancel=cancel
+    try:
+        yield
+    finally:
+        _request.cancel=previous
 
 
 def _budget_root():
@@ -40,11 +73,13 @@ def acquire_worker_quote_slot():
         if _slot_stack is not None:
             return
         if _run_dir is None:
-            raise RuntimeError("Idle screening worker cannot open a quote connection")
-        deadline = time.monotonic() + WAIT_SECONDS
+            raise QuoteConnectionCancelled("Idle screening worker cannot open a quote connection")
+        from chanlun import config
+        budget=min(WAIT_SECONDS,.25) if str(getattr(config,'US_HISTORY_KLINE_SOURCE','')).lower()=='dual' else WAIT_SECONDS
+        deadline = time.monotonic() + budget
         while True:
-            if (_run_dir / "cancel").exists():
-                raise RuntimeError("Quote connection wait cancelled")
+            if worker_quote_cancelled():
+                raise QuoteConnectionCancelled("Quote connection wait cancelled")
             for index in range(WORKER_QUOTE_SLOTS):
                 stack = ExitStack()
                 try:
@@ -60,7 +95,7 @@ def acquire_worker_quote_slot():
                 _slot_stack = stack
                 return
             if time.monotonic() >= deadline:
-                raise TimeoutError("Worker quote connection capacity is busy")
+                raise QuoteConnectionBusy("Worker quote connection capacity is busy")
             time.sleep(.025)
 
 

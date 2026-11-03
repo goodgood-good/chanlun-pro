@@ -18,37 +18,35 @@ param(
 
 
     [ValidateRange(30, 1800)]
-    [int]$WebReadinessTimeoutSeconds = 1800
+    [int]$WebReadinessTimeoutSeconds = 1800,
+
+    [ValidateRange(30, 60)]
+    [int]$PreflightTimeoutSeconds = 60
 )
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'deploy_common.ps1')
+. (Join-Path $PSScriptRoot 'no_console.ps1')
 
-# Native PowerShell output capture can remain open while a spawned service is
-# alive, even after this script has finished. Isolate the deployment console
-# and wait for its direct process only. Do not use -Wait (the process tree),
-# stream redirection, or -NoNewWindow here. The worker keeps its normal log.
+# Services must outlive the launching terminal and its Windows job. Dispatch
+# through the interactive user's Task Scheduler service, then wait only for
+# that deployment task's receipt. The worker keeps its normal ops log.
 # A preflight creates no persistent children and retains its existing output.
 if (-not $PreflightOnly -and -not $DeploymentWorker) {
     $workerArguments = @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        '-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File',
         ('"{0}"' -f $PSCommandPath), '-DeploymentWorker',
-        '-WebReadinessTimeoutSeconds', [string]$WebReadinessTimeoutSeconds
+        '-WebReadinessTimeoutSeconds', [string]$WebReadinessTimeoutSeconds,
+        '-PreflightTimeoutSeconds', [string]$PreflightTimeoutSeconds
     )
     foreach ($name in @('SkipWatchdog', 'OpenBrowser', 'EnableFullSymbolCatalog', 'DisableFullSymbolCatalog')) {
         if (Get-Variable -Name $name -ValueOnly) { $workerArguments += ('-' + $name) }
     }
     $workerRoot = Split-Path -Parent $PSScriptRoot
     Write-Host ('Starting managed deployment; logs: {0}' -f (Join-Path $PSScriptRoot 'logs'))
-    $deploymentProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $workerArguments `
-        -WorkingDirectory $workerRoot -WindowStyle Hidden -PassThru -ErrorAction Stop
-    try {
-        $null = $deploymentProcess.Handle
-        $deploymentProcess.WaitForExit()
-        $deploymentExit = $deploymentProcess.ExitCode
-    } finally {
-        $deploymentProcess.Dispose()
-    }
+    . (Join-Path $PSScriptRoot 'deployment_task.ps1')
+    $deploymentExit = Invoke-IndependentDeployment -ScriptPath $PSCommandPath -ProjectRoot $workerRoot `
+        -WorkerArguments $workerArguments -TimeoutSeconds $WebReadinessTimeoutSeconds
     Write-Host ('Managed deployment exited with code {0}.' -f $deploymentExit)
     exit $deploymentExit
 }
@@ -64,7 +62,7 @@ $watchdogScript = Join-Path $ProjectRoot 'ops\watch_web.ps1'
 $watchdogInstaller = Join-Path $ProjectRoot 'ops\install_web_watchdog.ps1'
 $watchdogStateRoot = Join-Path $ProjectRoot '.cache\chanlun_web_watchdog'
 $watchdogScopePath = Join-Path $watchdogStateRoot 'deployment_scope.json'
-$PreflightTimeoutSec = 30
+$PreflightTimeoutSec = $PreflightTimeoutSeconds
 $LogDir       = Join-Path $PSScriptRoot 'logs'
 # ----------------------------------------------------------------------------
 
@@ -207,8 +205,10 @@ function Register-LimitedWebLaunchTask {
     }
 
     $arguments = $argumentParts -join ' '
-    $action = New-ScheduledTaskAction `
-        -Execute 'powershell.exe' `
+    $taskRoot = Split-Path -Parent (Split-Path -Parent $ScriptPath)
+    $action = New-NoConsoleTaskAction `
+        -ProjectRoot $taskRoot -Label $TaskName `
+        -FilePath 'powershell.exe' `
         -Argument $arguments
     $principal = New-ScheduledTaskPrincipal `
         -UserId $currentUser `
@@ -455,21 +455,32 @@ function Start-WebProcess {
     $script:LastWebErrorLog = $errLog
     Log ('start web project ({0}): {1} {2} nobrowser' -f $Purpose, $PythonPath, $AppScript)
     $spArgs = @{
+        ProjectRoot            = $ProjectRoot
         FilePath               = $PythonPath
         ArgumentList           = @($AppScript, 'nobrowser')
         WorkingDirectory       = $AppDir
         RedirectStandardOutput = $outLog
         RedirectStandardError  = $errLog
-        WindowStyle            = 'Hidden'
-        PassThru               = $true
         ErrorAction            = 'Stop'
     }
-    Start-Process @spArgs
+    $startedWeb = Start-NoConsoleProcess @spArgs
+    try {
+        # The task launcher can inherit BelowNormal. Keep request handling,
+        # market warmup and scheduling responsive while calculation children
+        # retain their explicitly configured BelowNormal priority.
+        $startedWeb.PriorityClass = [Diagnostics.ProcessPriorityClass]::Normal
+        Log ('web project priority set to Normal: PID={0}' -f $startedWeb.Id)
+    } catch {
+        Log ('web priority adjustment unavailable: {0}' -f $_.Exception.Message)
+    }
+    return $startedWeb
 }
 
 function Test-WebLiveness {
     param(
-        [Parameter(Mandatory = $true)][Diagnostics.Process]$Process,
+        # Both Diagnostics.Process and the handle-owning no-console child expose
+        # Refresh, HasExited and Id; recovery must accept either representation.
+        [Parameter(Mandatory = $true)][object]$Process,
         [int]$TimeoutSeconds = 30
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -702,6 +713,11 @@ $preflightProcess = New-Object Diagnostics.Process
 $preflightProcess.StartInfo = $preflightInfo
 try {
     $null = $preflightProcess.Start()
+    try {
+        $preflightProcess.PriorityClass = [Diagnostics.ProcessPriorityClass]::Normal
+    } catch {
+        Log ('preflight priority adjustment unavailable: {0}' -f $_.Exception.Message)
+    }
     if (-not $preflightProcess.WaitForExit($PreflightTimeoutSec * 1000)) {
         $preflightProcess.Kill()
         $preflightProcess.WaitForExit()
@@ -1113,12 +1129,13 @@ if (-not $SkipWatchdog) {
         $watchdogArguments += '-EnableFullSymbolCatalog'
     }
 
-    $watchdogProcess = Start-Process `
+    $watchdogProcess = Start-NoConsoleProcess -ProjectRoot $ProjectRoot `
         -FilePath 'powershell.exe' `
         -ArgumentList $watchdogArguments `
-        -WindowStyle Hidden `
-        -PassThru
+        -RedirectStandardOutput (Join-Path $LogDir 'web_watchdog.stdout.log') `
+        -RedirectStandardError (Join-Path $LogDir 'web_watchdog.stderr.log')
     Log ('web watchdog launched PID={0} with current deployment scope' -f $watchdogProcess.Id)
+    $watchdogProcess.Dispose()
     $watchdogDeadline = (Get-Date).AddSeconds(30)
     $watchdogReady = $false
     do {

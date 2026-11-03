@@ -50,6 +50,23 @@ def test_middle_period_buy_cannot_overrule_opposing_30m_context():
     assert result['category']=='turning' and result['higher_reversal_confirmed'] is False
 
 
+@pytest.mark.parametrize('kind,expected', [('3buy','aligned'), ('3sell','countertrend')])
+def test_short_signals_use_the_scanners_center_background_and_their_own_side(kind, expected):
+    data = periods()
+    data['1m']['signals'] = [signal(kind)]
+    data['30m']['background_30m'] = {
+        'frequency':'30m','state':'verified','source_closed_at':100,
+        'direction':'up','alignment':'aligned','center_id':'c','price_basis_revision':'basis',
+    }
+    assert linked(row('1m',kind),data)['background_30m']['alignment'] == expected
+    data['30m']['background_30m']['direction'] = 'range'
+    assert linked(row('1m',kind),data)['background_30m']['alignment'] == 'range'
+    # A separate departure in the linkage summary must not upgrade the background.
+    assert data['30m']['direction'] == 'up'
+    data['30m']['price_basis_revision'] = 'changed'
+    assert linked(row('1m',kind),data)['background_30m']['alignment'] == 'unverified'
+
+
 def test_short_period_reverse_signal_is_risk_context_and_does_not_relabel_the_main_point():
     data=periods();data['1m']['signals']=[signal('1sell','small-sell')]
     primary=row('30m');saved=deepcopy(primary)
@@ -113,7 +130,18 @@ def test_response_does_not_expose_mutable_cached_period_facts():
 
 def test_unknown_large_structure_is_not_treated_as_support():
     data=periods();data['30m'].update(direction='unknown',center=None,signals=[])
-    assert linked(data=data)['category']=='unverified'
+    result=linked(data=data)
+    assert result['category']=='unverified'
+    assert result['periods'][-1]['reason']=='structure_insufficient'
+
+
+def test_price_and_clock_conflicts_explain_why_verified_inputs_cannot_be_related():
+    data=periods();data['1m']['latest_close']=100.01
+    result=linked(data=data)
+    assert result['periods'][0]['reason']=='period_close_mismatch'
+    assert result['category']=='unverified'
+    data['30m']['source_closed_at']=99
+    assert linked(data=data)['periods'][-1]['reason']=='period_cutoff_mismatch'
 
 
 def test_context_loading_is_shared_bounded_and_does_not_block_the_primary_result(tmp_path,monkeypatch):
@@ -157,6 +185,22 @@ def test_cached_native_context_uses_verified_inputs_without_requesting_quotes(re
     value,_=higher_context.load_period([path],'a','SH.600519','5m',snapshot['source_closed_at'],revision)
     assert value['signals'] and value['source_closed_at']==snapshot['source_closed_at']
     assert value['input_fingerprint']==cache.input_fingerprint(frame,'SH.600519','5m')
+
+
+@pytest.mark.parametrize('suffix,accepted', [(':native-strength-v2', True),
+    (':holding-consolidation-v1', True), (':unknown-strength-version', False)])
+def test_context_recognizes_only_explicitly_supported_calculation_modes(recorded_cache, suffix, accepted):
+    path,frame,snapshot,revision=recorded_cache
+    mode=revision+suffix
+    cache.write_calculation(path,cache.calculation_key(frame,'SH.600519','5m',mode),
+        {'code':'SH.600519','frequency':'5m','data_errors':[],'reason_counts':{}},snapshot,{},
+        source_frame=frame,calculation_revision=mode)
+    if not accepted:
+        with pytest.raises(ValueError):
+            higher_context.load_period([path],'a','SH.600519','5m',snapshot['source_closed_at'],revision)
+    else:
+        value,_=higher_context.load_period([path],'a','SH.600519','5m',snapshot['source_closed_at'],revision)
+        assert value['signals'] and value['input_fingerprint']==cache.input_fingerprint(frame,'SH.600519','5m')
 
 
 def test_a_recovered_close_does_not_restore_a_previously_broken_reference(recorded_cache):

@@ -163,6 +163,8 @@ data
 /config/runtime_credentials.local.json
 # 本机 QMT 路径；可从示例复制后配置。
 /ops/qmt_exe_path.txt
+# Locally built executables used by persistent scheduled tasks.
+/ops/.runtime/
 # 私有代码排除
 **/my
 my_**.py

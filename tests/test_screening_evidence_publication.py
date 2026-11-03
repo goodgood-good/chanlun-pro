@@ -44,6 +44,35 @@ def test_identical_publication_to_the_same_run_keeps_valid_evidence(tmp_path):
     assert evidence_health(tmp_path, 'SH.600000', '5m', first)['verified']
 
 
+def test_trade_confirmation_and_short_term_evidence_cannot_overwrite_each_other(tmp_path):
+    from chanlun.screening.evidence import load_evidence, evidence_version
+    data = frame()
+    data['date'] = pd.date_range('2026-09-01 09:31', periods=4, freq='1min', tz='Asia/Shanghai')
+    source = {'symbol': 'SH.600000', 'source_frequency': '1m', 'levels': [],
+              'source_closed_at': int(data.date.iloc[-1].timestamp())}
+    lower = {**source, 'screening_interval_signals': [{'proof': 'specific parent interval'}]}
+    frozen = _save_evidence(tmp_path, 'SH.600000', '1m', data, lower, namespace='trade_5m')
+    frozen_paths = evidence_paths(tmp_path, 'SH.600000', '1m', namespace='trade_5m')
+    before = [path.read_bytes() for path in frozen_paths]
+    short = _save_evidence(tmp_path, 'SH.600000', '1m', data, source)
+    assert [path.read_bytes() for path in frozen_paths] == before
+    assert evidence_health(tmp_path, 'SH.600000', '1m', frozen)['verified']
+    assert evidence_health(tmp_path, 'SH.600000', '1m', short)['verified']
+    assert load_evidence(tmp_path, 'SH.600000', '1m', frozen)[1] == lower
+    assert load_evidence(tmp_path, 'SH.600000', '1m', short)[1] == source
+    token = evidence_version(tmp_path)
+    frozen_paths[1].unlink()
+    assert evidence_version(tmp_path) != token
+    assert not evidence_health(tmp_path, 'SH.600000', '1m', frozen)['complete']
+    assert evidence_health(tmp_path, 'SH.600000', '1m', short)['verified']
+
+
+@pytest.mark.parametrize('namespace', ['../elsewhere', 'unknown', '/absolute'])
+def test_unknown_evidence_namespaces_are_rejected(tmp_path, namespace):
+    with pytest.raises(ValueError):
+        evidence_paths(tmp_path, 'SH.600000', '1m', namespace=namespace)
+
+
 @pytest.mark.parametrize('changed', ['old_bar', 'snapshot', 'diagnostic_metadata', 'price_basis'])
 def test_every_frozen_input_or_snapshot_change_gets_new_evidence(tmp_path, monkeypatch, changed):
     data = frame()

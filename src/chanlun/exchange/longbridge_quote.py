@@ -7,8 +7,9 @@ ordinary Python futures, and independent history pages can actually overlap.
 """
 
 import asyncio
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+from concurrent.futures import TimeoutError as FuturesTimeoutError, CancelledError as FuturesCancelledError
 import inspect
+import math
 import threading
 import time
 
@@ -77,25 +78,45 @@ class QuoteContextBridge:
             raise AttributeError(name)
 
         def call(*args, **kwargs):
-            if threading.current_thread() is self._thread:
-                raise RuntimeError("cannot block the quote event loop from its callback")
-            with self._lock:
-                if self._closed:
-                    raise RuntimeError("Longbridge quote connection is closed")
-                future = asyncio.run_coroutine_threadsafe(
-                    self._invoke(name, args, kwargs), self._loop,
-                )
-                self._pending.add(future)
-            try:
-                return future.result(timeout=self._request_timeout)
-            except (FuturesTimeoutError, TimeoutError):
-                future.cancel()
-                raise
-            finally:
-                with self._lock:
-                    self._pending.discard(future)
+            return self.call_with_timeout(name, args, kwargs, timeout=self._request_timeout)
 
         return call
+
+    def call_with_timeout(self, name, args, kwargs, *, timeout):
+        """Bound one read without resetting the shared authenticated context."""
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise TimeoutError('Longbridge request deadline')
+        if threading.current_thread() is self._thread:
+            raise RuntimeError("cannot block the quote event loop from its callback")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Longbridge quote connection is closed")
+            future = asyncio.run_coroutine_threadsafe(self._invoke(name, args, kwargs), self._loop)
+            self._pending.add(future)
+        try:
+            from .quote_capacity import worker_quote_cancelled,QuoteConnectionCancelled
+            deadline=time.monotonic()+timeout
+            while True:
+                if worker_quote_cancelled():
+                    future.cancel()
+                    raise QuoteConnectionCancelled('Longbridge owning request cancelled')
+                left=deadline-time.monotonic()
+                if left<=0:
+                    raise FuturesTimeoutError()
+                try:
+                    return future.result(timeout=min(.1,left))
+                except FuturesTimeoutError:
+                    if future.done():
+                        raise
+        except (FuturesCancelledError, asyncio.CancelledError) as exc:
+            from .quote_capacity import QuoteConnectionCancelled
+            raise QuoteConnectionCancelled('Longbridge quote request was cancelled before completion') from exc
+        except (FuturesTimeoutError, TimeoutError):
+            future.cancel()
+            raise
+        finally:
+            with self._lock:
+                self._pending.discard(future)
 
     def close(self):
         with self._lock:

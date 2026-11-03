@@ -2,13 +2,25 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from collections import OrderedDict
 import gzip
 import hashlib
 from io import BytesIO
 import json
 import os
+import pickle
 from pathlib import Path
+import threading
 import zlib
+
+try:
+    from msgspec import DecodeError as _FastDecodeError
+    from msgspec.json import decode as _fast_json_decode
+except ImportError:
+    _fast_json_decode = None
+    _fast_decode_errors = ()
+else:
+    _fast_decode_errors = (_FastDecodeError, UnicodeError, RecursionError)
 
 import pandas as pd
 from chanlun.cl_utils.point_exits import build_point_exit_plans
@@ -18,11 +30,14 @@ from .rules import FREQUENCIES, _native_center_signal_source_valid, native_conso
 from .confirmation import confirmation_catalog
 
 
-def evidence_paths(directory, code, frequency, market="a"):
+def evidence_paths(directory, code, frequency, market="a", namespace=None):
     from .markets import storage_symbol
     if frequency not in FREQUENCIES:
         raise ValueError("选股证据的标的或周期无效")
-    stem = Path(directory) / "evidence" / f"{storage_symbol(code, market)}_{frequency}"
+    if namespace not in (None, 'trade_5m'):
+        raise ValueError('选股证据用途无效')
+    suffix = '' if namespace is None else '.' + namespace
+    stem = Path(directory) / "evidence" / f"{storage_symbol(code, market)}_{frequency}{suffix}"
     return Path(str(stem) + ".parquet"), Path(str(stem) + ".json.gz")
 
 
@@ -34,7 +49,7 @@ def _file_digest(path, size, mtime_ns, ctime_ns):
 def evidence_health(directory, code, frequency, manifest):
     verified = True
     try:
-        for path, name in zip(evidence_paths(directory, code, frequency, manifest.get("market", "a")), ("parquet", "snapshot")):
+        for path, name in zip(evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace")), ("parquet", "snapshot")):
             stat = path.stat()
             expected_size = manifest.get(name + "_bytes")
             if stat.st_size <= 0 or (expected_size is not None and stat.st_size != expected_size):
@@ -76,10 +91,65 @@ def evidence_version(directory):
     return hashlib.sha256(json.dumps(states).encode()).hexdigest()
 
 
+class _SnapshotDecodeCache:
+    """Bounded, process-local acceleration of already validated JSON bytes.
+
+    Only pickle streams produced here from parsed JSON are retained. No pickle
+    is accepted from files or callers, and no mutable decoded object is shared.
+    Content keys deliberately do not trust filenames, timestamps or manifests.
+    """
+
+    def __init__(self, *, max_bytes=32 * 1024 * 1024, max_entries=64):
+        self.max_bytes = max_bytes
+        self.max_entries = max_entries
+        self._entries = OrderedDict()
+        self._bytes = 0
+        self._lock = threading.Lock()
+
+    def decode(self, raw, parse):
+        key = hashlib.sha256(raw).digest()
+        with self._lock:
+            packed = self._entries.get(key)
+            if packed is not None:
+                self._entries.move_to_end(key)
+        if packed is not None:
+            return pickle.loads(packed)
+        snapshot = parse(raw)
+        try:
+            packed = pickle.dumps(snapshot, protocol=5)
+        except (pickle.PickleError, RecursionError, OverflowError, MemoryError):
+            # This optimization must not reject JSON accepted by the reader.
+            return snapshot
+        if len(packed) <= self.max_bytes and self.max_entries > 0:
+            with self._lock:
+                previous = self._entries.pop(key, None)
+                if previous is not None:
+                    self._bytes -= len(previous)
+                while self._entries and (self._bytes + len(packed) > self.max_bytes
+                                         or len(self._entries) >= self.max_entries):
+                    _, evicted = self._entries.popitem(last=False)
+                    self._bytes -= len(evicted)
+                self._entries[key] = packed
+                self._bytes += len(packed)
+        return snapshot
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
+            self._bytes = 0
+
+
+_SNAPSHOT_DECODE_CACHE = _SnapshotDecodeCache()
+
+
 def _decode_snapshot(raw):
+    return _SNAPSHOT_DECODE_CACHE.decode(raw, _parse_snapshot)
+
+
+def _parse_snapshot(raw):
     """Normalize damaged or unsupported saved structures to a readable error."""
     try:
-        snapshot = json.loads(gzip.decompress(raw))
+        snapshot = _snapshot_json(gzip.decompress(raw))
     except (OSError, EOFError, ValueError, zlib.error) as exc:
         raise ValueError("本次筛选的结构证据损坏，请重新进行小范围验证") from exc
     if (not isinstance(snapshot, dict) or not isinstance(snapshot.get("symbol"), str)
@@ -100,13 +170,34 @@ def _decode_snapshot(raw):
     return snapshot
 
 
-@lru_cache(maxsize=512)
-def _selection_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
-    # Keep only per-point selection lifetime, not the full historical geometry.
+def _snapshot_json(raw):
+    """Decode into ordinary Python values; retain legacy JSON compatibility.
+
+    Untyped decoding keeps dates/IDs as strings and arbitrary-size integers as
+    integers. Nonstandard legacy literals or encodings use the original parser.
+    Hash, structure, identity, clock and input checks remain in their callers.
+    """
+    if _fast_json_decode is not None:
+        try:
+            return _fast_json_decode(raw)
+        except _fast_decode_errors:
+            pass
+    return json.loads(raw)
+
+
+@lru_cache(maxsize=4)
+def _catalog_snapshot(path, size, mtime_ns, ctime_ns, expected_digest):
+    """Share read-only decoding between catalogs of the same immutable bytes."""
     raw = Path(path).read_bytes()
     if expected_digest and hashlib.sha256(raw).hexdigest() != expected_digest:
         raise ValueError("选股结构证据校验失败")
-    snapshot = _decode_snapshot(raw)
+    return _decode_snapshot(raw)
+
+
+@lru_cache(maxsize=512)
+def _selection_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
+    # Keep only per-point selection lifetime, not the full historical geometry.
+    snapshot = _catalog_snapshot(path,size,mtime_ns,ctime_ns,expected_digest)
     catalog = {
         point_id: record
         for level in snapshot["levels"]
@@ -119,7 +210,7 @@ def _selection_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
 
 def evidence_confirmation_catalog(directory, code, frequency, manifest):
     """Recheck saved candidates with current lifetime rules, without scanning."""
-    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace"))
     stat = path.stat()
     symbol, interval, catalog = _selection_catalog(
         str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, manifest.get("snapshot_sha256"),
@@ -144,7 +235,7 @@ def _semantic_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
 
 def evidence_semantic_catalog(directory, code, frequency, manifest):
     """Read saved point, center, and entry evidence; never recalculate bars."""
-    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace"))
     stat = path.stat()
     symbol, interval, points, centers, precision = _semantic_catalog(
         str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
@@ -157,16 +248,15 @@ def evidence_semantic_catalog(directory, code, frequency, manifest):
 
 @lru_cache(maxsize=64)
 def _nested_snapshot(path, size, mtime_ns, ctime_ns, expected_digest):
-    raw = Path(path).read_bytes()
-    if not expected_digest or hashlib.sha256(raw).hexdigest() != expected_digest:
+    if not expected_digest:
         raise ValueError("区间内结构确认证据校验失败")
-    snapshot = _decode_snapshot(raw)
+    snapshot = _catalog_snapshot(path,size,mtime_ns,ctime_ns,expected_digest)
     return {k: snapshot[k] for k in ("symbol", "source_frequency", "source_closed_at", "source_started_at",
                                     "analysis_scope", "native_member_policy", "center_view_selections",
                                    "price_basis_revision", "structure_price_quantum", "levels",
-                                   "screening_segments", "screening_units_by_level", "native_consolidation_alerts",
-                                   "screening_interval_signals", "segment_construction",
-                                    "unresolved_segment_ranges", "macd_zero_axis_operational_state") if k in snapshot}
+                                   "screening_segments", "screening_units_by_level", "native_consolidation_alerts", 'native_consolidation_error',
+                                   "screening_interval_signals", "screening_interval_divergences", "segment_construction",
+                                    "unresolved_segment_ranges", "macd_zero_axis_operational_state", "history_repair") if k in snapshot}
 
 
 @lru_cache(maxsize=128)
@@ -187,7 +277,7 @@ def _native_signal_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
 
 def evidence_native_signal_catalog(directory, code, frequency, manifest, *, source_closed_at):
     """Check frozen local signal clocks and source chains without recalculation."""
-    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace"))
     stat = path.stat()
     symbol, interval, cutoff, points, centers, valid = _native_signal_catalog(
         str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
@@ -214,7 +304,7 @@ def _consolidation_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
 
 
 def evidence_consolidation_catalog(directory, code, frequency, manifest, *, source_closed_at):
-    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace"))
     stat = path.stat()
     symbol, interval, cutoff, catalog, valid = _consolidation_catalog(
         str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, manifest.get("snapshot_sha256"))
@@ -225,7 +315,7 @@ def evidence_consolidation_catalog(directory, code, frequency, manifest, *, sour
 
 def evidence_consolidation_lifetimes(directory, code, frequency, manifest, *, source_closed_at):
     from .confirmation import consolidation_lifetime_reasons
-    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace"))
     stat = path.stat()
     snapshot = _nested_snapshot(str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
                                 manifest.get("snapshot_sha256"))
@@ -239,7 +329,7 @@ def evidence_consolidation_lifetimes(directory, code, frequency, manifest, *, so
 def evidence_operational_macd_risk(directory, code, frequency, manifest):
     """Read a verified frozen U176 fact, including its physical-period cutoff."""
 
-    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace"))
     stat = path.stat()
     snapshot = _nested_snapshot(
         str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
@@ -256,7 +346,7 @@ def evidence_nested_snapshots(directory, code, main_manifest, lower_manifest):
         health = evidence_health(directory, code, frequency, manifest)
         if not health["complete"] or not health["verified"]:
             raise ValueError("组合确认需要完整且经过校验的 5m 与 1m 证据")
-        _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
+        _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace"))
         stat = path.stat()
         snapshot = _nested_snapshot(str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
                                     manifest.get("snapshot_sha256"))
@@ -276,7 +366,7 @@ def _exit_catalog(path, size, mtime_ns, ctime_ns, expected_digest):
 
 def evidence_exit_catalog(directory, code, frequency, manifest):
     """Derive display references from verified saved structure, without a scan."""
-    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
+    _, path = evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace"))
     stat = path.stat()
     symbol, interval, plans = _exit_catalog(str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
                                             manifest.get("snapshot_sha256"))
@@ -289,7 +379,7 @@ def load_evidence(directory, code, frequency, manifest):
     health = evidence_health(directory, code, frequency, manifest)
     if not health["complete"]:
         raise ValueError("本次筛选证据缺失或校验失败，请重新进行小范围验证")
-    parquet, packed = evidence_paths(directory, code, frequency, manifest.get("market", "a"))
+    parquet, packed = evidence_paths(directory, code, frequency, manifest.get("market", "a"), manifest.get("namespace"))
     raw_frame, raw_snapshot = parquet.read_bytes(), packed.read_bytes()
     # Hash the actual bytes consumed by this request. The cached stat/hash is
     # only a polling optimization, not authority across concurrent file writes.

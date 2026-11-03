@@ -99,6 +99,22 @@ def test_first_read_without_anchor_has_no_provider_side_effect(tmp_path,monkeypa
     assert caught.value.coverage['reason']=='not_prepared'
 
 
+def test_reader_upgrade_reuses_only_verified_raw_anchor_from_the_previous_scope(tmp_path,monkeypatch):
+    inp=inputs(tmp_path)
+    with pytest.raises(periods.HistoryPending) as initial:
+        call(inp,anchor_frame=inp[2],fetch=False,page_source=Pages())
+    old=initial.value.coverage
+    monkeypatch.setattr(periods,'_history_scope',lambda *_:'b'*64)
+    monkeypatch.setattr(periods,'context_evidence',lambda *_:pytest.fail('original anchor must survive run pruning'))
+    with pytest.raises(periods.HistoryPending) as resumed:
+        call(inp,fetch=False,previous_coverage=old,page_source=Pages())
+    new_scope=resumed.value.coverage['scope']
+    assert new_scope=='b'*64 and new_scope!=old['scope']
+    anchor,result,snapshot,display=HistoryArchive(inp[1].parent/'notification_history',new_scope).read()
+    pd.testing.assert_frame_equal(anchor,inp[2])
+    assert snapshot is None and display is None and result.coverage['pages']==0
+
+
 def test_missing_anchor_fetch_uses_one_slice_then_yields_before_extension(tmp_path,monkeypatch):
     inp=inputs(tmp_path)
     calls=[]

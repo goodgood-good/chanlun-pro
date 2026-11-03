@@ -54,7 +54,7 @@ test('actual MACD study reads the matching close-labeled bar at its opening char
   const oldWindow = global.window;
   const close = Date.UTC(2026, 6, 30, 20);
   const stored = { bar_time_label: 'end', times: [close - 1800000, close],
-    macd_dif: [11, 22], macd_dea: [1, 2], macd_hist: [10, 20] };
+    higher_macd_dif: [11, 22], higher_macd_dea: [1, 2], higher_macd_hist: [10, 20] };
   const df = { _historyProvider: { bars_result: new Map([['us:aapl.us30', stored]]) } };
   global.window = { ChanlunTVRegistry: { widgets: new Map(), datafeeds: new Map([['chart1', df]]) } };
   try {
@@ -82,7 +82,7 @@ test('MACD scans an unavailable higher column once and picks up a newly installe
   try {
     const study = new (Idx.idx({}).constructor)();
     const context = {symbol:{ticker:'us:AAPL.US', interval:'30', time:close-1800000}};
-    for (let i=0; i<50; i++) assert.deepEqual(study.main(context, () => {}), [20,0,22,2]);
+    for (let i=0; i<50; i++) assert.deepEqual(study.main(context, () => {}), [NaN,0,NaN,NaN]);
     assert.equal(scanned, 2);
     stored.higher_macd_dif = [110,220];
     stored.higher_macd_dea = [10,20];

@@ -52,6 +52,133 @@ function dispatch(url,data=listing()){
 const text=element=>element.textContent+element.children.map(text).join(' ');
 const byTag=(element,tag)=>[...(element.tag===tag?[element]:[]),...element.children.flatMap(child=>byTag(child,tag))];
 
+const savedChart=(index=0)=>({index,name:'测试持仓',code:'SH.513100',frequency:index?'1m':'5m',point_type:'3buy',stage:'confirmed',
+  available:true,url:`/monitor/notifications/notice-1/charts/${index}?version=`+'b'.repeat(64),
+  view_url:`/monitor/notifications/notice-1/current-chart/${index}?version=`+'c'.repeat(64),current_url:'/?market=a&code=SH.513100&frequency=5m'});
+
+test('chart tab loads inline only when selected and preserves its iframe across tabs and detail refresh',async()=>{
+  let value=detail('notice-1',{charts:[savedChart()]});
+  const ui=fixture(async url=>url==='/monitor/notifications/notice-1'?response(value):dispatch(url));
+  await settle();await settle();
+  assert.equal(byTag(ui.get('notification-chart-host'),'iframe').length,0);
+  ui.get('notification-chart-tab').handlers.click();
+  const frame=byTag(ui.get('notification-chart-host'),'iframe')[0];
+  assert.match(frame.src,/\/current-chart\/0\?version=c{64}$/);
+  assert.equal(ui.get('notification-chart-controls').hidden,true,'a single notice shows only the chart');
+  assert.equal(ui.get('notification-detail-content').hidden,true);
+  assert.equal(ui.get('notification-chart-panel').hidden,false);
+  ui.get('notification-info-tab').handlers.click();
+  assert.equal(ui.get('notification-chart-panel').hidden,true);
+  ui.get('notification-chart-tab').handlers.click();
+  assert.equal(byTag(ui.get('notification-chart-host'),'iframe')[0],frame);
+  value={...value,error:'附图生成状态更新'};
+  ui.get('notifications-list').children[0].handlers.click();await settle();
+  assert.equal(byTag(ui.get('notification-chart-host'),'iframe')[0],frame);
+});
+
+test('chart tab chooses each batch member and changing receipt cannot retain another symbol chart',async()=>{
+  const ui=fixture(async url=>url==='/monitor/notifications/notice-1'
+    ?response(detail('notice-1',{charts:[savedChart(),savedChart(1)]}))
+    :url==='/monitor/notifications/other'?response(detail('other',{code:'SZ.000050',charts:[],images:[]}))
+    :dispatch(url,listing([row(),row('other')])));
+  await settle();await settle();ui.get('notification-chart-tab').handlers.click();
+  assert.equal(ui.get('notification-chart-selector-label').hidden,false);
+  ui.get('notification-chart-selector').value='1';ui.get('notification-chart-selector').handlers.change();
+  assert.match(byTag(ui.get('notification-chart-host'),'iframe')[0].src,/\/current-chart\/1\?/);
+  ui.get('notifications-list').children[1].handlers.click();await settle();
+  assert.equal(byTag(ui.get('notification-chart-host'),'iframe')[0].src,'/monitor/notifications/other/current-chart/0');
+  assert.match(byTag(ui.get('notification-chart-host'),'iframe')[0].title,/SZ.000050/);
+});
+
+for(const savedUrl of [null,'https://example.invalid/chart'])test('chart tab opens an interactive current chart when saved data is missing or unsafe: '+savedUrl,async()=>{
+  const ui=fixture(async url=>url==='/monitor/notifications/notice-1'
+    ?response(detail('notice-1',{charts:[{...savedChart(),view_url:savedUrl}]})):dispatch(url));
+  await settle();await settle();ui.get('notification-chart-tab').handlers.click();
+  const host=ui.get('notification-chart-host'),frame=byTag(host,'iframe')[0];
+  assert.equal(frame.src,'/monitor/notifications/notice-1/current-chart/0');
+  assert.equal(byTag(host,'img').length,0);
+  assert.equal(byTag(ui.get('notification-detail-content'),'img').length,1,'saved images remain in notification details');
+  assert.equal(ui.get('notification-chart-controls').hidden,true);
+});
+
+test('legacy detail responses locate each batch member by market, symbol and interval without displaying a PNG',async()=>{
+  const signals=[{market:'us',code:'QQQ.US',frequency:'30m'}, {market:'a',code:'SZ.301004',frequency:'5m'}];
+  const ui=fixture(async url=>url==='/monitor/notifications/notice-1'?response(detail('notice-1',{signals})):dispatch(url));
+  await settle();await settle();ui.get('notification-chart-tab').handlers.click();
+  assert.equal(byTag(ui.get('notification-chart-host'),'iframe')[0].src,'/monitor/notifications/notice-1/current-chart/0');
+  assert.match(byTag(ui.get('notification-chart-host'),'iframe')[0].title,/QQQ.US.*30m/);
+  ui.get('notification-chart-selector').value='1';ui.get('notification-chart-selector').handlers.change();
+  assert.equal(byTag(ui.get('notification-chart-host'),'iframe')[0].src,'/monitor/notifications/notice-1/current-chart/1');
+  assert.match(byTag(ui.get('notification-chart-host'),'iframe')[0].title,/SZ.301004.*5m/);
+  assert.equal(byTag(ui.get('notification-chart-host'),'img').length,0);
+});
+
+test('point filtering resets notification paging and opens the matching batch member',async()=>{
+  const value=detail('notice-1',{charts:[{...savedChart(),point_type:'1sell'},
+    {...savedChart(1),code:'SZ.301004',point_type:'3buy'}]});
+  const ui=fixture(async url=>url==='/monitor/notifications/notice-1'?response(value):
+    dispatch(url,listing([row('notice-1',{code:url.includes('point_type=3buy')?'SZ.301004':'SH.513100'})])));
+  await settle();await settle();ui.get('notification-chart-tab').handlers.click();
+  ui.get('notifications-point-type').value='3buy';ui.get('notifications-point-type').handlers.change();
+  await settle();await settle();
+  const query=new URL(ui.requests.findLast(r=>r.url.startsWith('/monitor/notifications?')).url,'http://local').searchParams;
+  assert.equal(query.get('point_type'),'3buy');assert.equal(query.get('page'),'1');assert.equal(query.has('cursor'),false);
+  assert.match(byTag(ui.get('notification-chart-host'),'iframe')[0].src,/\/current-chart\/1\?version=c{64}$/);
+  assert.equal(byTag(ui.get('notification-chart-host'),'img').length,0);
+});
+
+test('a chartless summary does not substitute an attachment for an interactive chart',async()=>{
+  const ui=fixture(async url=>url==='/monitor/notifications/notice-1'?response(detail('notice-1',{code:null,charts:[],signals:[]})):dispatch(url));
+  await settle();await settle();ui.get('notification-chart-tab').handlers.click();
+  assert.equal(byTag(ui.get('notification-chart-host'),'iframe').length,0);
+  assert.equal(byTag(ui.get('notification-chart-host'),'img').length,0);
+  assert.match(text(ui.get('notification-chart-host')),/没有可定位的标的/);
+});
+
+test('delivery history distinguishes a sent batch from its rejected members',async()=>{
+  const history=[{id:'partial',kind:'signals',status:'sent',created:1000,error:'',
+    reason_code:'PARTIAL_RECHECK_REJECTIONS',rejection_count:2,
+    decision_message:'部分信号已排除，其他信号继续按复核结果处理'}];
+  const ui=fixture(async url=>url.startsWith('/monitor/status')
+    ?response({...statusPayload,dingtalk:{...statusPayload.dingtalk,history}}):dispatch(url));
+  await settle();await settle();
+  const rendered=text(ui.get('dingtalk-history'));
+  assert.match(rendered,/已发送/);
+  assert.match(rendered,/部分信号已排除.*2条/);
+  assert.doesNotMatch(rendered,/发送失败/);
+});
+
+test('analytics separates full linked computation from legacy primary-only costs',async()=>{
+  const common={market:'a',frequency:'5m',samples:1,fetch_ms:1000,structure_ms:1000,
+    validation_ms:500,persistence_ms:500,proofs_reused:1};
+  const analytics={events:0,groups:[],timings:[
+    {...common,total_ms:12000,coordination_ms:9000,measurement_scope:'screening-period-task-v1'},
+    {...common,total_ms:3000,measurement_scope:'primary-period-v1'}],
+    delivery:{days:7,groups:[{market:'a',frequency:'5m',kind:'signals',samples:1,
+      measures:{coordination:{average_seconds:9,p95_seconds:9},result_wait:{average_seconds:1,p95_seconds:1}}}]}};
+  const ui=fixture(async url=>url==='/monitor/analytics'?response(analytics):dispatch(url));
+  await settle();await settle();
+  ui.get('analytics-refresh').handlers.click();await settle();
+  const rendered=text(ui.get('analytics-timings'));
+  assert.match(rendered,/周期计算（含联动）平均 12\.00 秒/);
+  assert.match(rendered,/旧口径：主周期平均 3\.00 秒/);
+  assert.match(rendered,/联动及其他处理 9\.00/);
+  assert.match(rendered,/周期联动与任务处理/);
+});
+
+test('analytics distinguishes preview samples and does not render unavailable conversion as zero',async()=>{
+  const base={market:'a',frequency:'5m',point_type:'1buy',samples:3,window_exits:0,window_stop_hits:0};
+  const analytics={events:4,groups:[{...base,signal_type:'buy_sell_point',warnings:0},
+    {...base,signal_type:'native_point_preview',warnings:2,warning_invalidated:1,warning_confirmed:null}],timings:[]};
+  const ui=fixture(async url=>url==='/monitor/analytics'?response(analytics):dispatch(url));
+  await settle();await settle();ui.get('analytics-refresh').handlers.click();await settle();
+  const groups=ui.get('analytics-groups').children;
+  assert.match(text(groups[0]),/一买 · 正式买卖点/);
+  assert.match(text(groups[1]),/一买 · 未确认预警/);
+  assert.match(text(groups[1]),/转确认未关联统计 \/ 1 失效 \/ 2 次预警/);
+  assert.doesNotMatch(text(groups[1]),/0 确认|null 确认/);
+});
+
 test('notifications open on a rolling 24-hour range and render the actual composite chart once',async()=>{
   const ui=fixture(async url=>dispatch(url));await settle();await settle();
   const query=new URL(ui.requests.find(r=>r.url.startsWith('/monitor/notifications?')).url,'http://local');

@@ -1,10 +1,13 @@
 [CmdletBinding()]
 param(
     [string]$ProjectRoot,
-    [ValidateRange(1,65535)][int]$WebPort = 9900
+    [ValidateRange(1,65535)][int]$WebPort = 9900,
+    [ValidatePattern('^([01]\d|2[0-3]):[0-5]\d$')][string]$PremarketStart = '08:20',
+    [switch]$QmtOnly
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'no_console.ps1')
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
@@ -27,19 +30,28 @@ try {
 }
 $taskName = 'ChanlunProQmtStartup-{0}' -f $token
 $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action Ensure -StartupTimeoutSeconds 120 -WarmupSeconds 0' -f $qmtScript
-$action = New-ScheduledTaskAction -Execute "$PSHOME\powershell.exe" -Argument $arguments -WorkingDirectory $ProjectRoot
+$action = New-NoConsoleTaskAction -ProjectRoot $ProjectRoot -Label $taskName `
+    -FilePath "$PSHOME\powershell.exe" -Argument $arguments -WorkingDirectory $ProjectRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
 $trigger.Delay = 'PT10S'
+$premarket = New-ScheduledTaskTrigger -Weekly -WeeksInterval 1 `
+    -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At ([datetime]::Today.Add([TimeSpan]::Parse($PremarketStart)))
+# The logon task can succeed and the client can exit days later. Reconcile
+# independently of the Web process; IgnoreNew and the runtime mutex bound it.
+$recovery = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1)
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal `
-    -Settings $settings -Description 'Start the configured chanlun-pro market-data client after Windows sign-in.' -Force | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger,$premarket,$recovery) -Principal $principal `
+    -Settings $settings -Description 'Ensure the configured QMT client and market-data catalog after sign-in, before trading and every minute.' -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName
 
 # Reuse the existing single-instance Web supervisor and its recovery policy.
-& $webInstaller -ProjectRoot $ProjectRoot -WebPort $WebPort
-if (-not $?) { throw 'Web startup registration did not complete' }
-Write-Output ('APP-AUTOSTART-INSTALLED user={0} qmt_task={1} web_port={2} trigger=sign-in' -f $identity,$taskName,$WebPort)
+if (-not $QmtOnly) {
+    & $webInstaller -ProjectRoot $ProjectRoot -WebPort $WebPort -PremarketStart $PremarketStart
+    if (-not $?) { throw 'Web startup registration did not complete' }
+}
+Write-Output ('APP-AUTOSTART-INSTALLED user={0} qmt_task={1} web_port={2} premarket={3} recovery=1m' -f $identity,$taskName,$WebPort,$PremarketStart)

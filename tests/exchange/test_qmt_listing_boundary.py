@@ -23,11 +23,11 @@ def listing_feed(monkeypatch):
             raise RuntimeError("metadata offline")
         return {"ExchangeID": "BJ", "InstrumentID": "920025", "OpenDate": state.open_date}
 
-    def market_data(**_):
+    def market_data(**kwargs):
         values = {"time": [at * 1000 for at in dates], "open": [4.26] * 3 + [30.] * len(closes),
                   "high": [4.26] * 3 + [31.] * len(closes), "low": [4.26] * 3 + [29.] * len(closes),
                   "close": [4.26] * 3 + [30.5] * len(closes), "volume": [state.pre_volume] * 3 + [100.] * len(closes)}
-        return {key: pd.DataFrame([value]) for key, value in values.items()}
+        return {key: pd.DataFrame([value], index=kwargs['stock_list']) for key, value in values.items()}
 
     monkeypatch.setattr(exchange_qmt, "xtdata", SimpleNamespace(
         enable_hello=False, get_market_data=market_data, get_divid_factors=lambda *_: pd.DataFrame(),

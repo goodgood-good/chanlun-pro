@@ -137,6 +137,30 @@ def test_disk_write_failure_discards_uncommitted_in_memory_events(
     assert service._load()["events"] == []
 
 
+@pytest.mark.parametrize('failure', ['non_finite', 'unsupported_type', 'compression'])
+def test_state_encoding_failure_discards_memory_only_events_and_recovers(scenario, monkeypatch, failure):
+    service, jobs, box, transport, clock, restart = scenario
+    primary = (service.root / 'state.json').read_bytes()
+    backup = (service.root / 'state.backup.json').read_bytes()
+    event = {'id': 'memory-only', 'recorded_at': float('nan') if failure == 'non_finite' else 310}
+    if failure == 'unsupported_type':
+        event['payload'] = object()
+    service._load()['events'] = [event]
+    with monkeypatch.context() as patch:
+        if failure == 'compression':
+            patch.setattr('chanlun.persistence.state_snapshot.compact_state',
+                          lambda value: (_ for _ in ()).throw(RuntimeError('compression failed')))
+        with pytest.raises({'non_finite': ValueError, 'unsupported_type': TypeError, 'compression': RuntimeError}[failure]):
+            service._save()
+    assert service._load()['events'] == []
+    assert (service.root / 'state.json').read_bytes() == primary
+    assert (service.root / 'state.backup.json').read_bytes() == backup
+    assert box.snapshot()['pending'] == 0 and not transport.messages
+    service._consume_monitor()
+    box.deliver_one()
+    assert len(transport.messages) == 1
+
+
 def install_risk(scenario):
     service, jobs, *_ = scenario
     state = service._load()

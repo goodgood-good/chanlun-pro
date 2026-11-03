@@ -1857,7 +1857,7 @@ class ChartManager {
     }
 
     shouldSuppressDrawingSave() {
-        return this._is_switching_interval
+        return this.readOnlySnapshot === true || this._is_switching_interval
             || this._activeDrawingMutations.size > 0
             || this.isApplyingDrawingState
             || this._automaticShapeCreateCount > 0
@@ -2597,7 +2597,7 @@ class ChartManager {
             _historyParams.screening_source = screeningEvidence.source;
             _historyParams.screening_point = screeningEvidence.point;
         }
-        this.udf_datafeed = new Datafeeds.UDFCompatibleDatafeed("/tv", _sseOn ? 30000 : 3000, undefined, {
+        this.udf_datafeed = new Datafeeds.UDFCompatibleDatafeed(this.datafeedUrl || "/tv", _sseOn ? 30000 : 3000, undefined, {
             managerId: this.instanceId,
             historyParams: _historyParams,
         });
@@ -3093,10 +3093,19 @@ class ChartManager {
                 });
             }
         };
+        if (this.readOnlySnapshot === true) {
+            Object.assign(save_load_adapter, {
+                getAllCharts:async()=>[],getAllStudyTemplates:async()=>[],
+                getChartContent:async()=>null,getStudyTemplateContent:async()=>null,
+                saveChart:async()=>null,removeChart:async()=>false,
+                saveStudyTemplate:async()=>null,removeStudyTemplate:async()=>false,
+                saveLineToolsAndGroups:async()=>{},loadLineToolsAndGroups:async()=>null,
+            });
+        }
         this.save_load_adapter = save_load_adapter;
         // 后台只预取“哪些上下文有人工画线”的小清单。清单就绪后，绝大多数
         // 无人工画线的候选可直接命中空状态，不再为每次切标的排一个数据库请求。
-        this._drawingManifestPromise = preloadDrawingManifest();
+        this._drawingManifestPromise = this.readOnlySnapshot === true ? Promise.resolve(null) : preloadDrawingManifest();
 
         const initialChartInterval = getInitialChartInterval(this.id);
         const viewportOptions = chartWidgetViewportOptions(initialChartInterval);
@@ -3121,7 +3130,7 @@ class ChartManager {
             // 嵌入式多周期图从第一次请求就使用业务所需跨度，避免先加载窄视窗、
             // 再 setVisibleRange 拉取第二批历史并把自动结构重画一遍。
             datafeed: this.udf_datafeed,
-            library_path: "static/charting_library/",
+            library_path: this.readOnlySnapshot === true ? "/static/charting_library/" : "static/charting_library/",
             // The widget contract accepts only lowercase "light" / "dark".
             // Older account state stores "Light"; normalize it before schema
             // validation instead of relying on TradingView's fallback.
@@ -3133,13 +3142,14 @@ class ChartManager {
             numeric_formatting: { decimal_sign: "." },
             time_frames: [], timezone: getMarketTimezone(Utils.get_market()), locale: "zh",
             symbol_search_request_delay: 100, auto_save_delay: 5, study_count_limit: 100,
-            disabled_features: screeningEvidence
-                ? [...CHART_DISABLED_FEATURES, 'header_symbol_search', 'header_compare', 'header_resolutions']
-                : CHART_DISABLED_FEATURES,
+            disabled_features: [...CHART_DISABLED_FEATURES,
+                ...(screeningEvidence ? ['header_symbol_search', 'header_compare', 'header_resolutions'] : []),
+                ...(this.readOnlySnapshot === true ? ['header_saveload', 'use_localstorage_for_settings', 'left_toolbar',
+                    'header_symbol_search', 'header_compare'] : [])],
             enabled_features: viewportOptions.enabledFeatures,
             save_load_adapter: save_load_adapter,
             client_id: client_id,
-            user_id: "session", load_last_chart: shouldLoadLastChart(),
+            user_id: "session", load_last_chart: this.readOnlySnapshot === true ? false : shouldLoadLastChart(),
             custom_indicators_getter: this.getCustomIndicators,
             // TradingView 会在画布放不下时忽略 setVisibleRange 的 from。
             // 1m 中枢观察页采用 0.01 最小间距，使当前完整缓存
@@ -3257,6 +3267,7 @@ class ChartManager {
         const self = this;
 
         this.widget.headerReady().then(function () {
+            if (self.readOnlySnapshot === true) return;
             var btnDisplay = global_widget.createButton();
             btnDisplay.textContent = "缠论显示设置 ▾";
             btnDisplay.setAttribute('role', 'button');
@@ -3608,7 +3619,7 @@ class ChartManager {
 
             // 注入 MACD 区间统计（工具栏按钮 + 右键菜单 + 侧边面板），依赖 chart/widget 已就绪
             try {
-                if (!lowestCenterReviewPage() && window.MacdStats && typeof window.MacdStats.attach === 'function') {
+                if (window.MacdStats && typeof window.MacdStats.attach === 'function') {
                     window.MacdStats.attach(this);
                 }
             } catch (e) {
@@ -3873,6 +3884,7 @@ class ChartManager {
     // 在当前图表的窄工具栏内注入按钮，短图表也使用同一布局。
     // 而非哈希类名,较抗 TV 升级;找不到工具栏返回 false → 调用方回退浮层 renderDrawPaletteOverlay。
     injectDrawPaletteIntoTVToolbar() {
+        if (this.readOnlySnapshot === true) return true;
         try {
             if (this._drawingPickerFocusGuard && !this._drawingPickerFocusGuard.select.isConnected) {
                 this._releaseDrawingPickerFocus();
@@ -3940,6 +3952,7 @@ class ChartManager {
 
     // 画图调色板统一入口:优先原生注入 TV 工具栏;失败回退左侧浮层。
     updateDrawPalette() {
+        if (this.readOnlySnapshot === true) return;
         if (!this.injectDrawPaletteIntoTVToolbar()) this.renderDrawPaletteOverlay();
     }
 
@@ -6914,6 +6927,8 @@ class ChartManager {
         this._releaseDrawingPickerFocus();
         if (this._disposed) return;
         this._disposed = true;
+        this._macdStats?.dispose?.();
+        this._macdStats = null;
         this._cancelInitialHistoryRetry();
         this._cancelChartStableReady();
         this._cancelDefaultViewWork();

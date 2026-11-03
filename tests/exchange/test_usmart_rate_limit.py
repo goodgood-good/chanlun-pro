@@ -288,7 +288,8 @@ def _paced_requests(root, priority, count, barrier, results):
             metrics.append(request(gate, priority=priority))  # Default ten-second budget.
         results.put({"priority": priority, "metrics": metrics})
     except USmartAPIError as exc:
-        results.put({"error": type(exc).__name__, "metrics": metrics})
+        results.put({"error": type(exc).__name__, "metrics": metrics,
+                     "cause":type(exc.__cause__).__name__ if exc.__cause__ else None})
 
 
 def _run_paced_contenders(root, specifications):

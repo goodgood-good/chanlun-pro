@@ -55,9 +55,12 @@ def _reader_revision():
     root = Path(exchange_usmart.__file__).parent
     digest = hashlib.sha256(Path(__file__).read_bytes())
     for name in ("exchange_usmart.py", "price_basis.py", "kline_precision.py",
-                 "usmart_session_aggregation.py", "usmart_canonical_history.py"):
+                 "usmart_session_aggregation.py", "usmart_canonical_history.py", "exchange_cq.py", "longbridge_quote.py"):
         if (root / name).is_file():
             digest.update((root / name).read_bytes())
+    page_reader = Path(__file__).with_name('notification_longbridge_history.py')
+    if page_reader.is_file():
+        digest.update(page_reader.read_bytes())
     return digest.hexdigest()
 
 
@@ -292,7 +295,7 @@ def _canonical_history(event, frequency, primary_attrs, *, anchor, cutoff,
 def prepare_notification_history(event, frequency, primary_attrs, *, anchor_frame,
                                  aligned_cutoff, page_source=None, previous=None,
                                  max_pages=4, timeout_seconds=20., monotonic=time.monotonic,
-                                 fetch=True):
+                                 fetch=True, allow_source_revisions=False):
     """Return raw independent context plus honest coverage and resume state.
 
     ``aligned_cutoff`` must come from the verified period calendar and may not
@@ -319,25 +322,35 @@ def prepare_notification_history(event, frequency, primary_attrs, *, anchor_fram
     days = TARGET_DAYS[frequency]
     target = None if days is None else cutoff - pd.Timedelta(days=days)
     from chanlun import config
-    supported = (event["market"] == "us" and primary_attrs.get("price_basis_provider") == "usmart"
-                 and str(config.US_HISTORY_KLINE_SOURCE).lower() == "usmart"
+    native_supported = (event["market"] == "us" and primary_attrs.get("price_basis_provider") == "usmart"
+                 and str(config.US_HISTORY_KLINE_SOURCE).lower() in {"usmart","dual"}
                  and str(config.EXCHANGE_US).lower() == "usmart")
+    longbridge_supported = (event['market']=='us' and primary_attrs.get('price_basis_provider')=='longbridge'
+                           and str(config.US_HISTORY_KLINE_SOURCE).lower() in {'longbridge','dual'}
+                           and str(config.EXCHANGE_US).lower() in {'usmart','cq','longbridge'})
+    supported = native_supported or longbridge_supported
     # Frozen evidence already spanning a finite target needs no new requests.
     reusable = target is not None and anchor.date.min() <= target
-    if page_source is None and supported and not reusable:
+    if page_source is None and native_supported and not reusable:
         return _canonical_history(event, frequency, primary_attrs, anchor=anchor, cutoff=cutoff,
             target=target, previous=previous, max_pages=max_pages, timeout_seconds=timeout_seconds, fetch=fetch)
     source = page_source
-    if source is None and supported and not reusable:
+    if source is None and longbridge_supported and not reusable:
+        from .notification_longbridge_history import default_page_source
+        source = default_page_source()
+    if source is None and native_supported and not reusable:
         source = _default_page_source()
     identity = _digest({"event_id": event.get("id"), "market": event["market"],
         "code": event["code"], "frequency": frequency, "cutoff": aligned_cutoff,
         "event_cutoff": event["source_closed_at"], "anchor": _frame_digest(anchor),
+        'source_view':'independent_revised' if allow_source_revisions else 'frozen_compatible',
         "source": getattr(source, "identity", None), "schema": SCHEMA, "reader_revision": _reader_revision()})
     frame = anchor.iloc[:0].copy()
     cursor = cutoff
     pages, checked, proofs = 0, 0, []
     reason, error_code, origin, usable, next_retry = "page_budget", None, False, True, 2
+    provider_exhausted = False
+    revision_rows = 0
     started = monotonic()
 
     def result():
@@ -347,17 +360,26 @@ def prepare_notification_history(event, frequency, primary_attrs, *, anchor_fram
         state = {"schema": SCHEMA, "identity": identity, "cursor": cursor.tz_convert("UTC").isoformat(),
                  "pages": pages, "overlap_rows": checked, "proofs": proofs,
                  "frame_hash": _frame_digest(frame), "reason": reason, "source_origin": origin,
+                 'provider_exhausted':provider_exhausted,
+                 'revision_rows':revision_rows,
                  "usable": usable, "error_code": error_code, "next_retry":next_retry}
         state["checksum"] = _digest(state)
         coverage = {"purpose": "independent_background", "consumer_validation_required": True,
-            "price_basis_overlap_verified": checked > 0, "anchor_rows": len(anchor),
+            "price_basis_overlap_verified": checked > 0 and not revision_rows, "anchor_rows": len(anchor),
             "anchor_overlap_rows": checked, "anchor_complete": checked == len(anchor),
             "target_days": days, "requested_from": None if target is None else int(target.timestamp()),
             "requested_to": int(cutoff.timestamp()), "available_from": oldest, "available_to": newest,
             "rows": len(frame), "target_reached": reached, "source_origin": origin,
+            'provider_exhausted':provider_exhausted,
+            'source_revision_rows':revision_rows,
+            'source_view':'current_source_history' if revision_rows else 'frozen_compatible_history',
+            'independent_source_verified':bool(allow_source_revisions and usable and checked>0),
+            'original_frozen_preserved':True,
+            **({'source_label':'长桥当前可用历史'} if longbridge_supported else {}),
             "reason": reason, "error_code": error_code, "pages": pages, "next_retry":next_retry,
             "can_resume": reason in {"page_budget", "deadline", "source_error"},
-            "compatible_with_anchor": usable and checked > 0, "elapsed_seconds": max(0., monotonic() - started)}
+            "compatible_with_anchor": usable and checked > 0 and not revision_rows,
+            "elapsed_seconds": max(0., monotonic() - started)}
         return HistoryResult(frame.copy(deep=True), coverage, state)
 
     if reusable or not supported:
@@ -374,6 +396,8 @@ def prepare_notification_history(event, frequency, primary_attrs, *, anchor_fram
         cursor, pages = pd.Timestamp(state["cursor"]), state["pages"]
         checked, proofs = state["overlap_rows"], list(state["proofs"])
         reason, origin, usable = state["reason"], state["source_origin"], state["usable"]
+        provider_exhausted = state.get('provider_exhausted',False)
+        revision_rows = state.get('revision_rows',0)
         if reason not in {"page_budget", "deadline", "source_error"}:
             error_code = state["error_code"]
             next_retry = state.get('next_retry',2)
@@ -392,29 +416,56 @@ def prepare_notification_history(event, frequency, primary_attrs, *, anchor_fram
         try:
             data = source(code=event["code"], frequency=frequency, cursor=cursor,
                           right=right, remaining=remaining)
-            page = _decode_page(data, code=event["code"], frequency=frequency,
-                                cursor=cursor, right=right)
+            decoder = _decode_page
+            if longbridge_supported:
+                from .notification_longbridge_history import decode_page
+                decoder = decode_page
+            page = decoder(data, code=event["code"], frequency=frequency, cursor=cursor, right=right)
             proof = {"before": cursor.tz_convert("UTC").isoformat(), "response_hash": _digest(data),
                      "rows": 0 if page is None else len(page)}
             pages += 1
             if page is None:
                 proofs.append(proof)
-                origin, reason = True, "source_origin"
+                if longbridge_supported and data.get('source_boundary')=='opening_overlap_only':
+                    cursor = pd.Timestamp(data['next_cursor'])
+                    continue
+                if longbridge_supported:
+                    provider_exhausted, reason = True, 'provider_exhausted'
+                else:
+                    origin, reason = True, "source_origin"
                 if checked != len(anchor):
                     usable, error_code = False, "origin_before_anchor_covered"
                 break
             _frame_contract(page, event["code"], frequency, cursor)
             _basis(page, primary_attrs)
-            candidate = page if frame.empty else pd.concat([page, frame], ignore_index=True)
+            if longbridge_supported and not frame.empty:
+                if not page.date.isin(frame.date).any():
+                    raise HistoryContractError('paging_overlap_missing')
+                try:
+                    _overlap(page,frame)
+                except HistoryContractError as exc:
+                    raise HistoryContractError('paging_values_changed') from exc
+                candidate = pd.concat([page,frame],ignore_index=True).drop_duplicates('date',keep='last').reset_index(drop=True)
+            else:
+                candidate = page if frame.empty else pd.concat([page, frame], ignore_index=True)
             candidate.attrs = dict(page.attrs)
             _frame_contract(candidate, event["code"], frequency, cutoff)
-            overlap = _overlap(candidate, anchor)
+            try:
+                overlap = _overlap(candidate, anchor)
+            except HistoryContractError as exc:
+                if not (longbridge_supported and allow_source_revisions and exc.code=='anchor_values_changed'):
+                    raise
+                expected=anchor.loc[(anchor.date>=candidate.date.min()) & (anchor.date<=candidate.date.max())].set_index('date')[VALUES].astype(float)
+                actual=candidate.set_index('date').reindex(expected.index)[VALUES].astype(float)
+                revision_rows=int((~((expected==actual) | (expected.isna() & actual.isna())).all(axis=1)).sum())
+                overlap=len(expected)
             if not overlap:
                 raise HistoryContractError("page_without_anchor_overlap")
             if candidate.date.max() != cutoff:
                 raise HistoryContractError("page_missing_cutoff")
+            unchanged = len(candidate)==len(frame)
             frame, checked = candidate, overlap
-            cursor = frame.date.min() - pd.Timedelta(milliseconds=1)
+            cursor = frame.date.min() if longbridge_supported and not unchanged else frame.date.min()-pd.Timedelta(milliseconds=1)
             proofs.append(proof)
             if target is not None and frame.date.min() <= target:
                 reason = "target_reached"

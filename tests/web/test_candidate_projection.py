@@ -47,7 +47,8 @@ def test_detail_builds_only_the_requested_candidate_and_keeps_duplicate_preceden
     source, payload, expected, encoded = projected
     original = deepcopy(payload)
     result = workbench.candidate_detail(source, expected['id'])
-    assert result['candidate'] == {**expected, 'detail_loaded': True}
+    assert result['candidate'] == {**{k:v for k,v in expected.items() if k != '_context_evidence'}, 'detail_loaded': True}
+    assert '_context_evidence' not in result['candidate']
     assert encoded == ['SZ.000001']
     assert payload == original
 

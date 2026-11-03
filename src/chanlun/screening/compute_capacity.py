@@ -19,12 +19,22 @@ MAX_DEMAND_TTL_SECONDS = 60.0
 _DEMAND_OWNER = f'{os.getpid()}:{uuid4().hex}'
 
 
-def role_limits(limit, demand=0, screening_active=False, *, overdue_pressure=False):
-    """Pure, work-conserving allocation; actual slots are shared OS locks."""
+class MaintenanceDeferred(RuntimeError):
+    """Optional next-window work yields to a newly active full scan."""
+
+
+def role_limits(limit, demand=0, screening_active=False, *, overdue_pressure=False, holding_demand=0):
+    """Bounded role allocation; actual slots are shared OS locks."""
     if (type(limit) is not int or not 0 <= limit <= MAX_WORKERS
-            or type(demand) is not int or demand < 0 or type(overdue_pressure) is not bool):
+            or type(demand) is not int or demand < 0 or type(overdue_pressure) is not bool
+            or type(holding_demand) is not int or not 0 <= holding_demand <= demand):
         raise ValueError('invalid role capacity')
-    share = max(0, limit - 1) if overdue_pressure else (3 * limit + 3) // 4
+    # Ordinary monitoring reserves a quarter; holdings may use up to half.
+    # Measured overdue work may borrow three quarters, preserving at least one
+    # screening slot. Idle reservations expire and normal sharing resumes.
+    share = max((limit + 3) // 4, min(holding_demand, (limit + 1) // 2))
+    if overdue_pressure:
+        share = max(share, (3 * limit + 3) // 4)
     reserved = min(demand, share, max(0, limit - 1))
     return {'monitor_capacity': reserved if reserved and screening_active else limit,
             'screening_capacity': limit - reserved,
@@ -43,6 +53,8 @@ def _demand_leases(root):
                 if isinstance(owner, str) and 0 < len(owner) <= 128 and isinstance(lease, dict)
                 and type(lease.get('demand')) is int and 0 < lease['demand'] <= MAX_WORKERS
                 and type(lease.get('overdue_pressure', False)) is bool
+                and type(lease.get('holding_demand', 0)) is int
+                and 0 <= lease.get('holding_demand', 0) <= lease['demand']
                 and all(type(lease.get(key)) in (int, float) and math.isfinite(lease[key])
                         for key in ('updated_at', 'expires_at'))
                 and 0 <= now - lease['updated_at']
@@ -58,7 +70,7 @@ def _with_roles(state, root, maximum, now):
     # Each owner bounds its own demand. A low-demand boosted owner cannot
     # boost an unrelated owner's larger ordinary demand by combining fields.
     candidates = [role_limits(state['limit'], item['demand'], state.get('background_until', 0) > now,
-                             overdue_pressure=item.get('overdue_pressure', False))
+                             overdue_pressure=item.get('overdue_pressure', False), holding_demand=item.get('holding_demand', 0))
                   for item in leases.values()]
     roles = max(candidates, key=lambda item: item['monitor_reserved']) if candidates else role_limits(state['limit'])
     return {**state, **roles,
@@ -67,7 +79,7 @@ def _with_roles(state, root, maximum, now):
             'maximum': maximum}
 
 
-def publish_monitor_demand(budget, *, demand, expires_in=12.0, owner=None, overdue_pressure=False):
+def publish_monitor_demand(budget, *, demand, expires_in=12.0, owner=None, overdue_pressure=False, holding_demand=0):
     """Renew one scheduler's short lease; zero releases only that owner.
 
     A failed/exited scheduler automatically loses its reservation after expiry.
@@ -76,7 +88,8 @@ def publish_monitor_demand(budget, *, demand, expires_in=12.0, owner=None, overd
     root = _budget_root(budget)
     if (type(demand) is not int or demand < 0
             or type(expires_in) not in (int, float) or not math.isfinite(expires_in)
-            or not 0 < expires_in <= MAX_DEMAND_TTL_SECONDS or type(overdue_pressure) is not bool):
+            or not 0 < expires_in <= MAX_DEMAND_TTL_SECONDS or type(overdue_pressure) is not bool
+            or type(holding_demand) is not int or not 0 <= holding_demand <= demand):
         raise ValueError('invalid monitor demand lease')
     owner = _DEMAND_OWNER if owner is None else owner
     if not isinstance(owner, str) or not 0 < len(owner) <= 128:
@@ -89,7 +102,8 @@ def publish_monitor_demand(budget, *, demand, expires_in=12.0, owner=None, overd
                 raise ValueError('too many active monitor demand owners')
             now = time.time()
             leases[owner] = {'demand': min(demand, budget['limit']), 'updated_at': now,
-                             'expires_at': now + expires_in, 'overdue_pressure': overdue_pressure}
+                             'expires_at': now + expires_in, 'overdue_pressure': overdue_pressure,
+                             'holding_demand': min(holding_demand, demand, budget['limit'])}
         temporary = root / f'.monitor-demand.{os.getpid()}.{uuid4().hex}.tmp'
         try:
             temporary.write_text(json.dumps({'schema': 'monitor-compute-demand-v1', 'leases': leases}), encoding='utf-8')
@@ -121,15 +135,20 @@ def pressure_limit(previous, memory, maximum, now):
     if available < GIB//2:
         return 0
     if not previous:
-        return max(0,min(maximum,int((available-reserve)//(GIB//2))))
+        return max(1 if maximum and available>=reserve else 0,
+                   min(maximum,int((available-reserve)//(GIB//2))))
     limit=min(maximum,previous['limit'])
+    # A soft memory downgrade used to strand a zero budget forever between
+    # reserve and reserve+512 MiB. Restart one worker above reserve, then let
+    # it finish while >=1 GiB remains. The separate 512 MiB hard stop stays.
+    minimum = 1 if maximum and available >= (GIB if limit else reserve) else 0
     if now-previous.get('changed_at',0)<2:
-        return limit
+        return max(minimum,limit)
     if available<reserve:
-        return max(0,limit-max(1,math.ceil((reserve-available)/(GIB//2))))
+        return max(minimum,limit-max(1,math.ceil((reserve-available)/(GIB//2))))
     if available>=reserve+GIB//2:
         return min(maximum,limit+1)
-    return limit
+    return max(minimum,limit)
 
 
 def _resource_read(root, maximum):
@@ -148,6 +167,11 @@ def update_resource_budget(budget, *, monitor=False):
     root=_budget_root(budget)
     maximum=min(budget['limit'],cpu_capacity())
     memory=memory_status();now=time.time()
+    previous=_resource_read(root,maximum)
+    if previous and 0<=now-previous.get('updated_at',0)<1 and (monitor or previous.get('background_until',0)>now+5):
+        # This immutable atomic snapshot is advisory. Actual task admission
+        # still checks every occupied OS slot under the admission lock.
+        return _with_roles(previous,root,maximum,now)
     try:
         with interprocess_file_lock(root/'resource_budget.lock',timeout_seconds=.25,poll_seconds=.01):
             previous=_resource_read(root,maximum)
@@ -307,6 +331,8 @@ def compute_slot(request, run_dir):
             with interprocess_file_lock(expected / 'slot_admission.lock', timeout_seconds=.025, poll_seconds=.001):
                 state = _resource_read(expected, maximum) or {'limit': maximum}
                 pressure = _with_roles(state, expected, maximum, time.time())
+                if request.get('background_maintenance') is True and pressure.get('background_until',0) > time.time():
+                    raise MaintenanceDeferred('A full scan owns foreground capacity')
                 limit, reserved = pressure['limit'], pressure['monitor_reserved']
                 ordinary = limit - reserved
                 # These are namespace-wide identities, including on a small

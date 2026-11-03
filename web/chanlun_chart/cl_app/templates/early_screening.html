@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token() }}">
   <script src="{{ url_for('static', filename='js/app_request.js') }}?asset={{ static_asset_token|default('') }}"></script>
-  <title>本周期中枢买卖点 · Chanlun Pro</title>
+  <title>多周期交易与短差 · Chanlun Pro</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/ui-system.css') }}?asset={{ static_asset_token }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/screening_workbench.css') }}?asset={{ static_asset_token }}">
@@ -18,34 +18,32 @@
 <body class="cp-ui cp-content-page cp-screening">
 <a class="skip" href="#workspace">跳到选股工作台</a>
 {% include 'workspace_nav.html' %}
-<main data-user="{{ current_user.get_id() if current_user is defined else '' }}">
-  <header class="hero"><div><small>CENTER SIGNALS</small><h1>本周期中枢买卖点</h1><p>按所选 K 线周期独立计算中枢，显示程序判定的一、二、三类正式买卖点提醒。</p></div><a class="tag" href="#workspace">查看信号与图表 ↓</a></header>
+<main data-user="{{ current_user.get_id() if current_user is defined else '' }}" data-timeframe-policy="30m_background_5m_trade_1m_short_v2">
+  <header class="hero"><div><small>30m · 5m · 1m</small><h1>多周期交易与短差</h1><p>30m 判断大级别背景，5m 识别交易买卖点，1m 确认对应区间并寻找短差机会。</p></div><a class="tag" href="#workspace">查看信号与图表 ↓</a></header>
   <div id="page-message" role="alert" hidden></div>
   <div id="dashboard-panel">
     <section class="statusbar"><div><strong id="run-status">正在读取最新选股结果…</strong><p id="run-detail" class="muted"></p><progress id="run-progress" max="1" value="0" aria-label="选股进度" hidden></progress></div><div class="run-controls"><span class="tag">最新选股结果</span><button id="start" type="submit" form="screen-form" class="primary" disabled>开始选股</button><button id="cancel" type="button" hidden disabled>取消选股</button><button id="refresh">刷新结果</button><button id="export">导出当前筛选</button></div></section>
-    <details class="panel" id="screen-settings"><summary>选股条件 · 下次计算使用</summary>
+    <details class="panel" id="screen-settings">
+      <summary>计算设置 · 下次选股使用</summary>
       <form id="screen-form"><fieldset id="screen-fields" class="screen-controls">
-        <label>股票范围<select id="scope"><option value="all_a_watchlist">A 股 + 自选分组（各市场）</option><option value="watchlist">仅自选分组（各市场）</option><option value="all_a">行情源 A 股股票池</option><option value="codes">指定股票</option></select></label>
-        <label id="codes-label" hidden>股票代码<input id="codes" placeholder="SH.600088, SZ.301004"></label>
-        <label hidden>筛选方式<select id="screen-strategy"><option value="direct_structural">本周期中枢提醒</option></select></label>
-        <label id="direct-frequency-label">行情周期<select id="screen-frequency" multiple size="3"><option value="1m">1m</option><option value="5m" selected>5m</option><option value="30m" selected>30m</option></select></label>
-        <label id="direct-grade-label" hidden>结构级别<select id="screen-grade"><option value="0">本周期线段</option></select></label>
-        <label hidden>最低操作周期<select id="screen-risk-period"><option value="">不启用</option><option value="1m">1m</option><option value="5m">5m</option><option value="30m">30m</option></select></label>
-        <p class="muted">可同时选择 1m、5m、30m。每个周期独立计算中枢、已确认买卖点和未确认预警。预警基于真实未完成线段，可能随后续走势变化而失效。</p>
-        <fieldset><legend>判定依据</legend><p id="nested-period-note" hidden></p><p id="direct-period-note">一类点要求两个严格分离的本周期中枢、完成的三线段离开及 MACD 柱面积缩小；二类点从一类点的真实价格极值起检查首次完整回试；三类点检查中枢离开后的首次返回。每一类均须通过来源与确认时刻回放。</p></fieldset>
-        <fieldset><legend>买卖点类型</legend><label><input type="checkbox" name="point" value="1buy" checked>一买</label><label><input type="checkbox" name="point" value="2buy" checked>二买</label><label><input type="checkbox" name="point" value="3buy" checked>三买</label><label><input type="checkbox" name="point" value="1sell" checked>一卖</label><label><input type="checkbox" name="point" value="2sell" checked>二卖</label><label><input type="checkbox" name="point" value="3sell" checked>三卖</label></fieldset>
-        <label>最近确认（交易日）<input id="recent" type="number" min="1" max="20" value="5" required></label>
-        <label>拐点最远（交易日）<input id="anchor" type="number" min="1" max="60" value="20" required></label>
-        <label>并行计算进程<input id="workers" type="number" min="1" max="16" value="16" required></label>
-        <label>买后涨幅／卖后跌幅上限（%）<input id="max-gain" type="number" min="0" max="100" step="0.1" value="10" required></label>
-        <label class="check"><input id="exclude-st" type="checkbox" checked>排除 ST / 退市名称</label>
-        <p class="muted">当前买卖点按本程序的中枢与 MACD 规则确认；不调用已移除的递归走势类型算法。</p>
-        <label class="check" hidden><input id="weak-second" type="checkbox">二类点扩展变体</label>
+        <label>标的范围<select id="scope"><option value="all_a_watchlist">A 股全市场 + 全部自选分组</option><option value="all_a">A 股全市场</option><option value="watchlist">全部自选分组（各市场）</option><option value="watchlist_groups">指定自选分组</option><option value="codes">指定标的</option></select></label>
+        <label id="code-market-label" hidden>标的市场<select id="code-market"><option value="a">A 股</option><option value="us">美股</option><option value="hk">港股</option><option value="currency_spot">数字货币现货</option><option value="currency">数字货币合约</option><option value="mixed">多个市场（逐项填写前缀）</option></select></label>
+        <label id="codes-label" hidden>标的代码<input id="codes" placeholder="SH.600088, SZ.301004"></label>
+        <div id="scope-groups-panel" hidden><label>本轮扫描的分组<select id="screen-watch-groups" multiple size="4" aria-describedby="scope-groups-status"></select></label><p id="scope-groups-status" class="muted"></p><button id="scope-groups-refresh" type="button">重新读取分组</button></div>
+        <label class="check"><input id="scan-short-term" type="checkbox">额外扫描整个范围的 1m 短差</label>
+        <label class="check"><input id="exclude-st" type="checkbox" checked>排除 ST / 退市名称的 A 股候选</label>
+        <p class="muted">固定计算 5m 交易、30m 背景，并为 5m 线索读取对应区间的 1m 确认证据。六类买卖点均计算，下方筛选选择要查看的类型。名称过滤作用于本轮选股范围；人工关注和持仓继续独立监听。</p>
+        <details class="screen-window-settings"><summary>候选覆盖条件</summary><div class="screen-controls">
+          <label>主结构最近确认（交易日）<input id="recent" type="number" min="1" max="20" value="5" required></label>
+          <label>拐点回看上限（交易日）<input id="anchor" type="number" min="1" max="60" value="20" required></label>
+          <label>买后涨幅／卖后跌幅上限（%）<input id="max-gain" type="number" min="0" max="100" step="0.1" value="10" required></label>
+        </div><p>窗口包含截止交易日；不代表只读取这些天的结构历史。顺向涨跌幅限制与下方的绝对价格距离不同，扩大本轮未覆盖的范围需要重新计算。</p></details>
+        <details class="screen-runtime-settings"><summary>运行设置</summary><label>自动调节的进程上限<input id="workers" type="number" min="1" max="16" value="16" required></label><p>实际并发随任务量、监听压力和可用内存调整。</p></details>
+        <details class="screen-rule-help"><summary>当前判定依据</summary><p>30m 提供背景和逆势风险标注。5m 六类买卖点均需对应区间的 1m 确认；依据可以是匹配的买卖点或独立核验的内部力度比较。主结构确认、下级确认和两级齐备分别显示。</p><p>三买只保留已核验的上涨操作段首中枢；三卖默认保留全部有效中枢。物理周期与本周期线段的操作框架不等于已证明的递归走势级别。</p></details>
       </fieldset></form>
-      <p id="direct-explanation">修改这里的条件后，点击“开始选股”或“重新选股”才会运行计算；下方候选筛选即时过滤已有结果，“刷新结果”读取已计算的进度和结果。</p>
-      <p id="nested-explanation" hidden></p>
+      <p>修改计算设置后点击“重新选股”才会运行新任务。下方筛选只过滤已有结果；“刷新结果”读取进度和结果。</p>
     </details>
-    <section class="summary" aria-label="本轮选股总计"><article><small>本轮有提醒的标的</small><strong id="symbol-count">—</strong></article><article><small>本轮正式买卖点</small><strong id="signal-count">—</strong><span class="summary-note" id="signal-breakdown"></span></article><article><small>有提醒的板块</small><strong id="sector-count">—</strong></article><article><small>已人工复核</small><strong id="review-count">—</strong></article><article><small>数据问题 / 标的</small><strong id="error-count">—</strong></article></section>
+    <section class="summary" aria-label="本轮选股总计"><article><small>本轮有提醒的标的</small><strong id="symbol-count">—</strong></article><article><small>本轮交易与短差线索</small><strong id="signal-count">—</strong><span class="summary-note" id="signal-breakdown"></span></article><article><small>有提醒的板块</small><strong id="sector-count">—</strong></article><article><small>已人工复核</small><strong id="review-count">—</strong></article><article><small>异常记录 / 标的</small><strong id="error-count">—</strong></article></section>
     <p class="muted summary-scope">本轮总计（不随下方筛选变化）</p>
     <div id="point-counts" class="point-counts" aria-label="本轮六类买卖点总计"></div>
     <p id="third-breakdown" class="muted" role="status"></p>
@@ -59,7 +57,7 @@
         <label class="sector-level-control" for="sector-level">目录层级<select id="sector-level"><option value="industry">行业</option><option value="subindustry">细分行业</option><option value="other" hidden>其他目录</option></select></label>
         <label class="sector-match-choice" for="sector-matches-only"><input id="sector-matches-only" type="checkbox" checked>仅看有匹配结果</label>
       </div>
-      <div class="sector-selection-bar"><button id="sector-all" type="button">全部板块</button><p id="sector-active-selection" role="status">当前：全部板块</p></div>
+      <div class="sector-selection-bar"><button id="sector-all" type="button">全部板块</button><button id="sector-unclassified" type="button">未分类／目录暂缺</button><p id="sector-active-selection" role="status">当前：全部板块</p></div>
       <p id="sector-status" class="muted" role="status"></p>
       <div id="sector-list" class="sector-list"></div>
       <p id="sector-empty" class="muted" role="status" hidden></p>
@@ -70,25 +68,26 @@
     <section class="filters chart-filters" aria-label="候选筛选">
       <div class="chart-filter-body">
         <div class="signal-filter-header">
-          <div><h2 id="signal-filter-title">筛选结果</h2><p id="signal-selection-help" class="muted">选择一个周期，勾选需要的买卖点</p></div>
-          <button id="reset" type="button">重置筛选</button>
+          <div><div class="result-view-tabs" role="group" aria-label="结果视图"><button id="current-results" type="button" aria-pressed="true">选股结果</button><button id="historical-results" type="button" aria-pressed="false">历史结构</button></div><h2 id="signal-filter-title">筛选结果</h2><p id="signal-selection-help" class="muted">按周期、类型和确认状态查看本轮结果</p></div>
+          <button id="reset" type="button">清空当前视图筛选</button>
         </div>
         <fieldset id="signal-selection" class="signal-selection" aria-labelledby="signal-filter-title" aria-describedby="signal-selection-help">
-          <div class="signal-period-controls" role="radiogroup" aria-label="筛选周期（单选）">
+          <div id="result-period-controls" class="signal-period-controls" role="radiogroup" aria-label="筛选周期（单选）">
             <span class="signal-control-label">周期：</span>
-            <label class="signal-period-option" for="signal-period-1m"><input id="signal-period-1m" type="radio" name="signal-period" data-signal-period="1m" value="1m" /><span>1m</span></label>
-            <label class="signal-period-option" for="signal-period-5m"><input id="signal-period-5m" type="radio" name="signal-period" data-signal-period="5m" value="5m" checked /><span>5m</span></label>
-            <label class="signal-period-option" for="signal-period-30m"><input id="signal-period-30m" type="radio" name="signal-period" data-signal-period="30m" value="30m" /><span>30m</span></label>
+            <label class="signal-period-option" for="signal-period-1m"><input id="signal-period-1m" type="radio" name="signal-period" data-signal-period="1m" value="1m" /><span>1m 短差</span></label>
+            <label class="signal-period-option" for="signal-period-5m"><input id="signal-period-5m" type="radio" name="signal-period" data-signal-period="5m" value="5m" checked /><span>5m 交易</span></label>
+            <label class="signal-period-option" id="legacy-period-30m" for="signal-period-30m" hidden><input id="signal-period-30m" type="radio" name="signal-period" data-signal-period="30m" value="30m" /><span>30m 历史背景</span></label>
+            <span class="muted">30m 背景在每个交易候选中显示</span>
           </div>
           <div class="signal-filter-tools">
-            <input id="signal-search" type="search" placeholder="搜索名称、代码、市场或板块" aria-label="搜索候选">
-              <label class="signal-status-filter">状态<select id="point-status-filter"><option value="all" selected>全部（含未确认）</option><option value="forming">未确认预警</option><option value="confirmed">已确认</option></select></label>
+            <label class="signal-status-filter">市场<select id="market-filter"><option value="all">全部已扫描市场</option><option value="a">A 股</option><option value="us">美股</option><option value="hk">港股</option></select></label><input id="signal-search" type="search" placeholder="搜索名称、代码、市场或板块" aria-label="搜索候选">
+              <label id="point-status-label" class="signal-status-filter">状态<select id="point-status-filter"><option value="all" selected>全部（含待确认）</option><option value="main_confirmed">本周期结构已确认（含交易确认）</option><option value="confirmed">交易已确认（5m＋1m）</option><option value="waiting_lower">5m 已确认，待 1m</option><option value="main_forming">本周期结构形成中</option></select></label>
             <div class="signal-presets" role="group" aria-label="批量选择当前周期的买卖点">
               <span class="signal-presets-label">买卖点：</span>
               <button id="signal-preset-all" type="button" data-signal-preset="all" title="将当前周期替换为全部买卖点">全部</button>
               <button id="signal-preset-buy" type="button" data-signal-preset="buy" title="将当前周期替换为全部买点">买点</button>
               <button id="signal-preset-sell" type="button" data-signal-preset="sell" title="将当前周期替换为全部卖点">卖点</button>
-              <button id="signal-clear" type="button" data-signal-preset="none" title="清空当前周期的买卖点勾选">清空</button>
+
             </div>
           </div>
           <div class="signal-point-choices" role="group" aria-label="当前周期的买卖点（可多选）">
@@ -105,30 +104,56 @@
         <details class="period-link-help" id="period-link-help">
           <summary>周期联动怎么看？<span>查看六种含义与当前周期的搭配</span></summary>
           <p id="period-link-plan">当前筛选 5m：参考 30m 背景，用 1m 细化时机。</p>
-          <p>周期联动说明其他周期是否支持当前信号；“未确认／已确认”说明买卖点自身的状态，两者分别判断。联动支持不会把预警自动变成已确认买卖点。</p>
+          <p>“本周期结构已确认”只查看当前周期的点位确认；5m 交易已确认还须通过对应区间的 1m 确认。5m 已确认但 1m 待确认的点位仍可查看，归入“条件待齐”；1m 短差按自身确认状态判断。30m 背景与风险单独标注。</p>
           <dl id="period-link-glossary"></dl>
           <p class="muted">背景：查看更大周期的中枢和信号。细化时机：查看与当前走势对应的小周期信号。“联动优先”是展示顺序，不是胜率排名。</p>
         </details>
         <p id="period-link-selected-help" class="muted period-link-selected-help" role="status"></p>
-      <details id="advanced-filters" class="signal-advanced-details"><summary id="advanced-filter-summary">更多条件</summary><label class="signal-previous-choice" for="include-previous"><input id="include-previous" type="checkbox" checked />保留上次待更新结果</label><p class="muted">旧结果仅供核对，不计入本轮命中；关注标的仅供开图，不作为信号。</p><div class="toolbar"><label hidden>低周期确认<select id="lower-status-filter"><option value="all">全部</option></select></label><label>周期联动<select id="higher-context-filter"><option value="all">全部（不限制）</option><option value="aligned">联动支持</option><option value="turning">转折候选</option><option value="countertrend">逆向风险</option><option value="mixed">信号分歧</option><option value="independent">本周期信号</option><option value="unverified">联动待核验</option></select></label><label hidden>筛选组合<select id="stage-filter"><option value="all">全部状态</option></select></label><label hidden>MACD基础避险<select id="risk-filter"><option value="all">全部</option></select></label><span id="stage-counts" class="muted"></span><span id="selected-sector" class="muted">全部板块</span></div><p id="higher-context-status" class="muted" role="status"></p><div class="toolbar"><label>市场<select id="market-filter"><option value="all">全部市场</option><option value="a">A 股</option><option value="us">美股</option><option value="hk">港股</option></select></label><label>来源<select id="origin-filter"><option value="screening">选股提醒</option><option value="all">提醒 + 当前关注组</option><option value="watchlist">当前关注组</option></select></label><label>三类点中枢<select id="center-order-filter"><option value="all">当前选股规则</option><option value="first">仅首中枢（三卖也适用）</option></select></label><label>距本轮截止<select id="age-filter"><option value="all">不限</option><option value="0">本轮交易日</option><option value="1">不超过 1 个交易日</option><option value="3">不超过 3 个交易日</option><option value="5">不超过 5 个交易日</option></select></label><label>本轮收盘距拐点<select id="gain-filter"><option value="all">不限</option><option value="1">不超过 1%</option><option value="3">不超过 3%</option><option value="5">不超过 5%</option></select></label><label>排序<select id="sort-filter"><option value="linkage">联动优先</option><option value="recent">信号最近</option><option value="distance">本轮收盘靠近拐点</option></select></label><label>复核<select id="review-filter"><option value="all">全部状态</option><option value="pending">待复核</option><option value="reviewed">已复核</option></select></label></div><p>这些条件与周期、买卖点同时生效。时效、距拐点百分比与排序仅影响结果显示，不改变买卖点的成立条件；选股结果只代表标出的行情截止时刻。</p></details>
+      <details id="advanced-filters" class="signal-advanced-details">
+        <summary id="advanced-filter-summary">更多条件</summary>
+        <div class="toolbar">
+          <label>时间依据<select id="time-basis-filter"><option value="structure">主结构确认时间</option><option value="trade">交易条件齐备时间</option><option value="anchor">价格拐点时间</option></select></label>
+          <label>时间范围<select id="age-filter"><option value="all">本轮覆盖范围内全部</option><option value="0">本轮截止交易日</option><option value="2">最近 3 个交易日</option><option value="4">最近 5 个交易日</option></select></label>
+          <label id="distance-filter-label">截止收盘距拐点（绝对值）<select id="gain-filter"><option value="all">不限</option><option value="1">不超过 1%</option><option value="3">不超过 3%</option><option value="5">不超过 5%</option></select></label>
+          <label id="background-filter-label">30m 背景<select id="background-filter"><option value="all">全部（保留逆势）</option><option value="aligned">顺势</option><option value="countertrend">逆势</option><option value="range">震荡</option><option value="unverified">待核验</option></select></label>
+          <label id="center-order-label">三卖中枢<select id="center-order-filter"><option value="all">全部有效三卖</option><option value="first">仅已核验首中枢</option></select></label>
+          <label>排序<select id="sort-filter"><option value="recent">所选时间从新到旧</option><option value="distance">绝对价格距离从近到远</option><option value="linkage">周期联动优先</option></select></label>
+          <label>人工复核<select id="review-filter"><option value="all">全部</option><option value="pending">未记录</option><option value="reviewed">已记录</option></select></label>
+          <label id="history-reason-label" hidden>历史退出原因<select id="history-reason-filter"><option value="all">全部</option><option value="FIRST_ADVANCED_TO_SECOND">已推进到二类点</option><option value="CONFIRMING_SEGMENT_COMPLETED">后继反向线段完成</option></select></label>
+        </div>
+        <div class="toolbar" id="context-filter-controls">
+          <label>周期联动分析<select id="higher-context-filter"><option value="all">全部（不限制）</option><option value="aligned">联动支持</option><option value="turning">转折候选</option><option value="countertrend">逆向风险</option><option value="mixed">信号分歧</option><option value="independent">本周期信号</option><option value="unverified">联动待核验</option></select></label>
+          <label id="lower-status-label">1m 区间核验<select id="lower-status-filter"><option value="all">全部</option><option value="confirmed">已确认</option><option value="no_match">已检查未匹配</option><option value="unavailable">证据不可用</option><option value="replay_failed">回放未通过</option><option value="not_checked">尚未检查</option></select></label>
+          <span id="stage-counts" class="muted"></span><span id="selected-sector" class="muted">全部板块</span>
+        </div>
+        <p id="higher-context-status" class="muted" role="status"></p>
+        <p>日期按各市场交易日计算，最近 N 日包含截止日。价格距离使用本轮截止收盘价。筛选、排序和实时行情显示互相独立；三买首中枢规则始终有效。</p>
+      </details>
       </div>
     </section>
     <nav id="mobile-workspace-tabs" class="mobile-workspace-tabs" aria-label="选股视图" role="tablist"><button id="mobile-list-tab" type="button" role="tab" aria-selected="true" aria-controls="candidate-panel">候选列表</button><button id="mobile-chart-tab" type="button" role="tab" aria-selected="false" aria-controls="analysis">标的图表</button></nav>
     <section id="workspace" class="workspace" data-mobile-view="list">
-      <aside class="panel queue" id="candidate-panel"><header><h2>买卖点与关注队列</h2><span id="visible-count"></span></header><p id="visible-breakdown" class="muted" role="status"></p><p id="active-filter-summary" class="active-filter-summary" role="status"></p><div id="signal-list" class="signal-list" aria-label="选股候选列表"></div><div class="toolbar" aria-label="候选分页"><button id="queue-prev" type="button">上一页</button><span id="queue-page" aria-live="polite"></span><button id="queue-next" type="button">下一页</button></div><p id="queue-empty" class="muted" hidden></p><button id="queue-reset-filters" type="button" hidden>清除筛选条件</button></aside>
-      <section class="panel analysis" id="analysis"><header><div><small>SYMBOL ANALYSIS</small><h2 id="selected-title">选择标的开始分析</h2><p id="selected-tags" class="muted"></p></div><div class="toolbar"><button id="mobile-back-to-list" class="mobile-back-to-list" type="button">返回列表</button><button id="toggle-list" aria-pressed="false">收起列表</button><button id="theater" aria-pressed="false">图表满屏</button><a href="#review-panel">人工复核</a><a id="open-chart" href="/" target="_blank" rel="noopener">完整图表 ↗</a></div></header>
+      <aside class="panel queue" id="candidate-panel"><header><h2 id="queue-title">本轮选股结果</h2><span id="visible-count"></span></header><p id="visible-breakdown" class="muted" role="status"></p><p id="active-filter-summary" class="active-filter-summary" role="status"></p><p id="queue-filter-diagnostic" class="muted" role="status"></p><div id="previous-results-top"></div><div id="signal-list" class="signal-list" aria-label="选股候选列表"></div><div class="toolbar" id="current-pagination" aria-label="候选分页"><button id="queue-prev" type="button">上一页</button><span id="queue-page" aria-live="polite"></span><button id="queue-next" type="button">下一页</button></div><p id="queue-empty" class="muted" hidden></p><button id="queue-show-available" type="button" hidden>查看可用候选</button><button id="queue-reset-filters" type="button" hidden>清除筛选条件</button>
+        <details id="previous-results" hidden><summary id="previous-summary">上批结果 · 只读参考</summary>
+          <p class="muted">使用当前显示条件独立筛选；不计入本轮结果，重算完成后自动收起。</p>
+          <label class="signal-previous-choice" id="previous-results-label" for="include-previous"><input id="include-previous" type="checkbox" checked>显示匹配的上批记录</label>
+          <div id="previous-list" class="signal-list" aria-label="上批只读结果"></div>
+          <div class="toolbar" aria-label="上批结果分页"><button id="previous-prev" type="button">上一页</button><span id="previous-page" aria-live="polite"></span><button id="previous-next" type="button">下一页</button></div>
+        </details>
+      </aside>
+      <section class="panel analysis" id="analysis"><header><div><small>SYMBOL ANALYSIS</small><h2 id="selected-title">选择标的开始分析</h2><p id="selected-tags" class="muted"></p></div><div class="toolbar"><button id="mobile-back-to-list" class="mobile-back-to-list" type="button">返回列表</button><button id="toggle-list" aria-pressed="false">收起列表</button><button id="theater" aria-pressed="false">图表满屏</button><a id="open-review" href="#review-panel">人工复核</a><a id="open-chart" href="/" target="_blank" rel="noopener">完整图表 ↗</a></div></header>
 
         <div id="selected-detail" hidden>
           <p id="candidate-detail-state" class="muted" role="status"></p>
           <div class="decision"><div><small>当前结构结论</small><strong id="decision-title"></strong><p id="decision-detail"></p></div><dl><div><dt>原买卖点</dt><dd id="anchor-price">—</dd></div><div><dt>结构失效边界</dt><dd id="invalidation-price">—</dd></div><div><dt>本周期止损参考</dt><dd id="stop-loss-price">—</dd></div><div><dt>本周期止盈 / 退出参考</dt><dd id="take-profit-price">—</dd></div><div><dt>本次截止收盘</dt><dd id="close-price">—</dd></div><div><dt>最新行情 / 涨跌幅</dt><dd id="live-quote">—</dd></div></dl></div>
           <p class="exit-reference-note">止损按结构边界触发；止盈等待本周期已确认的反向买卖点。这里展示退出参考，不会自动下单。</p>
           <details class="exit-price-detail"><summary>止盈止损触发条件与原文依据</summary><ul id="exit-price-detail"></ul><ul id="confirmation-exit-detail"></ul><details><summary>原文定位</summary><ul id="exit-price-sources"></ul></details></details>
-          <div id="chart-periods" class="period-path" aria-label="图表周期切换（不改变候选筛选）"><button data-frequency="1m">1m <small>独立中枢</small></button><button data-frequency="5m" class="active">5m <small>独立中枢</small></button><button data-frequency="30m">30m <small>独立中枢</small></button><button data-frequency="d">日线 <small>图表参照</small></button></div>
+          <div id="chart-periods" class="period-path" aria-label="图表周期切换（不改变候选筛选）"><button data-frequency="1m">1m <small>确认 / 短差</small></button><button data-frequency="5m" class="active">5m <small>交易级别</small></button><button data-frequency="30m">30m <small>大级别背景</small></button><button data-frequency="d">日线 <small>图表参照</small></button></div>
           <div class="toolbar chart-toolbar"><label>图表行情<select id="chart-source"><option value="live">当前行情</option><option value="evidence">本次筛选证据</option></select></label><label>布局<select id="chart-layout"><option value="single">单图</option><option value="horizontal-2">上下双图</option><option value="vertical-2">左右双图</option><option value="horizontal-7-3">上下双图 7:3</option><option value="three">三图</option><option value="four">四图</option></select></label><span id="chart-frequency" class="muted" aria-live="polite">图表周期：5m</span><button id="chart-reload">重新加载图表</button><button id="chart-reset-size">适应窗口</button><span id="chart-status" class="muted"></span></div>
           <div class="chart-stage" id="chart-stage" data-chart-layout="single"><iframe id="chart-frame" src="about:blank" title="个股缠论多周期图表"></iframe></div>
           <p id="chart-context" class="muted">与缠论结构解盘共用图表和显示设置；当前行情可能与选股截止时刻不同。</p>
           <details class="evidence"><summary>结构证据与风险边界</summary><div class="evidence-grid"><section><h3>成立证据</h3><ul id="evidence-established"></ul></section><section><h3>人工复核项</h3><ul id="evidence-missing"></ul></section><section><h3>失效边界与后续行情</h3><ul id="evidence-risk"></ul></section></div><details><summary>完整提醒记录</summary><pre id="raw-evidence"></pre></details></details>
-          <section class="review-panel" id="review-panel"><header><h3>人工确认清单</h3><span id="review-state" class="muted"></span></header><form id="review-form"><fieldset id="review-fields"><div class="review-grid">
+          <details class="review-panel" id="review-panel"><summary>人工复核记录</summary><header><h3>人工确认清单</h3><span id="review-state" class="muted"></span></header><p class="muted">以下内容是个人复核笔记，保存不会改变算法确认状态或持仓。</p><form id="review-form"><fieldset id="review-fields"><div class="review-grid">
             <label>中枢判断<select name="center_judgement"><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">确认</option><option value="REJECTED">否决</option></select></label>
             <label>走势类型<select name="trend_judgement"><option value="UNCERTAIN">不确定</option><option value="UP">上涨</option><option value="DOWN">下跌</option><option value="CONSOLIDATION">盘整</option></select></label>
             <label>级别判断<select name="level_judgement"><option value="UNCERTAIN">不确定</option><option value="30M">30m</option><option value="5M">5m</option><option value="1M">1m</option><option value="OTHER">其他级别</option></select></label>
@@ -136,13 +161,13 @@
             <label>分解方法<select name="decomposition_judgement"><option value="UNCERTAIN">不确定</option><option value="SAME_LEVEL">同级别分解</option><option value="CENTER">中枢分解</option><option value="COMBINED">两者结合</option></select></label>
             <label>中枢扩展<select name="center_expansion_judgement"><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">存在</option><option value="REJECTED">不存在</option></select></label>
             <label>九段升级<select name="nine_segment_upgrade_judgement"><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">满足升级</option><option value="REJECTED">不满足</option></select></label>
-            <label>1m 结构确认判断<select name="segment_difference_judgement"><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">有效</option><option value="REJECTED">无效</option></select></label>
+            <label>1m 区间确认判断<select name="segment_difference_judgement"><option value="UNCERTAIN">不确定</option><option value="CONFIRMED">有效</option><option value="REJECTED">无效</option></select></label>
             <label>处置<select name="disposition"><option value="WATCH">继续观察</option><option value="REJECT">拒绝</option><option value="NEEDS_MORE_DATA">需要更多数据</option></select></label>
-          </div><label>复核笔记<textarea id="review-notes" name="notes" maxlength="4000" rows="3" placeholder="记录中枢区间、背驰依据、失效条件和仍需观察的后续走势"></textarea></label><div class="toolbar"><button class="primary" id="save-review" type="submit">保存复核记录</button><span id="review-message" role="status"></span></div></fieldset></form><details><summary>历史复核记录 <span id="review-history-count">0</span></summary><div id="review-history"></div></details></section>
+          </div><label>复核笔记<textarea id="review-notes" name="notes" maxlength="4000" rows="3" placeholder="记录中枢区间、背驰依据、失效条件和仍需观察的后续走势"></textarea></label><div class="toolbar"><button class="primary" id="save-review" type="submit">保存复核记录</button><span id="review-message" role="status"></span></div></fieldset></form><details><summary>历史复核记录 <span id="review-history-count">0</span></summary><div id="review-history"></div></details></details>
         </div>
       </section>
     </section>
-    <details class="panel"><summary>运行与数据诊断</summary><p id="diagnostics"></p><p id="coverage-detail"></p><p id="diagnostic-reasons"></p><ul id="diagnostic-errors"></ul></details>
+    <details class="panel"><summary>运行与数据诊断</summary><p id="diagnostics"></p><p id="coverage-detail"></p><p id="universe-exclusion-summary"></p><ul id="universe-exclusions"></ul><p id="diagnostic-reasons"></p><ul id="diagnostic-errors"></ul></details>
   </div>
 </main>
 </body>

@@ -7,6 +7,7 @@ receipt and does not inherit the parent batch's earlier verification timings.
 from collections import defaultdict
 import json
 import math
+from chanlun.screening.worker_transport import TIMING_SCOPE
 
 
 def summarize(rows):
@@ -31,15 +32,23 @@ def summarize(rows):
             group = groups.setdefault(key, {"samples": 0, "values": defaultdict(list)})
             group["samples"] += 1
             timeline = event.get("notification_timeline") or {}
-            cutoff = timeline.get("source_closed_at", event.get("source_closed_at"))
+            if not isinstance(timeline, dict):
+                timeline = {}
+            cutoff = event.get("source_closed_at", timeline.get("source_closed_at"))
+            task_cutoff = timeline.get("source_closed_at", cutoff)
             # recorded_at is rounded to seconds for lifecycle persistence.
             # The timeline keeps the actual detection instant when available.
             detected = timeline.get("detected_at")
             if detected is None:
                 detected = event.get("recorded_at")
+            primary_finished = (timeline.get('primary_calculation_finished_at')
+                                if timeline.get('measurement_scope') == TIMING_SCOPE
+                                else timeline.get('calculation_finished_at'))
             metrics = {
                 "cutoff_to_sent": (cutoff, row["sent"]),
                 "schedule_wait": (cutoff, timeline.get("scheduled_at")),
+                "task_cutoff_to_sent": (task_cutoff, row["sent"]),
+                "task_schedule_wait": (task_cutoff, timeline.get("scheduled_at")),
                 "worker_wait": (
                     timeline.get("scheduled_at"),
                     timeline.get("calculation_started_at"),
@@ -50,7 +59,7 @@ def summarize(rows):
                 ),
                 "compute": (
                     timeline.get("fetched_at"),
-                    timeline.get("calculation_finished_at"),
+                    primary_finished,
                 ),
                 "result_wait": (
                     timeline.get("calculation_finished_at"),
@@ -64,6 +73,8 @@ def summarize(rows):
                 "send_preparation": (measured('validation_finished'), measured('request_started')),
                 "request": (measured('request_started'), measured('request_finished')),
             }
+            if timeline.get('measurement_scope') == TIMING_SCOPE:
+                metrics['coordination'] = (primary_finished, timeline.get('calculation_finished_at'))
             for name, (start, end) in metrics.items():
                 if (
                     all(

@@ -81,6 +81,9 @@ def test_structure_patch_indicator_projection_uses_lossless_delta_transport():
         "higher_macd_dif": [5.0],
         "higher_macd_dea": [6.0],
         "higher_macd_hist": [7.0],
+        "higher_macd_raw_dif": [5.123456789012345],
+        "higher_macd_raw_dea": [6.987654321098765],
+        "higher_macd_raw_hist": [-1.86419753208642],
     }
 
     patch = tv._history_indicator_payload(
@@ -93,6 +96,8 @@ def test_structure_patch_indicator_projection_uses_lossless_delta_transport():
     assert patch["macd_delta_scale"] == 1_000_000
     assert patch["macd_dif"] == [1_000_000]
     assert patch["higher_macd_hist"] == [7_000_000]
+    for key in ('higher_macd_raw_dif','higher_macd_raw_dea','higher_macd_raw_hist'):
+        assert patch[key] == source[key] == standalone[key]
     assert "macd_delta_scale" not in standalone
     assert standalone["macd_area"] == [4.0]
     assert set(patch) == (set(source) - {"macd_area"}) | {

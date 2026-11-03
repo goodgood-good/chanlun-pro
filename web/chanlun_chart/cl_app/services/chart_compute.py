@@ -315,6 +315,7 @@ _CHART_ARRAY_FIELDS = (
     "t", "o", "h", "l", "c", "v",
     "macd_dif", "macd_dea", "macd_hist", "macd_area",
     "higher_macd_dif", "higher_macd_dea", "higher_macd_hist",
+    "higher_macd_raw_dif", "higher_macd_raw_dea", "higher_macd_raw_hist",
 )
 
 # 分型、笔、线段按显示窗口裁切；本周期中枢由 ``strict_structure`` 原子快照传输。

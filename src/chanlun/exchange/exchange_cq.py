@@ -5,13 +5,16 @@ import weakref
 import threading
 import functools
 import math
+import asyncio
 from datetime import timedelta, datetime, time as datetime_time
 from typing import Dict, List, Union
 import pandas as pd
 import numpy as np
 import pytz
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError, CancelledError as FuturesCancelledError
 from tenacity import Retrying, stop_after_attempt, wait_exponential, retry_if_exception
+from chanlun.exchange.quote_capacity import QuoteConnectionCancelled, QuoteConnectionBusy, quote_request_scope, worker_quote_cancelled, current_quote_cancel_event
+from chanlun.exchange.longbridge_history_limit import LongbridgeHistoryBusy, wait_history_request, HISTORY_PAGE_WORKERS
 
 from longbridge.openapi import (
     Config, Market, Period, AdjustType, SecurityListCategory, TradeSessions,
@@ -218,10 +221,13 @@ class RateLimiter:
         self.timestamps = []
         self.lock = threading.Lock()
 
-    def wait(self):
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic()+timeout
         # 注意：sleep 必须在锁外。否则持锁睡眠会把所有调用方串成一条不公平的队列
         # （突发时一个等待者持锁 sleep，其余全堵在 with self.lock 上、轮不到也不公平）。
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError('Longbridge rate-limit deadline')
             with self.lock:
                 now = time.time()
                 self.timestamps = [t for t in self.timestamps if now - t < self.period]
@@ -230,6 +236,8 @@ class RateLimiter:
                     return
                 wait_time = self.timestamps[0] + self.period - now
             if wait_time > 0:
+                if deadline is not None and wait_time >= deadline-time.monotonic():
+                    raise TimeoutError('Longbridge rate-limit deadline')
                 time.sleep(wait_time)
 
 
@@ -263,7 +271,8 @@ def is_retryable_exception(exception):
     判断异常是否需要重试
     """
     # 内部哨兵：本进程已知配额耗尽，retry 不会让配额变多，直接 break
-    if isinstance(exception, _PreemptiveQuotaExhausted) or _is_connection_limit(exception):
+    if isinstance(exception, (_PreemptiveQuotaExhausted, QuoteConnectionCancelled, QuoteConnectionBusy, LongbridgeHistoryBusy,
+                              FuturesCancelledError, asyncio.CancelledError)) or _is_connection_limit(exception):
         return False
     if isinstance(exception, OpenApiException):
         # 301600: out of minute kline begin date - 数据超限，不重试
@@ -321,6 +330,48 @@ def _candlestick_frame(candles):
     return frame
 
 
+def is_history_retention_boundary(exc):
+    return (isinstance(exc, OpenApiException) and getattr(exc, 'code', None) == 301600
+            and 'out of minute kline begin date' in str(getattr(exc, 'message', '') or '').lower())
+
+
+def normalize_history_frame(frame, code, frequency, market):
+    """The same price/precision contract for full windows and bounded pages."""
+    frame = frame.copy()
+    frame['code'], frame['frequency'] = code, frequency
+    frame = frame.sort_values('date').reset_index(drop=True)
+    frame = frame[['date','frequency','code','open','high','low','close','volume']]
+    frame = normalize_kline_precision(frame, market, code)
+    frame, repairs, adjustment = _normalize_longbridge_ohlc_geometry(frame)
+    quantum = resolve_structure_price_quantum(market, code)
+    if quantum is not None:
+        frame = attach_price_basis_metadata(frame, build_provider_price_basis_metadata(
+            provider='longbridge', market=market, code=code, adjustment='forward',
+            structure_price_quantum=quantum, normalization_revision=_LONGBRIDGE_OHLC_NORMALIZATION_REVISION))
+        frame.attrs.update(ohlc_geometry_normalization=_LONGBRIDGE_OHLC_NORMALIZATION_REVISION,
+                           ohlc_geometry_repair_count=repairs, ohlc_geometry_max_adjustment=adjustment)
+    return frame
+
+
+def history_api_cursor(symbol, period, cursor):
+    """The SDK offset endpoint consumes a naive exchange-local minute clock.
+
+    Aware UTC/Shanghai objects are accepted by the binding but their zone is
+    discarded, which can make a frozen query return later candles. Keep daily
+    date queries unchanged and normalize minute references explicitly.
+    """
+    minute_periods = [getattr(Period, f'Min_{n}', None)
+                      for n in (1,2,3,5,10,15,20,30,45,60,120,180,240)]
+    if cursor is None or period not in minute_periods:
+        return cursor
+    stamp = pd.Timestamp(cursor)
+    if stamp.tzinfo is None:
+        return cursor
+    timezone = ('America/New_York' if symbol.upper().endswith('.US') else
+                'Asia/Hong_Kong' if symbol.upper().endswith('.HK') else 'Asia/Shanghai')
+    return stamp.tz_convert(timezone).tz_localize(None).to_pydatetime()
+
+
 @fun.singleton
 class ExchangeChangQiao(Exchange):
     """
@@ -346,9 +397,9 @@ class ExchangeChangQiao(Exchange):
         # 改为按 market 维度分桶缓存，并支持显式传入 market 区分。
         self.stock_list_cache: Dict[str, List[Dict]] = {}
 
-        # 线程池配置
-        # 建议设置在 8-16 之间。过高可能导致 API 触发流控限制 (Rate Limit)
-        self.executor = ThreadPoolExecutor(max_workers=16)
+        # Bound queued historical pages as well as requests. Four quote workers
+        # and the web context must fit inside the account's shared wait budget.
+        self.executor = ThreadPoolExecutor(max_workers=HISTORY_PAGE_WORKERS)
         # _quote_call 专用线程池，与上面批量 K 线分段用的 self.executor 物理隔离。
         # 关键：klines() 把 N 个分段任务 submit 到 self.executor，每个分段内部又经
         # _fetch_candlesticks_api → _quote_call 再 submit；若共用一个有界池，分段填满
@@ -503,9 +554,19 @@ class ExchangeChangQiao(Exchange):
         # 用专用池 _quote_call_executor，绝不能用批量 self.executor：klines() 把分段任务
         # submit 到 self.executor，分段内部又经 _fetch_candlesticks_api → 本函数再 submit，
         # 共用同一有界池会嵌套死锁(分段占满 worker、内层抢不到)。详见 __init__ 注释。
-        future = self._quote_call_executor.submit(fn)
+        cancel=current_quote_cancel_event()
+        def invoke():
+            with quote_request_scope(cancel):
+                if worker_quote_cancelled():
+                    raise QuoteConnectionCancelled('Longbridge request cancelled before admission')
+                return fn()
+        future = self._quote_call_executor.submit(invoke)
         try:
             return future.result(timeout=t)
+        except (QuoteConnectionBusy,QuoteConnectionCancelled):
+            raise
+        except FuturesCancelledError as exc:
+            raise QuoteConnectionCancelled('Longbridge quote executor request cancelled') from exc
         except (FuturesTimeoutError, TimeoutError):
             # 关键：future.result(timeout=) 抛的是 concurrent.futures.TimeoutError，
             # Python<3.11 它不是 builtin TimeoutError(OSError 子类)。两个都列上，
@@ -854,7 +915,7 @@ class ExchangeChangQiao(Exchange):
             return False
 
     def _fetch_candlesticks_api(self, symbol, period, adjust_type, count, time_cursor, trade_sessions,
-                                priority="interactive"):
+                                priority="interactive", timeout_seconds=None):
         """
         带限流和重试的 history kline API 调用。
 
@@ -869,6 +930,9 @@ class ExchangeChangQiao(Exchange):
         用内部哨兵异常而非 OpenApiException 是为了避开 SDK 4 参 ABI（kind, code, trace_id, message）。
         reraise=True: 重试耗尽抛原异常(非 RetryError), 与 _fetch_segment_data 的 err_code 解包一致。
         """
+        deadline = None if timeout_seconds is None else time.monotonic()+timeout_seconds
+        if timeout_seconds is not None and (not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+            raise ValueError('history request budget must be positive')
         if priority == "interactive":
             retryer = Retrying(
                 stop=stop_after_attempt(2),
@@ -891,6 +955,8 @@ class ExchangeChangQiao(Exchange):
         def _do_call():
             nonlocal attempt_number
             attempt_number += 1
+            if worker_quote_cancelled():
+                raise QuoteConnectionCancelled('Longbridge page request cancelled')
             self._raise_if_connection_limited()
             tracker = LbQuotaTracker.instance()
             limit = getattr(config, "LB_QUOTA_MONTHLY_LIMIT", 0)
@@ -910,10 +976,16 @@ class ExchangeChangQiao(Exchange):
             # prewarm/批量走独立低优先令牌桶，不与交互请求争抢同一个 3~6 QPS 额度
             limiter = self.prewarm_rate_limiter if priority == "prewarm" else self.rate_limiter
             quota_started = time.perf_counter()
-            limiter.wait()
+            if deadline is None:
+                limiter.wait()
+            else:
+                limiter.wait(timeout=max(0,deadline-time.monotonic()))
             quota_done = time.perf_counter()
             self._raise_if_connection_limited()
             context = self._quote_ctx()
+            api_cursor = history_api_cursor(symbol, period, time_cursor)
+            wait_history_request(priority=priority,
+                timeout=30. if deadline is None else max(0,deadline-time.monotonic()))
             # A first history response needs the initial authenticated socket.
             # Allow the remainder of its single 20s handshake budget instead
             # of issuing duplicate pages every 5s while that socket connects.
@@ -922,18 +994,26 @@ class ExchangeChangQiao(Exchange):
             if isinstance(context, QuoteContextBridge):
                 timeout = max(timeout, context.connection_wait_seconds)
             connecting = isinstance(context, QuoteContextBridge) and context.connecting
-            result = self._quote_call(
+            if deadline is not None and isinstance(context, QuoteContextBridge):
+                budget = deadline-time.monotonic()
+                if budget <= 0:
+                    raise TimeoutError('Longbridge history deadline')
+                result = context.call_with_timeout('history_candlesticks_by_offset', (), {
+                    'symbol':symbol,'period':period,'adjust_type':adjust_type,'forward':False,
+                    'count':count,'time':api_cursor,'trade_sessions':trade_sessions}, timeout=budget)
+            else:
+                result = self._quote_call(
                 lambda: self._quote_ctx().history_candlesticks_by_offset(
                     symbol=symbol,
                     period=period,
                     adjust_type=adjust_type,
                     forward=False,  # 向前追溯
                     count=count,
-                    time=time_cursor,
+                    time=api_cursor,
                     trade_sessions=trade_sessions
                 ),
-                timeout=timeout,
-            )
+                    timeout=timeout if deadline is None else max(.001,min(timeout,deadline-time.monotonic())),
+                )
             LogUtil.info(f"[history_page] {symbol} period={period} attempt={attempt_number} "
                          f"quota={(quota_done - quota_started) * 1000:.0f}ms "
                          f"request={(time.perf_counter() - quota_done) * 1000:.0f}ms "
@@ -942,7 +1022,7 @@ class ExchangeChangQiao(Exchange):
             tracker.add_symbol(symbol)
             return result
 
-        return retryer(_do_call)
+        return retryer(_do_call) if deadline is None else _do_call()
 
     def _fetch_segment_data(self, code, period, adjust, end_dt, start_dt_limit, priority="interactive"):
         """
@@ -951,7 +1031,7 @@ class ExchangeChangQiao(Exchange):
         """
         segment_candles = []
         current_cursor = end_dt
-        # 三态:complete=正常结束/空返回(数据耗尽); reached_origin=301600 合法到历史起点;
+        # complete=正常结束; provider_boundary=账户当前可用分钟历史边界;
         # failed=真失败(API 异常/超时/配额/时间解析错误)→该段不可信,可能带洞(C1)。
         status = "complete"
 
@@ -962,6 +1042,8 @@ class ExchangeChangQiao(Exchange):
 
         while True:
             try:
+                if worker_quote_cancelled():
+                    raise QuoteConnectionCancelled('Longbridge history paging cancelled')
                 # 核心 API 调用
                 candlesticks = self._fetch_candlesticks_api(
                     symbol=code,
@@ -982,11 +1064,15 @@ class ExchangeChangQiao(Exchange):
                     except Exception:
                         pass
                 err_code = getattr(inner, 'code', None)
+                if isinstance(inner, (FuturesCancelledError, asyncio.CancelledError)):
+                    raise QuoteConnectionCancelled('Longbridge history request cancelled') from inner
+                if isinstance(inner, (QuoteConnectionCancelled, QuoteConnectionBusy, LongbridgeHistoryBusy)):
+                    raise inner
                 if _is_connection_limit(inner):
                     raise self._remember_connection_limit(inner) from inner
-                if isinstance(inner, OpenApiException) and err_code == 301600:
-                    LogUtil.warning(f"Data limit reached (301600) for {code}, stopping segment.")
-                    status = "reached_origin"   # 合法到该 symbol 历史起点,非洞
+                if is_history_retention_boundary(inner):
+                    LogUtil.info(f"Provider minute-history boundary reached for {code}, stopping segment.")
+                    status = "provider_boundary"
                 elif (isinstance(inner, _PreemptiveQuotaExhausted) or
                       (isinstance(inner, OpenApiException) and err_code == 301607)):
                     # 月度 symbol 配额耗尽：标记 exhausted 让后续调用立刻短路
@@ -1053,11 +1139,23 @@ class ExchangeChangQiao(Exchange):
             end_date: str = None, args=None,
     ) -> pd.DataFrame:
         query_args = dict(args or {})
+        completed_input=query_args.pop('_screening_completed',False) is True
+        if (completed_input and end_date is not None and self._market_of_code(code)=='us'
+                and frequency in {'1m','5m','30m'}
+                and not (set(query_args)-{'timeout','allow_long_history','_bypass_history_cache'})):
+            from chanlun.exchange.screening_history_cache import load_screening_history
+            tz=pytz.timezone('Asia/Shanghai')
+            end=pd.Timestamp(_parse_kline_boundary(end_date,tz=tz,end_of_day=True))
+            start=None if start_date is None else pd.Timestamp(_parse_kline_boundary(start_date,tz=tz))
+            return load_screening_history(code=code,frequency=frequency,end=end,start=start,
+                observed=pd.Timestamp(datetime.now(tz)),force=bool(query_args.get('_bypass_history_cache')),
+                loader=lambda overlap:self._fetch_klines(code,frequency,
+                    start_date if overlap is None else overlap.isoformat(),end_date,query_args))
         # Reuse only this adapter's regular-session US history. Other markets,
         # explicit ranges and nonstandard query options retain the original path.
         if (self._market_of_code(code) == "us" and frequency in {"1m", "5m", "30m"}
                 and start_date is None
-                and not (set(query_args) - {"_canonical_closed_minute_as_of", "_bypass_history_cache"})):
+                and not (set(query_args) - {"_canonical_closed_minute_as_of", "_bypass_history_cache", "timeout"})):
             from chanlun.exchange.closed_history_cache import load_closed_us_history
             observed = pd.Timestamp(datetime.now(pytz.timezone("Asia/Shanghai")))
             end = observed if end_date is None else pd.Timestamp(_parse_kline_boundary(
@@ -1127,7 +1225,7 @@ class ExchangeChangQiao(Exchange):
         if start_date:
             start_dt = _parse_kline_boundary(start_date, tz=tz)
         else:
-            lookback = get_lookback_timedelta(frequency)
+            lookback = get_lookback_timedelta(frequency, market='us' if str(code).upper().endswith('.US') else None)
             start_dt = end_dt - lookback
 
         # 限制最大回看范围:不允许请求超过统一 lookback 表的历史数据
@@ -1135,7 +1233,7 @@ class ExchangeChangQiao(Exchange):
             args.get("allow_long_history") or args.get("no_lookback_limit")
         )
         if not allow_long_history:
-            max_lookback = get_lookback_timedelta(frequency)
+            max_lookback = get_lookback_timedelta(frequency, market='us' if str(code).upper().endswith('.US') else None)
             # 裁剪基准用 end_dt(查询窗口的结束)而非 now_dt:历史区间查询(end_date 在过去)用
             # now_dt 会把 start 裁到"现在回看窗口"、导致 start>=end 直接返空(审查 H2)。改 end_dt
             # 后语义为"从 end_dt 往前最多 lookback",窗口宽度仍受限(不超拉),历史查询也成立。
@@ -1189,6 +1287,10 @@ class ExchangeChangQiao(Exchange):
         priority = getattr(_lb_call_priority, "value", "interactive")
         # tasks 携带每段窗口 (future, seg_start, seg_end),供失败段串行补拉与完整性闸门定位(C1)。
         tasks = []
+        request_cancelled=threading.Event()
+        def fetch_segment(*args):
+            with quote_request_scope(request_cancelled):
+                return self._fetch_segment_data(*args)
         curr_end = api_cursor_dt  # 使用带 Buffer 的游标
 
         while curr_end > start_dt:
@@ -1197,7 +1299,7 @@ class ExchangeChangQiao(Exchange):
                 curr_start = start_dt
 
             fut = self.executor.submit(
-                self._fetch_segment_data,
+                fetch_segment,
                 lb_symbol, period, adjust, curr_end, curr_start, priority
             )
             tasks.append((fut, curr_start, curr_end))
@@ -1218,8 +1320,19 @@ class ExchangeChangQiao(Exchange):
                     all_candles.extend(res)
                 if seg_status == "failed":
                     failed.append((s, e))
+            except (FuturesCancelledError,asyncio.CancelledError) as exc:
+                request_cancelled.set()
+                for pending in win:
+                    pending.cancel()
+                raise QuoteConnectionCancelled('Longbridge history segment executor cancelled') from exc
             except Exception as ex:
+                if isinstance(ex, (QuoteConnectionCancelled, QuoteConnectionBusy, LongbridgeHistoryBusy)):
+                    request_cancelled.set()
+                    for pending in win:
+                        pending.cancel()
+                    raise
                 if _is_connection_limit(ex):
+                    request_cancelled.set()
                     for pending in win:
                         pending.cancel()
                     raise self._remember_connection_limit(ex) from ex
@@ -1235,6 +1348,8 @@ class ExchangeChangQiao(Exchange):
                         all_candles.extend(res)
                     failed.remove((s, e))
             except Exception as exc:
+                if isinstance(exc, (QuoteConnectionCancelled, QuoteConnectionBusy, LongbridgeHistoryBusy)):
+                    raise
                 if _is_connection_limit(exc):
                     raise self._remember_connection_limit(exc) from exc
 
@@ -1261,7 +1376,7 @@ class ExchangeChangQiao(Exchange):
                 if closed.empty:
                     return pd.DataFrame()
                 canonical_cutoff = closed["date"].max() + pd.Timedelta(minutes=1)
-                canonical_start = canonical_cutoff - get_lookback_timedelta("1m")
+                canonical_start = canonical_cutoff - get_lookback_timedelta("1m", market="us")
                 # The final full SDK page often already includes the missing
                 # head beyond the wall-clock window. Reuse that exact page.
                 # If it does not cover the closed-end lookback, fetch ONLY the
@@ -1273,9 +1388,11 @@ class ExchangeChangQiao(Exchange):
                             lb_symbol, period, adjust, covered_start.to_pydatetime(),
                             canonical_start.to_pydatetime(), priority,
                         )
-                    except Exception:
+                    except Exception as exc:
+                        if isinstance(exc, (QuoteConnectionCancelled, QuoteConnectionBusy, LongbridgeHistoryBusy)):
+                            raise
                         extra, status = (), "failed"
-                    if status not in {"complete", "reached_origin"}:
+                    if status not in {"complete", "provider_boundary"}:
                         incomplete = pd.DataFrame()
                         incomplete.attrs["fetch_incomplete"] = True
                         return incomplete
@@ -1292,35 +1409,8 @@ class ExchangeChangQiao(Exchange):
 
             df = df.loc[mask]
 
-            # 补充字段并排序
-            df["code"] = code
-            df["frequency"] = frequency
-            df = df.sort_values(by="date").reset_index(drop=True)
-
-            df = df[["date", "frequency", "code", "open", "high", "low", "close", "volume"]]
             market = self._market_of_code(code)
-            df = normalize_kline_precision(df, market, code)
-            df, repair_count, max_adjustment = _normalize_longbridge_ohlc_geometry(df)
-            quantum = resolve_structure_price_quantum(market, code)
-            if quantum is not None:
-                metadata = build_provider_price_basis_metadata(
-                    provider="longbridge",
-                    market=market,
-                    code=code,
-                    adjustment="forward",
-                    structure_price_quantum=quantum,
-                    normalization_revision=(
-                        _LONGBRIDGE_OHLC_NORMALIZATION_REVISION
-                    ),
-                )
-                df = attach_price_basis_metadata(df, metadata)
-                df.attrs.update(
-                    ohlc_geometry_normalization=(
-                        _LONGBRIDGE_OHLC_NORMALIZATION_REVISION
-                    ),
-                    ohlc_geometry_repair_count=repair_count,
-                    ohlc_geometry_max_adjustment=max_adjustment,
-                )
+            df = normalize_history_frame(df, code, frequency, market)
             if canonical_cutoff is not None:
                 df.attrs["canonical_minute_cutoff"] = canonical_cutoff.isoformat()
             return df

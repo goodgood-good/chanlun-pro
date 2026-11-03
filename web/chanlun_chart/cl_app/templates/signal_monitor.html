@@ -1,6 +1,10 @@
+{% macro point_options() -%}
+<option value="all">全部买卖点</option><option value="1buy">一买</option><option value="2buy">二买</option><option value="3buy">三买</option><option value="1sell">一卖</option><option value="2sell">二卖</option><option value="3sell">三卖</option>
+{%- endmacro %}
 {% macro list_controls(id, placeholder) -%}
 <div class="monitor-list-controls">
   {% if id == 'signals' %}<label>标的范围<select id="signals-scope"><option value="all">全部 · 持仓优先</option><option value="holdings">只看我的持仓</option></select></label>{% endif %}
+  {% if id in ('signals', 'events') %}<label>买卖点<select id="{{ id }}-point-type">{{ point_options() }}</select></label>{% endif %}
   <label class="monitor-search">搜索<input id="{{ id }}-search" type="search" placeholder="{{ placeholder }}" autocomplete="off"></label>
   <label>每页<select id="{{ id }}-page-size"><option value="25">25 条</option><option value="50" selected>50 条</option><option value="100">100 条</option></select></label>
 </div>
@@ -28,6 +32,8 @@
   <script src="{{ url_for('static', filename='js/account_preferences.js') }}?asset={{ static_asset_token }}"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/signal_monitor.css') }}?asset={{ static_asset_token }}">
   <script defer src="{{ url_for('static', filename='js/signal_monitor.js') }}?asset={{ static_asset_token }}"></script>
+  <script defer src="{{ url_for('static', filename='js/notification_layout.js') }}?asset={{ static_asset_token }}"></script>
+  <script defer src="{{ url_for('static', filename='js/notification_channels.js') }}?asset={{ static_asset_token }}"></script>
 </head>
 <body class="cp-ui cp-content-page cp-monitor">
 <a class="cp-skip-link" href="#main-content">跳到信号监听</a>
@@ -55,6 +61,7 @@
         <div id="notifications-filters" class="notification-filters" data-expanded="false">
           <label class="notification-search">搜索<input id="notifications-search" type="search" placeholder="代码、名称或信号类型" autocomplete="off"></label>
           <label>时间范围<select id="notifications-hours"><option value="24">最近24小时</option><option value="168">最近7天</option><option value="720">最近30天</option><option value="all">全部记录</option></select></label>
+          <label>买卖点<select id="notifications-point-type">{{ point_options() }}</select></label>
           <button id="notifications-filters-toggle" type="button" aria-expanded="false" aria-controls="notifications-status notifications-kind notifications-frequency notifications-scope">更多筛选</button>
           <label class="notification-extra-filter">发送状态<select id="notifications-status"><option value="all">全部状态</option><option value="sent">已发送</option><option value="pending">待发送 / 重试</option><option value="failed">发送失败</option><option value="expired">已过期</option><option value="suppressed">静默记录 · 未发送</option></select></label>
           <label class="notification-extra-filter">通知类型<select id="notifications-kind"><option value="all">全部类型</option><option value="signal">买卖点</option><option value="consolidation">盘整背驰</option><option value="risk">持仓风险</option><option value="screening">选股汇总</option><option value="chart">图表补发</option></select></label>
@@ -63,17 +70,31 @@
         </div>
         <p id="notifications-message" class="notification-message" role="status" aria-live="polite"></p>
         <div id="notifications-snapshot" class="notification-snapshot" hidden><span id="notifications-snapshot-note"></span><button id="notifications-newer" type="button" hidden>有新通知 · 查看最新</button></div>
-        <div class="notification-columns">
-          <div class="notification-list-column">
+        <div id="notification-columns" class="notification-columns">
+          <div id="notification-list-column" class="notification-list-column">
             <div class="notification-list-caption"><strong>发送记录</strong><span id="notifications-total" class="muted">正在读取…</span></div>
             <div id="notifications-list" class="notification-list" aria-label="通知列表"></div>
             <p id="notifications-empty" class="notification-empty" hidden>暂无匹配的通知记录。</p>
             <nav class="monitor-pagination" aria-label="最近通知分页"><button id="notifications-prev" type="button" disabled>上一页</button><span id="notifications-page" role="status">—</span><button id="notifications-next" type="button" disabled>下一页</button></nav>
           </div>
+          <div id="notification-list-resizer" class="notification-list-resizer" role="separator" tabindex="0"
+               aria-label="调整信号列表宽度" aria-orientation="vertical" aria-controls="notification-list-column notification-detail"
+               aria-valuemin="220" aria-valuemax="1200" aria-valuenow="320"
+               title="拖动或使用左右方向键调整宽度，双击恢复默认"></div>
           <article id="notification-detail" class="notification-detail" aria-label="选中通知详情">
             <div class="notification-detail-heading"><span id="notification-detail-eyebrow">通知详情</span><button id="notifications-back" type="button">返回列表 ↑</button></div>
             <p id="notification-selection-note" class="muted" role="status" hidden></p>
-            <div id="notification-detail-content"><div class="notification-detail-empty"><strong>查看通知的完整信息</strong><p>从左侧选择一条通知，查看发送状态、触发依据和各周期图表。</p></div></div>
+            <div class="notification-detail-tabs" role="tablist" aria-label="通知展示">
+              <button id="notification-info-tab" type="button" role="tab" aria-selected="true" aria-controls="notification-detail-content" tabindex="0">通知详情</button>
+              <button id="notification-chart-tab" type="button" role="tab" aria-selected="false" aria-controls="notification-chart-panel" tabindex="-1">图表</button>
+            </div>
+            <div id="notification-detail-content" role="tabpanel" aria-labelledby="notification-info-tab"><div class="notification-detail-empty"><strong>查看通知的完整信息</strong><p>从左侧选择一条通知，查看发送状态、触发依据和各周期图表。</p></div></div>
+            <section id="notification-chart-panel" role="tabpanel" aria-labelledby="notification-chart-tab" hidden>
+              <div id="notification-chart-controls" class="notification-chart-controls" hidden>
+                <label id="notification-chart-selector-label">选择信号<select id="notification-chart-selector" aria-label="通知中的信号"></select></label>
+              </div>
+              <div id="notification-chart-host" class="notification-chart-host"><p class="muted">选择一条通知后，点击图表查看对应行情。</p></div>
+            </section>
           </article>
         </div>
       </section>
@@ -111,7 +132,7 @@
     </details>
     <details class="monitor-policy"><summary>调度与行情更新说明</summary>
     <p class="muted">选股与监听共享最多 16 个计算进程；有实时监听待办时优先分配监听算力，空闲资源可交给选股，内存不足时自动减量。实时 1m、5m／30m 和后台巡检轮转处理，持仓与待发送通知的复核优先。我的持仓始终检查一、二、三类买卖点，普通标的沿用选股的类型筛选。</p>
-    <p class="muted">监听最近一轮选股候选及自选组中的标的；自选标的无需先入选或出现信号。各所选 K 线周期独立计算已确认中枢与买卖点，随对应市场的新收盘 K 线更新。提醒在本页保留，可开启钉钉推送，关闭网页后后台任务仍继续。</p>
+    <p class="muted">监听最近一轮选股候选及自选组中的标的。30m 判断背景及逆势风险，5m 的六类交易点均需对应区间内 1m 确认，1m 单独提供短差提醒。三个周期随各自已收盘 K 线更新；30m 不单独发布交易点。提醒在本页保留，关闭网页后后台任务仍继续。</p>
     <p class="muted">1m 分层跟踪：持仓、自选和有当前有效买卖点的标的每分钟检查；其余自动候选在成功核验无有效 1m 信号后，每 5 分钟巡检一次，发现有效信号后恢复每分钟检查。后台巡检仍计算 1m 走势，可能较晚发现或错过短暂信号。5m、30m 的检查频率保持不变；数据异常和待核验结果不会当作无信号降频。</p>
     <p class="muted">“我的持仓”分组同时接收盘整背驰提前预警及确认通知。提前预警结合未完成线段的力度减弱、已收盘行情的动能收缩与局部转折，后续可能确认或失效。数据异常时等待复核，失效预警保留在变化记录中。启用前的历史信号不补发；移出持仓分组后停止该标的的盘整背驰提醒。</p>
     <p class="muted">A 股在午间 11:30 和下午 15:00 收盘后各选股一次，分别使用当时最新已收盘 K 线；其他市场按自身完整交易时段取数。实时监听随各市场新 K 线更新。缺少行情、价格基准或交易时段的标的会列入诊断，不当作无信号。</p>
@@ -122,12 +143,38 @@
     <header><h2>钉钉通知</h2><label><input id="dingtalk-enabled" type="checkbox" disabled> 推送选股完成与监听新信号</label></header>
     <strong id="dingtalk-status">正在读取通知状态…</strong><p id="dingtalk-detail" class="muted"></p>
     <p class="muted">选股完成发送任务回执；实时监听按下方条件发送未确认预警、确认及失效更新，并保留持仓盘整背驰及风险提醒。上方开关控制全部钉钉推送，单次静默选股不影响后续实时提醒。同一信号的相同状态去重，发送失败会重试，过期的实时提醒不补发。</p>
+    <form id="notification-channels-form" class="notification-channels-form" autocomplete="off" aria-labelledby="notification-channels-title">
+      <h3 id="notification-channels-title">通知接收地址</h3>
+      <p class="muted">“我的持仓”中的股票单独推送到持仓机器人，包括信号、风险提醒和附图；其他股票通知与选股任务回执发送到其他机器人。两组地址必须不同，某组未配置时不会转发到另一组。</p>
+      <fieldset id="notification-channels-fields" disabled>
+        <div class="notification-channel-grid">
+          {% for key, label, description in [('holdings', '我的持仓', '持仓股票的信号、盘整背驰、风险提醒及附图'), ('others', '其他通知', '非持仓股票的信号、附图及选股任务回执')] %}
+          <fieldset class="notification-channel-card">
+            <legend>{{ label }}</legend><p class="muted">{{ description }}</p>
+            <p id="notification-channel-{{ key }}-status" class="notification-channel-status" role="status">正在读取…</p>
+            <label for="notification-channel-{{ key }}-webhook">钉钉机器人 Webhook</label>
+            <input id="notification-channel-{{ key }}-webhook" name="{{ key }}-webhook" type="password" inputmode="url" autocomplete="new-password" maxlength="2048" placeholder="粘贴完整的钉钉机器人地址，留空保持原值">
+            <label class="notification-channel-check"><input id="notification-channel-{{ key }}-clear-webhook" type="checkbox">清除这组地址，停止这组推送</label>
+            <label for="notification-channel-{{ key }}-secret">加签密钥（选填）</label>
+            <input id="notification-channel-{{ key }}-secret" name="{{ key }}-secret" type="password" autocomplete="new-password" maxlength="2048" placeholder="机器人启用加签时填写，留空保持原值">
+            <label class="notification-channel-check"><input id="notification-channel-{{ key }}-clear-secret" type="checkbox">清除已保存的加签密钥</label>
+            <label for="notification-channel-{{ key }}-keyword">安全关键词（选填）</label>
+            <input id="notification-channel-{{ key }}-keyword" name="{{ key }}-keyword" type="text" maxlength="80" placeholder="机器人要求的关键词，例如：缠论">
+          </fieldset>
+          {% endfor %}
+        </div>
+        <p class="muted">地址和密钥仅脱敏显示。保存后用于后续发送与重试，无需重启；通知总开关保持当前状态。</p>
+        <button id="notification-channels-save" class="primary" type="submit" disabled>保存通知地址</button>
+      </fieldset>
+      <p id="notification-channels-message" class="muted" role="status" aria-live="polite">正在读取通知地址…</p>
+      <button id="notification-channels-reload" type="button" hidden>重新读取通知地址</button>
+    </form>
     <form id="notification-policy-form" class="notification-policy" aria-labelledby="notification-policy-title">
       <h3 id="notification-policy-title">买卖点通知条件</h3>
       <p id="notification-policy-help" class="muted">所选买卖点类型包含未确认预警、确认及失效更新；持仓盘整背驰及风险提醒沿用现有设置。</p>
       <fieldset id="notification-policy-fields" aria-describedby="notification-policy-help notification-policy-empty-help" disabled>
         <fieldset class="notification-policy-periods">
-          <legend>通知周期</legend>
+          <legend>我的持仓通知周期</legend>
           <div class="notification-policy-choices">
             <label for="notification-frequency-1m"><input id="notification-frequency-1m" type="checkbox" name="notification-frequency" value="1m">1m</label>
             <label for="notification-frequency-5m"><input id="notification-frequency-5m" type="checkbox" name="notification-frequency" value="5m">5m</label>
@@ -149,14 +196,17 @@
           <fieldset class="notification-policy-group">
             <legend>其他标的</legend>
             <div class="notification-policy-choices">
+              <label for="notification-ordinary-frequency-5m"><input id="notification-ordinary-frequency-5m" type="checkbox" name="ordinary-frequency" value="5m">5m 通知</label>
+            </div>
+            <div class="notification-policy-choices">
               <label for="notification-ordinary-1buy"><input id="notification-ordinary-1buy" type="checkbox" name="ordinary-point" value="1buy">一买</label>
               <label for="notification-ordinary-2buy"><input id="notification-ordinary-2buy" type="checkbox" name="ordinary-point" value="2buy">二买</label>
               <label for="notification-ordinary-3buy"><input id="notification-ordinary-3buy" type="checkbox" name="ordinary-point" value="3buy">三买</label>
             </div>
-            <p class="muted">非持仓只推送买点，卖点不推送</p>
+            <p class="muted">非持仓仅推送 5m 买点及其预警确认、失效更新；卖点保留识别与页面展示。1m 用于区间确认，30m 用于背景判断。</p>
           </fieldset>
         </div>
-        <p id="notification-policy-empty-help" class="muted">周期可多选；全部不选时关闭买卖点通知。任一标的分组不选类型时，关闭该组买卖点通知。</p>
+        <p id="notification-policy-empty-help" class="muted">两组通知周期独立保存；某组不选周期或类型时关闭该组买卖点通知。持仓风险提醒与辅助确认继续按原规则计算。</p>
         <div class="notification-policy-actions"><button id="notification-policy-save" class="primary" type="submit">保存通知条件</button></div>
       </fieldset>
       <p id="notification-policy-message" class="muted" role="status" aria-live="polite">正在读取已保存的通知条件…</p>

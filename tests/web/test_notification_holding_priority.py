@@ -257,7 +257,8 @@ def test_chart_due_holding_keeps_its_tier_after_waiting_and_uses_current_members
         if lane == 'history':
             db.execute("UPDATE jobs SET initial_image_hash='old-image'")
     assert box.charts.process_one(lane)
-    assert calls == ['current-held'] and checked == [('current-held', True)]
+    assert calls == ['current-held']
+    assert checked == ([('current-held', True)] if lane == 'initial' else [])
     with box.charts._read_db() as db:
         saved = json.loads(db.execute("SELECT event FROM jobs WHERE json_extract(event,'$.id')='current-held'").fetchone()[0])
     assert saved == rows[1], 'priority metadata must not rewrite frozen chart evidence'

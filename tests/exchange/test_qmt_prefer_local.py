@@ -64,7 +64,11 @@ def qmt(monkeypatch):
         assert exchange_qmt._XTDATA_NATIVE_LOCK._is_owned()
         events.append("read")
         reads.append(kwargs)
-        return responses.pop(0)
+        response = responses.pop(0)
+        for values in response.values():
+            if len(values.index) == 1:
+                values.index = kwargs['stock_list']
+        return response
 
     def factors(*_args):
         assert exchange_qmt._XTDATA_NATIVE_LOCK._is_owned()
@@ -89,6 +93,24 @@ def _request(qmt, frequency="1m", *, args=None, start="2026-09-04", end="2026-09
         "SZ.301004", frequency, start_date=start, end_date=end,
         args={"prefer_local": True} if args is None else args,
     )
+
+
+@pytest.mark.parametrize('fault', ['symbol', 'field_index', 'field_columns'])
+def test_source_identity_and_field_alignment_must_match_before_prices_are_used(qmt, monkeypatch, fault):
+    raw = _raw(_closes())
+    for value in raw.values():
+        value.index = ['301004.SZ']
+    if fault == 'symbol':
+        for value in raw.values():
+            value.index = ['600000.SH']
+    elif fault == 'field_index':
+        raw['close'].index = ['600000.SH']
+    else:
+        raw['close'].columns = list(reversed(raw['close'].columns))
+    monkeypatch.setattr(exchange_qmt.xtdata, 'get_market_data', lambda **_kwargs: raw)
+    with pytest.raises(ValueError, match='identity or field axes'):
+        qmt.ex.klines.__wrapped__(qmt.ex, 'SZ.301004', '1m', start_date='2026-09-04',
+                                 end_date='2026-09-06 15:00:00', args={'skip_download':True})
 
 
 def test_screening_local_reader_preserves_prices_and_disables_server_history(qmt,monkeypatch):

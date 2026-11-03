@@ -76,6 +76,7 @@ from chanlun.core.strict_structure.rule_state import (
     transition_rule_state,
 )
 from chanlun.core.strict_structure.strength import MacdStrengthProvider
+from chanlun.core.strict_structure.indicator_source import strength_macd
 from chanlun.core.strict_structure.native_center_signals import build_native_center_signals
 
 CHART_STRUCTURE_SCHEMA = "chanlun-chart-structure"
@@ -1284,7 +1285,7 @@ def build_native_center_snapshot(
     if preview_complete:
         try:
             pending_points = build_point_previews(
-                segment_units, tuple(center_result.signal_centers), strength, bars, cd.get_idx()['macd']['hist'],
+                segment_units, tuple(center_result.signal_centers), strength, bars, strength.histogram,
                 as_of=as_of, serialize_center=lambda center: _with_prices(strict_center_to_chart_dict(center), quantum))
             alerts.extend(_with_prices(item, quantum) for item in pending_points)
         except (ValueError, ArithmeticError) as exc:
@@ -1412,7 +1413,7 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
     quantum = cd._strict_price_quantum()
     evidence = cd.get_strict_evidence()
     try:
-        macd = cd.get_idx()["macd"]
+        macd = strength_macd(cd)
         zero_axis_state = macd_zero_axis_operational_state(
             tuple(bar.date for bar in raw_bars), macd["dif"], macd["dea"],
             physical_frequency=interval, as_of=as_of,
@@ -1431,6 +1432,7 @@ def build_center_snapshot(cd, *, interval: str, display_bar_closed_at: tuple[int
         )
     zero_axis_state = {
         **zero_axis_state,
+        'indicator_source': 'macd_htf',
         "bar_market_at": _optional_epoch(zero_axis_state["bar_market_at"]),
         "known_at": _optional_epoch(zero_axis_state["known_at"]),
         "price_basis_revision": cd._strict_price_basis_revision(),

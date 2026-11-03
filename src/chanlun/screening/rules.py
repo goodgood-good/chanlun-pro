@@ -21,6 +21,7 @@ from chanlun.core.strict_structure.native_consolidation import NATIVE_CONSOLIDAT
 from chanlun.screening.sessions import exempt_closes
 from chanlun.screening.confirmation import confirmation_catalog, confirmation_reasons, is_confirmed, native_selection_lifetime_reasons
 from chanlun.screening.nesting import is_nested_observation
+from chanlun.screening.validation_cache import reuse_validation
 
 CN = ZoneInfo("Asia/Shanghai")
 FREQUENCIES = ("1m", "5m", "30m")
@@ -77,6 +78,9 @@ REASON_LABELS = {
     "STALE_DATA": "行情未覆盖要求的最新已收盘 K 线",
     "INVALID_BARS": "行情存在重复、乱序或无效价格",
     "INSUFFICIENT_HISTORY": "历史 K 线不足 200 根",
+    "SYMBOL_METADATA_UNAVAILABLE": "官方股票名称暂不可核验，未完成 ST / 退市名称筛选",
+    "ST_NAME_EXCLUDED": "官方股票名称包含 ST 或退，按选股条件排除",
+    "CLOSING_BAR_UNVERIFIED": "末根 K 线尚未通过完成核验，未取得可靠的已收盘输入",
     "DATA_GAPS": "行情存在未核实的缺口，需补齐数据或核实停牌",
     "LISTING_METADATA_CONFLICT": "上市日期与已有成交记录冲突，需核对行情元数据",
     "DEPENDENCY_MISSING": "缺少买点形成所需的完整来源区间",
@@ -336,6 +340,7 @@ def frame_gaps(frame: pd.DataFrame, context: dict, start: int, *, raw=False) -> 
     return sorted(expected - present - exempt)
 
 
+@reuse_validation
 def frame_quality(frame: pd.DataFrame, context: dict) -> dict:
     """Quality is independent of whether an algorithm managed to find a point."""
     errors = validate_frame(frame, context)
@@ -360,11 +365,14 @@ def frame_quality(frame: pd.DataFrame, context: dict) -> dict:
     return result
 
 
+@reuse_validation
 def validate_frame(frame: pd.DataFrame, context: dict) -> list[str]:
     if frame is None or frame.empty:
         return ["STALE_DATA"]
     if frame.attrs.get("qmt_listing_history_conflict") is True:
         return ["LISTING_METADATA_CONFLICT"]
+    if frame.attrs.get('_screening_closing_refresh_error') is True:
+        return ['CLOSING_BAR_UNVERIFIED']
     required = {"date", "open", "high", "low", "close", "volume"}
     if not required.issubset(frame.columns):
         return ["INVALID_BARS"]
@@ -1206,12 +1214,17 @@ def _native_consolidation_warning_source_valid(snapshot, alert):
             if (by_id[ids[0]]["direction"] != tail["direction"] or by_id[ids[-1]]["direction"] != tail["direction"]
                     or any(position[b] != position[a] + 1 for a, b in zip(ids, ids[1:]))):
                 return False
-        owned = set(center.get("frame_body_unit_ids", [])) | set(center["establishment_segment_ids"])
+        comparison_sources = set(center.get("frame_body_unit_ids", [])) | set(center["establishment_segment_ids"])
+        # The whole center proof above already checks this exact reference's
+        # identity, locked causal chain and price basis. Match the generator's
+        # pending comparison source without adding it to the formal body.
+        if center.get("pending_leave_unit_id") is not None:
+            comparison_sources.add(center["pending_leave_unit_id"])
         form = alert["comparison_form"]
         if form == "center_oscillation":
             bridge = units[position[c_ids[0]] - 1]
             if (len(a_ids) != 1 or position[c_ids[0]] != position[a_ids[0]] + 2
-                    or a_ids[0] not in owned or bridge["unit_id"] not in owned
+                    or a_ids[0] not in comparison_sources or bridge["unit_id"] not in comparison_sources
                     or not all(max(u["low_tick"], center["core"]["zd_tick"])
                                <= min(u["high_tick"], center["core"]["zg_tick"])
                                for u in (by_id[a_ids[0]], bridge, tail))):
@@ -1220,7 +1233,7 @@ def _native_consolidation_warning_source_valid(snapshot, alert):
             if a_ids[-1] != _native_comparison_entry_id(center, units, by_id, position, tail["direction"]):
                 return False
             if len(c_ids) == 1:
-                if units[position[c_ids[0]] - 1]["unit_id"] not in owned or not (
+                if units[position[c_ids[0]] - 1]["unit_id"] not in comparison_sources or not (
                         tail["end_tick"] > center["core"]["zg_tick"] if tail["direction"] == "up"
                         else tail["end_tick"] < center["core"]["zd_tick"]):
                     return False

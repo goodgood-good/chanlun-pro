@@ -334,12 +334,22 @@ class CL(ICL):
                 start = (bisect_right(all_klines, previous_closed, key=lambda k: k.date)
                          if previous_closed is not None else 0)
                 stop = len(all_klines) if last_bar_closed else len(all_klines) - 1
-                for k in all_klines[start:stop]:
-                    # 明确收盘的输入在自身事件可用；默认盘中输入在下一根
-                    # 到来时才获得前根收盘事实，不能把完成时间倒填一根。
-                    self._stroke_close_times[k.date] = (
-                        k.date + bar_close_offset if last_bar_closed else all_klines[k.index + 1].date
-                    )
+                if last_bar_closed and bar_close_offset == datetime.timedelta():
+                    # Timestamp + zero preserves the same instant. Plain
+                    # datetime arithmetic has different fold semantics, so
+                    # retain its original addition path even at zero offset.
+                    for k in all_klines[start:stop]:
+                        closed_at = k.date
+                        self._stroke_close_times[closed_at] = (
+                            closed_at if type(closed_at) is pd.Timestamp else closed_at + bar_close_offset
+                        )
+                else:
+                    for k in all_klines[start:stop]:
+                        # 明确收盘的输入在自身事件可用；默认盘中输入在下一根
+                        # 到来时才获得前根收盘事实，不能把完成时间倒填一根。
+                        self._stroke_close_times[k.date] = (
+                            k.date + bar_close_offset if last_bar_closed else all_klines[k.index + 1].date
+                        )
                 self._stroke_closed_through = closed
         if not src_klines and previous_closed == self._stroke_closed_through:
             return self
@@ -374,9 +384,9 @@ class CL(ICL):
         *,
         validated_incremental_prefix: bool = False,
     ) -> None:
-        """更新仅供图表显示的首个高周期 MACD 覆盖层。
+        """更新首个高周期的原始、因果 MACD；用于力度判定和区间统计。
 
-        此序列只用于指标展示，不参与笔、线段或本周期中枢的构造。
+        图表可以平滑绘制副本；原始值不参与笔、线段或中枢几何构造。
         """
 
         fast = int(self.config["idx_macd_fast"])

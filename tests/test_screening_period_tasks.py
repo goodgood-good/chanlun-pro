@@ -81,9 +81,13 @@ def test_first_5m_commit_is_readable_before_1m_starts_and_symbol_counts_finish_s
             assert state['total'] == 6 and state['total_symbols'] == 2
             assert state['progress_unit'] == 'symbol_period'
             assert state['completed_symbols'] == max(0, index - 4)
+            assert sum(value['completed'] for value in state['period_progress'].values()) == index
+            assert all(value['total'] == 2 for value in state['period_progress'].values())
             if index == 1:
                 assert records[0]['requested_frequencies'] == ['5m']
                 assert all(r['frequency'] != '1m' for item in records for r in item['rows'])
+                assert state['period_progress']['5m']['completed'] == 1
+                assert state['period_progress']['1m']['completed'] == 0
             checked.append(index)
     state, records = run_fixture(stream)
     assert checked == [1, 2, 3, 4, 5, 6]

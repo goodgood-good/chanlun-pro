@@ -111,4 +111,6 @@ def test_tv_payload_smooths_htf_without_mutating_runtime_macd() -> None:
     assert payload is not None
     assert payload["strict_structure_mode"] == "replace"
     assert payload["higher_macd_dif"] == [2.0, 2.0, 2.0, 4.0, 6.0, 8.0, 6.0, 4.0]
+    assert payload['higher_macd_raw_dif'] == strict_dif
+    assert payload['higher_macd_raw_hist'] == cd._strict_htf_macd_by_level[0]['hist']
     assert cd._strict_htf_macd_by_level[0]["dif"] == strict_dif

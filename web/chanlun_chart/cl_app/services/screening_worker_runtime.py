@@ -36,9 +36,10 @@ def dispatch(root, directory, request, *, project, env, popen, creationflags):
         pid = host['pid']
     else:
         with (root/'worker_host.log').open('ab') as log:
-            process = popen([sys.executable, '-m', 'chanlun.screening.worker_host',
+            native_env={**env,'PYTHONPATH':str(project/'web'/'chanlun_chart')+os.pathsep+env.get('PYTHONPATH','')}
+            process = popen([sys.executable, '-m', 'cl_app.services.native_preparation_host',
                              '--root', str(root.resolve()), '--generation', runtime['generation']],
-                            cwd=project, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                            cwd=project, env=native_env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                             creationflags=creationflags)
         pid = process.pid
         identity = process_identity(pid)

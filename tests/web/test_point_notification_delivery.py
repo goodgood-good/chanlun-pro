@@ -15,7 +15,7 @@ class ImageTransport(Transport):
         self.messages.append(title + '\n' + content)
 
 
-@pytest.mark.parametrize('kind', ['signals', 'chart', 'chart-complete'])
+@pytest.mark.parametrize('kind', ['signals', 'chart'])
 @pytest.mark.parametrize('boundary', ['validation', 'formatting'])
 def test_policy_change_fences_inflight_authorization_without_spending_send_budget(tmp_path, monkeypatch, kind, boundary):
     clock = [1000.]
@@ -82,6 +82,17 @@ def test_policy_change_fences_inflight_authorization_without_spending_send_budge
     box.signal_validator = lambda events: ([], [])
     box.deliver_one()
     assert not transport.messages and box.snapshot()['pending'] == 0
+
+
+def test_undelivered_notice_cannot_authorize_a_historical_completion(tmp_path):
+    transport=ImageTransport()
+    box=DingTalkOutbox(tmp_path/'outbox.sqlite',transport=transport,now=lambda:1000.)
+    assert not box.enqueue_chart(event('confirmed'),'https://example.test/chart.png',complete=True)
+    box.signal_validator=lambda _events:pytest.fail('page-only completion should never enter the delivery lane')
+    box.deliver_one();box.invalidate_point_notification_policy();box.deliver_one()
+    assert not transport.messages
+    with box._connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0] == 0
 
 
 def test_mixed_batch_prunes_nonholding_sell_and_disabled_buy_without_losing_enabled_buy(tmp_path):

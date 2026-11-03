@@ -40,6 +40,32 @@ def test_main_process_does_not_acquire_close_or_import_provider(monkeypatch, tmp
     assert not capacity.is_worker_quote_process()
 
 
+def test_request_cancellation_is_scoped_and_does_not_poison_the_next_request():
+    from threading import Event
+    cancel=Event()
+    with capacity.quote_request_scope(cancel):
+        assert not capacity.worker_quote_cancelled()
+        cancel.set()
+        assert capacity.worker_quote_cancelled()
+    assert not capacity.worker_quote_cancelled()
+
+
+def test_dual_sources_yield_capacity_quickly_without_a_provider_failure(worker_context,monkeypatch):
+    from chanlun import config
+    from time import monotonic
+    monkeypatch.setattr(config,'US_HISTORY_KLINE_SOURCE','dual')
+    @contextmanager
+    def busy(*args,**kwargs):
+        raise capacity.InterprocessLockTimeout('held')
+        yield
+    monkeypatch.setattr(capacity,'interprocess_file_lock',busy)
+    with capacity.worker_quote_scope(worker_context[0]):
+        start=monotonic()
+        with pytest.raises(capacity.QuoteConnectionBusy) as caught:
+            capacity.acquire_worker_quote_slot()
+        assert monotonic()-start<1 and caught.value.retryable is False
+
+
 def test_failed_worker_closes_provider_before_returning_capacity(worker_context, monkeypatch):
     run_dir, events = worker_context
     actual = capacity.interprocess_file_lock

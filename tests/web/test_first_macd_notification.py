@@ -58,6 +58,8 @@ def test_consolidation_warning_shows_the_doubled_area_estimate(combined):
 
 
 def test_warning_recovers_on_the_first_new_closed_bar_after_invalidation(setup,monkeypatch):
+    from tests.web.warning_helpers import refute_warning
+    refute_warning(monkeypatch)
     service,live,cutoff,warning=_preview_service(setup,monkeypatch)
     service.check_now();service.tick();live.consolidation=[];live.finish(cutoff);service.tick()
     invalid=service._load()['events'][0]

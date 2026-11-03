@@ -92,7 +92,7 @@ def read_calculation(path: Path, key: str):
         return None
 
 
-def read_append_proofs(path, frame, code, frequency, revision):
+def read_append_proofs(path, frame, code, frequency, revision, *, contract_revision=None):
     """Reuse immutable confirmation proofs only after verifying the entire old input prefix.
 
     The caller still builds today's structure and rechecks selection lifetime.
@@ -104,10 +104,15 @@ def read_append_proofs(path, frame, code, frequency, revision):
         raw=wrapper['payload'].encode('utf-8')
         if hashlib.sha256(raw).hexdigest()!=wrapper['sha256']:
             return {}
-        value=json.loads(raw);source=value.get('source_input') or {}
+        value=json.loads(raw)
+        source=value.get('source_input') or {}
         count=source.get('bars')
-        if (value.get('schema')!='screening-structure-v2' or value.get('calculation_revision')!=revision or type(count) is not int or not 0<count<len(frame)
+        revision_matches=(value.get('calculation_revision')==revision or contract_revision is not None
+                          and value.get('calculation_contract_revision')==contract_revision)
+        if (value.get('schema') not in {'screening-structure-v2', 'screening-rolling-proofs-v1'} or not revision_matches or type(count) is not int or not 0<count<len(frame)
                 or source.get('code')!=code or source.get('frequency')!=frequency):
+            return {}
+        if value.get('schema') == 'screening-rolling-proofs-v1' and value.get('window_start') != int(frame.date.iloc[0].timestamp()):
             return {}
         original=(path.parent/source['file']).resolve()
         if original.parent!=(path.parent/'inputs').resolve() or hashlib.sha256(original.read_bytes()).hexdigest()!=source['sha256']:
@@ -152,7 +157,8 @@ def _save_source_input(path, frame, code, frequency):
         temporary.unlink(missing_ok=True)
 
 
-def write_calculation(path: Path, key: str, row: dict, snapshot, reviewed, *, source_frame=None, calculation_revision=None):
+def write_calculation(path: Path, key: str, row: dict, snapshot, reviewed, *, source_frame=None, calculation_revision=None,
+                      selection=None, contract_revision=None):
     # Unresolved data or structural replay failures must get another cold check.
     if row.get("data_errors") or any(row["reason_counts"].get(reason) for reason in (
         "DATA_GAPS", "DEPENDENCY_MISSING", "CALENDAR_COVERAGE_UNKNOWN",
@@ -161,13 +167,31 @@ def write_calculation(path: Path, key: str, row: dict, snapshot, reviewed, *, so
         return
     payload={"schema": "screening-structure-v2", "key": key,
              "snapshot": snapshot, "reviewed": reviewed}
+    if selection is not None:
+        payload['selection'] = selection
     if calculation_revision is not None:
         payload['calculation_revision']=calculation_revision
+    if contract_revision is not None:
+        payload['calculation_contract_revision']=contract_revision
     if source_frame is not None:
         payload['source_input']=_save_source_input(
             path,source_frame,snapshot.get('symbol',row.get('code')),
             snapshot.get('source_frequency',row.get('frequency')),
         )
+    _write_calculation_payload(path,payload)
+
+
+def refresh_runtime_revision(path,cached,revision,contract_revision):
+    if cached.get('calculation_revision')==revision:
+        return cached
+    if cached.get('calculation_contract_revision')!=contract_revision:
+        raise ValueError('Unverified calculation contract cannot be relabelled')
+    current={**cached,'calculation_revision':revision}
+    _write_calculation_payload(path,current)
+    return current
+
+
+def _write_calculation_payload(path,payload):
     raw = json.dumps(payload,
                      ensure_ascii=False, allow_nan=False)
     wrapper = {"payload": raw, "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()}

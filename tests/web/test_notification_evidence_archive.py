@@ -85,6 +85,23 @@ def test_later_source_changes_cannot_modify_the_archived_bytes(tmp_path):
         archive.read(identity)
 
 
+def test_materialized_originals_survive_pruning_and_reject_changed_occurrence(tmp_path):
+    archive = NotificationEvidence(tmp_path/'archive', now=lambda:1000)
+    event, paths = source(tmp_path/'runs')
+    originals = [p.read_bytes() for p in paths]
+    archive.capture(event, tmp_path/'runs', 1000)
+    for path in paths:
+        path.unlink()
+    with archive.materialized_runs(event) as (mounted, saved):
+        mounted_paths=evidence_paths(mounted/event['evidence_run_id'],event['code'],event['frequency'])
+        assert [p.read_bytes() for p in mounted_paths]==originals
+        assert saved['event']==event
+    assert not mounted.exists()
+    with pytest.raises(ValueError,match='another notification'):
+        with archive.materialized_runs({**event,'source_closed_at':2000}):
+            pytest.fail('foreign occurrence was mounted')
+
+
 def test_invalidation_archives_both_frozen_sources_without_rewriting_the_reference(
     tmp_path,
 ):

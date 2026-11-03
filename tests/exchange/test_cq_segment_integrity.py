@@ -83,12 +83,19 @@ def test_segment_empty_return_is_complete():
     assert candles == []
 
 
-def test_segment_301600_is_reached_origin():
-    # 301600 = 合法到历史起点,非洞。
+def test_segment_specific_retention_limit_is_provider_boundary():
     def _boom(**kw):
-        raise _oae(301600)
+        exc = _oae(301600)
+        exc.message = 'out of minute kline begin date'
+        raise exc
     candles, status = _seg(_mk_ex(), _boom)
-    assert status == "reached_origin"
+    assert status == "provider_boundary"
+
+
+def test_general_301600_invalid_request_is_a_failure():
+    def invalid(**kw):
+        raise _oae(301600)
+    assert _seg(_mk_ex(), invalid)[1] == 'failed'
 
 
 def test_segment_other_api_error_is_failed():
@@ -173,10 +180,10 @@ def test_klines_accepts_date_only_boundaries_and_includes_the_end_day(monkeypatc
     assert windows[0][1].isoformat() == "2023-11-15T23:59:59.999999+08:00"
 
 
-def test_klines_reached_origin_not_treated_as_hole(monkeypatch):
+def test_klines_provider_boundary_not_treated_as_hole(monkeypatch):
     # 301600 到历史原点是正常数据耗尽,不得判为缺段(否则历史短的新股/美股 1m 频繁误拒)。
     def _seg(code, period, adjust, e, s, priority="interactive"):
-        return ([_candle(int(e.timestamp()))], "reached_origin")
+        return ([_candle(int(e.timestamp()))], "provider_boundary")
     ex = _klines_ex(monkeypatch, _seg)
     df = ex.klines("SH.600519", "5m", start_date="2023-11-01 00:00:00", end_date="2023-11-15 00:00:00")
     assert not df.attrs.get("fetch_incomplete")

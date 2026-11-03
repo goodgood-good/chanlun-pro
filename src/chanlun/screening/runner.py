@@ -28,6 +28,11 @@ from chanlun.screening.nesting import (
     STRATEGY, attach_confirmation, is_nested_observation, matching_confirmations,
 )
 from chanlun.screening.lower_first_timeline import observe_independent_lower_structural_witnesses
+from chanlun.screening.validation_cache import validation_scope
+from chanlun.screening.replay_snapshots import replay_scope, replay_snapshot
+from chanlun.screening import snapshot_presentation
+from chanlun.screening.selection_cache import read_selection, saved_selection, selection_key
+from chanlun.screening.closing_bar import completed_input_scope, verify_completed_input, record_download
 
 import requests
 
@@ -101,21 +106,36 @@ def snapshot_for(frame, code, frequency, *, include_consolidation=False):
                                       include_consolidation=include_consolidation)
 
 
+def _replay_snapshot(frame, code, frequency, *, include_consolidation=False):
+    with snapshot_presentation.facts_only():
+        return replay_snapshot(snapshot_for, frame, code, frequency,
+                               include_consolidation=include_consolidation)
+
+
 def _snapshot_from_runtime(frame, code, frequency, runtime, *, include_consolidation=False):
     from chanlun.cl_utils.tv_chart import cl_data_to_tv_chart
     market = frame.attrs.get("screening_market", "a")
     if runtime.cd is None:
         raise ValueError(f"{runtime.error_code}: {runtime.error_message}")
+    facts_only = snapshot_presentation.mode() is not None
+    options = {'_facts_only':True} if facts_only else {}
     chart = cl_data_to_tv_chart(frame, {"chart_show_bi": "1", "chart_show_xd": "1", "chart_show_fx": "1"},
-                               market=market, code=code, frequency=frequency, strict_runtime=runtime)
+                               market=market, code=code, frequency=frequency, strict_runtime=runtime, **options)
     if chart.get("strict_structure_mode") != "replace":
         raise ValueError(f"chart evidence unavailable: {chart.get('strict_structure_error')}")
     snapshot = chart["strict_structure"]
     snapshot["source_started_at"] = int(frame.date.iloc[0].timestamp())
+    from .history_repair import snapshot_provenance
+    repair = snapshot_provenance(frame)
+    if repair:
+        snapshot['history_repair'] = repair
     # Persist the exact display geometry from the screening runtime. Evidence
     # views must not rebuild historical lines with a later algorithm or input.
-    snapshot["chart"] = {k: v for k, v in chart.items()
-                         if k in ("fxs", "bis", "xds") or k.startswith(("macd_", "higher_macd_"))}
+    if not facts_only:
+        snapshot["chart"] = {k: v for k, v in chart.items()
+                             if k in ("fxs", "bis", "xds") or k.startswith(("macd_", "higher_macd_"))}
+    else:
+        snapshot_presentation.register(snapshot)
     if snapshot.get("analysis_scope") != "native_centers":
         raise ValueError("retired recursive chart scope cannot enter screening")
     snapshot["screening_segments"] = [
@@ -150,7 +170,7 @@ def _snapshot_from_runtime(frame, code, frequency, runtime, *, include_consolida
             preview_checks = {}
             alerts.extend(build_native_consolidation_previews(
                 tuple(runtime.cd.get_segment_units()), tuple(runtime.cd.get_native_centers().signal_centers),
-                consolidation_strength, frame, runtime.cd.get_idx()["macd"]["hist"],
+                consolidation_strength, frame, consolidation_strength.histogram,
                 as_of=runtime.cd._strict_as_of(), diagnostics=preview_checks,
             ))
             snapshot["native_consolidation_checks"] = preview_checks
@@ -205,7 +225,7 @@ def fetch_frame(code, frequency, context, *, repair_from=None):
         start = min(start, datetime.fromtimestamp(repair_from, CN).strftime("%Y%m%d"))
         frame = exchange.klines(code, frequency, start_date=start, end_date=end,
                                 args={"exact_end": True, 'local_only':True})
-        return _resolve_suspensions(frame, code, context)
+        return record_download(_resolve_suspensions(frame, code, context), code, frequency, context)
     args = {"exact_end": True, "skip_download": True, 'local_only':True}
     frame = exchange.klines(code, frequency, start_date=start, end_date=end, args=args)
     errors = validate_frame(frame, context)
@@ -216,7 +236,25 @@ def fetch_frame(code, frequency, context, *, repair_from=None):
     if not errors:
         frame = _resolve_suspensions(frame, code, context)
         quality = frame_quality(frame, context)
+        if quality['errors'] == ['DATA_GAPS'] and frequency in {'5m', '30m'}:
+            from .history_repair import fill_closed_gaps
+            missing = frame_gaps(frame, context, int(frame.date.iloc[0].timestamp()))
+            if missing:
+                first = datetime.fromtimestamp(missing[0], CN).strftime('%Y%m%d')
+                last = datetime.fromtimestamp(missing[-1], CN).strftime('%Y-%m-%d %H:%M:%S')
+                try:
+                    finer = exchange.klines(code, '1m', start_date=first, end_date=last,
+                        args={'exact_end': True, 'skip_download': True, 'local_only': True})
+                    repaired = fill_closed_gaps(frame, finer, missing, code=code, frequency=frequency)
+                    if not validate_frame(repaired, context):
+                        frame = repaired
+                        quality = frame_quality(frame, context)
+                except (OSError, ValueError, TypeError, KeyError):
+                    # The normal fetch may still repair the vendor's own data.
+                    # An unavailable minute source never makes a gap acceptable.
+                    pass
         if not quality["errors"] or "DATA_GAPS" not in quality["errors"]:
+            frame, _ = verify_completed_input(exchange, frame, code, frequency, context, start=start, end=end)
             return frame
     if errors or quality["errors"]:
         args = {"exact_end": True, 'local_only':True}
@@ -231,8 +269,27 @@ def fetch_frame(code, frequency, context, *, repair_from=None):
                 # Download from the actual last day, including its partial tail.
                 # The read still retains the full prefix, independent of today.
                 args["download_start_date"] = frame.date.iloc[-1].astimezone(CN).strftime("%Y%m%d")
-        frame = exchange.klines(code, frequency, start_date=start, end_date=end, args=args)
-    return _resolve_suspensions(frame, code, context)
+        repair_note = frame.attrs.get('history_repair') if frame is not None else None
+        refreshed = exchange.klines(code, frequency, start_date=start, end_date=end, args=args)
+        if repair_note and repair_note['bars'] and refreshed is not None:
+            # Retain valid reconstructed bars if the native source still has
+            # its historical hole; a vendor correction takes precedence.
+            import pandas as pd
+            repaired_closes = {entry['closed_at'] for entry in repair_note['bars']}
+            present = {int(stamp.timestamp()) for stamp in refreshed.date}
+            additions = frame[frame.date.map(lambda stamp: int(stamp.timestamp()) in repaired_closes - present)]
+            attrs = dict(refreshed.attrs)
+            if attrs.get('price_basis_revision') == frame.attrs.get('price_basis_revision') and len(additions):
+                refreshed = pd.concat([refreshed, additions], ignore_index=True).sort_values('date').reset_index(drop=True)
+                refreshed.attrs = attrs
+                kept = {int(stamp.timestamp()) for stamp in additions.date}
+                remaining = len(frame_gaps(refreshed, context, int(refreshed.date.iloc[0].timestamp())))
+                refreshed.attrs['history_repair'] = {**repair_note,
+                    'bars': [bar for bar in repair_note['bars'] if bar['closed_at'] in kept],
+                    'filled_bars': len(kept), 'remaining_bars': remaining,
+                    'reason': 'COMPLETE' if not remaining else 'MINUTE_HISTORY_INCOMPLETE'}
+        frame = refreshed
+    return record_download(_resolve_suspensions(frame, code, context), code, frequency, context)
 
 
 def _same_point(left, right):
@@ -301,7 +358,7 @@ def _review_candidates(snapshot, frame, candidates, code, frequency):
     """Every admitted result needs independent full and confirmation-prefix replay."""
     if not candidates:
         return [], []
-    rebuilt = snapshot_for(frame.copy(), code, frequency)
+    rebuilt = _replay_snapshot(frame.copy(), code, frequency)
     original_index, rebuilt_index = _evidence_index(snapshot), _evidence_index(rebuilt)
     grades = {candidate["point"]["structural_level"] for candidate in candidates}
     original_confirmations = {
@@ -321,14 +378,14 @@ def _review_candidates(snapshot, frame, candidates, code, frequency):
         at = point["available_at"]
         if at not in prefixes:
             prefix = frame.loc[frame.date <= datetime.fromtimestamp(at, CN)].copy()
-            prefixes[at] = _evidence_index(snapshot_for(prefix, code, frequency))
+            prefixes[at] = _evidence_index(_replay_snapshot(prefix, code, frequency))
         prefix_matches = _same_point_graph(point, original_index, prefixes[at])
         if not prefix_matches:
             candidate["reasons"].append("CONFIRMATION_REPLAY_FAILED")
         earlier = frame.loc[frame.date < datetime.fromtimestamp(at, CN)]
         before_at = None if earlier.empty else int(earlier.date.iloc[-1].timestamp())
         if before_at is not None and before_at not in prefixes:
-            prefixes[before_at] = _evidence_index(snapshot_for(earlier.copy(), code, frequency))
+            prefixes[before_at] = _evidence_index(_replay_snapshot(earlier.copy(), code, frequency))
         already_confirmed = before_at is not None and any(
             p["point_id"] == point["point_id"] and p["status"] == "confirmed"
             for p in prefixes[before_at][0].values()
@@ -347,7 +404,7 @@ def _review_native_center_signals(snapshot, frame, candidates, code, frequency):
 
     if not candidates:
         return [], []
-    rebuilt = snapshot_for(frame.copy(), code, frequency)
+    rebuilt = _replay_snapshot(frame.copy(), code, frequency)
     if rebuilt.get("analysis_scope") != "native_centers":
         raise ValueError("native center replay returned another analysis scope")
     selected, rejected, prefixes = [], [], {}
@@ -378,7 +435,7 @@ def _review_native_center_signals(snapshot, frame, candidates, code, frequency):
                 prefixes[known_at] = rebuilt
             else:
                 prefix = frame.loc[frame.date <= datetime.fromtimestamp(known_at, CN)].copy()
-                prefixes[known_at] = snapshot_for(prefix, code, frequency)
+                prefixes[known_at] = _replay_snapshot(prefix, code, frequency)
         prefix_matches = matches(candidate, prefixes[known_at])
         if not prefix_matches:
             candidate["reasons"].append("CONFIRMATION_REPLAY_FAILED")
@@ -391,7 +448,7 @@ def _review_native_center_signals(snapshot, frame, candidates, code, frequency):
         earlier = frame.loc[frame.date < datetime.fromtimestamp(known_at, CN)]
         before_at = None if earlier.empty else int(earlier.date.iloc[-1].timestamp())
         if before_at is not None and before_at not in prefixes:
-            prefixes[before_at] = snapshot_for(earlier.copy(), code, frequency)
+            prefixes[before_at] = _replay_snapshot(earlier.copy(), code, frequency)
         already_confirmed = before_at is not None and any(
             item["point_id"] == point["point_id"]
             for item in prefixes[before_at]["levels"][0]["points"]
@@ -410,7 +467,7 @@ def _review_native_center_signals(snapshot, frame, candidates, code, frequency):
 def _review_consolidation_alerts(snapshot, frame, candidates, code, frequency):
     if not candidates:
         return [], []
-    rebuilt = snapshot_for(frame.copy(), code, frequency, include_consolidation=True)
+    rebuilt = _replay_snapshot(frame.copy(), code, frequency, include_consolidation=True)
     prefixes, selected, rejected = {}, [], []
     catalog = lambda source: {alert["alert_id"]: alert for alert in source.get("native_consolidation_alerts", [])}
     full = catalog(rebuilt)
@@ -426,11 +483,11 @@ def _review_consolidation_alerts(snapshot, frame, candidates, code, frequency):
             continue
         if known not in prefixes:
             prefix = frame.loc[frame.date <= datetime.fromtimestamp(known, CN)].copy()
-            prefixes[known] = catalog(snapshot_for(prefix, code, frequency, include_consolidation=True))
+            prefixes[known] = catalog(_replay_snapshot(prefix, code, frequency, include_consolidation=True))
         before = frame.loc[frame.date < datetime.fromtimestamp(known, CN)]
         previous = None if before.empty else int(before.date.iloc[-1].timestamp())
         if previous is not None and previous not in prefixes:
-            prefixes[previous] = catalog(snapshot_for(before.copy(), code, frequency, include_consolidation=True))
+            prefixes[previous] = catalog(_replay_snapshot(before.copy(), code, frequency, include_consolidation=True))
         candidate["audit"] = {
             "cold_rebuild": full.get(alert["alert_id"]) == alert,
             "confirmation_replay": prefixes[known].get(alert["alert_id"]) == alert,
@@ -465,13 +522,26 @@ def _select_consolidation_alerts(snapshot, frame, context, reviewed, code, frequ
     return reused + selected, rejected, bool(pending)
 
 
-def _save_evidence(run_dir, code, frequency, frame, snapshot):
+def _save_evidence(run_dir, code, frequency, frame, snapshot, *, namespace=None):
     from .evidence_publication import save_evidence
-    return save_evidence(run_dir, code, frequency, frame, snapshot)
+    snapshot_presentation.materialize(snapshot, frame, code, frequency)
+    return save_evidence(run_dir, code, frequency, frame, snapshot, namespace=namespace)
 
 
+@snapshot_presentation.presentation_scope()
+@replay_scope()
+@validation_scope()
+@completed_input_scope
 def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision=None,
-                _confirmation_only=False, _inputs=None, force_rebuild=False):
+                _confirmation_only=False, _inputs=None, force_rebuild=False, _interval_strength=False,
+                _frozen_frames=None, _publish_evidence=True):
+    from .timeframe_policy import enabled
+    if enabled(settings) and (_frozen_frames is not None or not _publish_evidence):
+        raise ValueError('Private prefix verification requires one raw physical period')
+    if enabled(settings) and not _confirmation_only:
+        from .timeframe_scan import scan
+        return scan(stock, settings, contexts, run_dir, cache_root=cache_root,
+                    revision=revision, force_rebuild=force_rebuild)
     structural_levels = tuple(settings.get("structural_levels", (0,)))
     if settings.get("strategy") == STRATEGY and structural_levels != (0,):
         raise ValueError("nested confirmation supports native structural level only")
@@ -482,6 +552,7 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
     rows = []
     code = stock["code"]
     include_consolidation = stock.get("holding") is True
+    include_strength = include_consolidation or _interval_strength
     for frequency in settings["frequencies"]:
         if Path(run_dir, "cancel").exists():
             break
@@ -492,6 +563,9 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
         if stock.get("holding_lookup_failed"):
             row["consolidation_error"] = "持仓名单读取失败，本周期盘整背驰尚未检查"
         context = {**contexts[frequency], "symbol": code}
+        prepared = stock.get('_completed_inputs', {}).get(frequency)
+        if prepared and prepared.get('cutoff') == context.get('cutoff'):
+            context['_screening_tail_prepared'] = prepared
         phase = "fetch"
         period_started = time.monotonic()
         timings = {}
@@ -499,32 +573,90 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
         try:
             if context.get('calendar_error'):
                 raise MarketDataContractError('SESSION_CALENDAR_UNAVAILABLE', context['calendar_error'])
-            frame = fetch_frame(code, frequency, context)
+            frame = (fetch_frame(code, frequency, context) if _frozen_frames is None
+                     else _frozen_frames[frequency].copy(deep=False))
             phase = "compute"
             row['processing_timeline']['fetched_at'] = time.time()
             timings['fetch'] = (time.monotonic()-period_started)*1000
             quality = frame_quality(frame, context)
+            if frame is not None and frame.attrs.get('history_repair'):
+                quality = {**quality, 'history_repair': frame.attrs['history_repair']}
             errors = quality["errors"]
             row.update(bars=0 if frame is None else len(frame), data_errors=errors, data_quality=quality,
                        source_closed_at=None if frame is None or frame.empty else int(frame.date.iloc[-1].timestamp()))
+            if frame is not None and frame.attrs.get('_screening_closing_refresh'):
+                row['closing_bar_refresh'] = frame.attrs['_screening_closing_refresh']
+            if frame is not None and frame.attrs.get('_screening_history_cache'):
+                row['history_refresh']=dict(frame.attrs['_screening_history_cache'])
             if errors:
                 rows.append(row)
                 continue
             from chanlun.screening.markets import storage_symbol
             cache_path = None if cache_root is None else Path(cache_root, f"{storage_symbol(code, stock.get('market', 'a'))}_{frequency}.json.gz")
-            calculation_revision = (revision or source_revision()) + (":holding-consolidation-v1" if include_consolidation else "")
-            key = None if cache_path is None else calculation_key(frame, code, frequency, calculation_revision)
+            from .calculation_revision import calculation_contract
+            runtime_revision=revision or source_revision()
+            mode=":native-strength-v2" if include_strength else ""
+            calculation_revision = runtime_revision + mode
+            contract_revision=calculation_contract(runtime_revision)+mode
+            key = None if cache_path is None else calculation_key(frame, code, frequency, contract_revision)
             cached = None if cache_path is None or force_rebuild else read_calculation(cache_path, key)
+            if (cached is not None and contract_revision!=calculation_revision
+                    and cached.get('calculation_revision')!=calculation_revision
+                    and cached.get('calculation_contract_revision')!=contract_revision):
+                cached=None
+            if (cached is not None and contract_revision!=calculation_revision
+                    and cached.get('calculation_revision')!=calculation_revision):
+                from .cache import refresh_runtime_revision
+                try:
+                    cached=refresh_runtime_revision(cache_path,cached,calculation_revision,contract_revision)
+                except OSError:
+                    pass  # The matching full-input/algorithm proof remains valid.
+            selection_identity = (selection_key(settings, context, quality)
+                                  if settings.get('alert_mode') == 'native_center_signals'
+                                  and not include_consolidation and not stock.get('holding_lookup_failed')
+                                  and not _confirmation_only else None)
+            selection = read_selection(cached, selection_identity)
+            row['selection_reused'] = False
+            if selection is not None and cached['snapshot'].get('analysis_scope') == 'native_centers':
+                row.update(selection['row'])
+                row.update(selection_reused=True, calculation_reused=True,
+                           structure_calculation={'mode': 'snapshot', 'reused_bars': len(frame), 'appended_bars': 0},
+                           replays_reused=len(row['selected']) + len(row['observations']))
+                timings.update(structure=0, validation=0)
+                persistence_started = time.monotonic()
+                if (selection['needs_evidence'] or frequency in settings.get('_warning_evidence_periods', [])) and _publish_evidence:
+                    phase = 'evidence'
+                    if cached['snapshot'].get(snapshot_presentation.PENDING):
+                        with snapshot_presentation.defer_presentation(cache_root, contract_revision, enabled=not force_rebuild):
+                            snapshot_presentation.register(cached['snapshot'])
+                    row['evidence'] = _save_evidence(run_dir, code, frequency, frame, cached['snapshot'])
+                timings['persistence'] = (time.monotonic()-persistence_started)*1000
+                if _inputs is not None:
+                    _inputs[frequency] = {'frame': frame, 'snapshot': cached['snapshot'],
+                                         'reviewed': cached['reviewed'], 'cache_path': cache_path, 'key': key,
+                                         'calculation_revision': calculation_revision,'contract_revision':contract_revision}
+                rows.append(row)
+                continue
             from chanlun.screening.cache import read_append_proofs
-            append_proofs = (read_append_proofs(cache_path,frame,code,frequency,calculation_revision)
+            append_proofs = (read_append_proofs(cache_path,frame,code,frequency,calculation_revision,contract_revision=contract_revision)
                              if cached is None and cache_path is not None and not force_rebuild else {})
+            rolling_reused = {}
+            if cached is None and cache_path is not None and not force_rebuild:
+                from .rolling_proofs import proof_path
+                rolling_reused = read_append_proofs(proof_path(cache_path), frame, code, frequency,
+                    calculation_revision, contract_revision=contract_revision)
+                append_proofs = {**rolling_reused, **append_proofs}
             structure_started = time.monotonic()
             from chanlun.screening.runtime_cache import incremental_snapshot_scope
-            with incremental_snapshot_scope(cache_root, calculation_revision, enabled=not force_rebuild,
-                                            priority=include_consolidation and frequency in {"1m", "5m", "30m"}) as continuation:
-                snapshot = cached["snapshot"] if cached is not None else (
-                    snapshot_for(frame, code, frequency, include_consolidation=True) if include_consolidation
-                    else snapshot_for(frame, code, frequency))
+            with snapshot_presentation.defer_presentation(cache_root, contract_revision, enabled=not force_rebuild,
+                                                         eager=context.get('live_updates') is True):
+                with incremental_snapshot_scope(cache_root, contract_revision, enabled=not force_rebuild,
+                                                priority=include_consolidation and frequency in {"1m", "5m", "30m"}) as continuation:
+                    snapshot = cached["snapshot"] if cached is not None else (
+                        snapshot_for(frame, code, frequency, include_consolidation=True) if include_strength
+                        else snapshot_for(frame, code, frequency))
+                if snapshot.get(snapshot_presentation.PENDING):
+                    snapshot_presentation.register(snapshot)
             row["structure_calculation"] = ({"mode": "snapshot", "reused_bars": len(frame), "appended_bars": 0}
                                              if cached is not None else continuation)
             reviewed = cached["reviewed"] if cached is not None else append_proofs
@@ -580,6 +712,12 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
                 result['observations'] = preview_reused + previews
                 rejected.extend(preview_rejected)
             consolidation_selected, consolidation_pending = [], False
+            historical_pending = False
+            row['historical_confirmed'] = []
+            if not _confirmation_only and frequency == '5m' and snapshot.get('analysis_scope') == 'native_centers':
+                from .retired_first_points import review_history
+                row['historical_confirmed'], historical_pending = review_history(
+                    snapshot, frame, result['rejected'], reviewed, _review_native_center_signals, code, frequency)
             if include_consolidation:
                 consolidation_rejected = []
                 try:
@@ -651,9 +789,10 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
                 and is_confirmed(item["point"])
                 for item in row["recent_rejections"]
             )
-            if not _confirmation_only and (
+            if _publish_evidence and not _confirmation_only and (
                 selected or observations or audit_rejected or entry_waiting or consolidation_selected or include_consolidation
-                or row.get("u295_lower_structural_witnesses")
+                or row.get("u295_lower_structural_witnesses") or row['historical_confirmed']
+                or frequency in settings.get('_warning_evidence_periods', [])
             ):
                 phase = "evidence"
                 row["evidence"] = _save_evidence(run_dir, code, frequency, frame, snapshot)
@@ -661,13 +800,17 @@ def scan_symbol(stock, settings, contexts, run_dir, *, cache_root=None, revision
             row["observations"] = observations
             row["calculation_reused"] = cached is not None
             row["replays_reused"] = len(reused) + len(preview_reused)
+            row['rolling_proofs_available'] = len(rolling_reused)
             if _inputs is not None:
                 _inputs[frequency] = {"frame": frame, "snapshot": snapshot, "reviewed": reviewed,
-                                      "cache_path": cache_path, "key": key}
-            if cache_path is not None and (cached is None or pending or preview_pending or consolidation_pending or not cached.get('source_input')):
+                                      "cache_path": cache_path, "key": key,
+                                      'calculation_revision': calculation_revision,'contract_revision':contract_revision}
+            if cache_path is not None and (cached is None or pending or preview_pending or consolidation_pending or historical_pending
+                                          or not cached.get('source_input') or selection_identity is not None):
                 try:
                     write_calculation(cache_path, key, row, snapshot, reviewed, source_frame=frame,
-                                      calculation_revision=calculation_revision)
+                                      calculation_revision=calculation_revision,contract_revision=contract_revision,
+                                      selection=saved_selection(row, selection_identity))
                 except OSError:
                     # Optional reuse storage cannot undo successfully persisted
                     # evidence or turn a usable result into an engine failure.
@@ -785,7 +928,9 @@ def _scan_nested_symbol(stock, settings, contexts, run_dir, *, cache_root=None, 
                 # checked afresh against both inputs on every scan.
                 lower_input["snapshot"].pop("screening_interval_signals", None)
                 write_calculation(lower_input["cache_path"], lower_input["key"], lower_row,
-                                  lower_input["snapshot"], lower_input["reviewed"], source_frame=lower_input['frame'])
+                                  lower_input["snapshot"], lower_input["reviewed"], source_frame=lower_input['frame'],
+                                  calculation_revision=lower_input.get('calculation_revision'),
+                                  contract_revision=lower_input.get('contract_revision'))
             except OSError:
                 pass
     except Exception as exc:
@@ -817,18 +962,37 @@ def _external_calendar_context(market, code, observed, frequency, recent_session
 
 def _scan_worker_symbol(stock, settings, contexts, run_dir, revision, request):
     from .compute_capacity import compute_slot
+    from .execution_metrics import io_counters, io_difference
     from chanlun.exchange.quote_capacity import worker_quote_scope
+    waiting = time.monotonic()
     with worker_quote_scope(run_dir), compute_slot(request, run_dir):
-        return _scan_worker_symbol_with_capacity(stock, settings, contexts, run_dir, revision, request)
+        entered, cpu, before = time.monotonic(), time.process_time(), io_counters()
+        result = _scan_worker_symbol_with_capacity(stock, settings, contexts, run_dir, revision, request)
+        computed, compute_cpu = time.monotonic(), time.process_time()
+    result['execution_metrics'] = {'schema':'screening-task-resources-v1',
+        'slot_wait_seconds':round(entered-waiting,4),
+        'wall_seconds':round(computed-entered,4),
+        'cpu_seconds':round(compute_cpu-cpu,4),
+        'cleanup_seconds':round(time.monotonic()-computed,4),
+        'io':io_difference(before,io_counters())}
+    return result
 
 
 def _scan_worker_symbol_with_capacity(stock, settings, contexts, run_dir, revision, request):
     cache_options = {"force_rebuild": True} if request.get("force_rebuild") is True else {}
     try:
+        if stock.get('_screening_name_missing'):
+            raise MarketDataContractError('SYMBOL_METADATA_UNAVAILABLE', '无法核对官方股票名称，尚未完成 ST / 退市名称过滤')
         symbol_settings={**settings,'frequencies':stock.get('_monitor_periods',settings['frequencies'])}
+        requested_warning_periods = request.get('warning_evidence_periods', {}).get(f"{stock.get('market','a')}:{stock['code']}", [])
+        if requested_warning_periods:
+            symbol_settings['_warning_evidence_periods'] = requested_warning_periods
         if request.get('holding_snapshot') is not None and stock.get('holding') is True:
             symbol_settings['point_types'] = list(POINT_TYPES)
         symbol_contexts = dict(contexts)
+        for period, proof in stock.get('_completed_inputs', {}).items():
+            if period in symbol_contexts:
+                symbol_contexts[period] = {**symbol_contexts[period], '_screening_tail_prepared': proof}
         if stock.get('_monitor_periods') and stock.get('market','a')=='a':
             observed=datetime.fromisoformat(request['observed_at'])
             for frequency in symbol_settings['frequencies']:
@@ -902,22 +1066,30 @@ def _stop_worker(slot):
 
 
 def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,
-                 timeout_seconds=SYMBOL_TIMEOUT_SECONDS, worker_target=None, capacity_callback=None):
+                 timeout_seconds=SYMBOL_TIMEOUT_SECONDS, worker_target=None, capacity_callback=None,
+                 pool_holder=None, request=None):
     """A one-run pool shares the same bounded transport as live monitoring."""
     if Path(run_dir, "cancel").exists():
         return
     from chanlun.screening.worker_pool import ReusableWorkerPool
     request_path = Path(run_dir, "request.json")
-    request = json.loads(request_path.read_text(encoding="utf-8")) if request_path.is_file() else {}
+    if request is None:
+        request = json.loads(request_path.read_text(encoding="utf-8")) if request_path.is_file() else {}
     options = {"worker_target": worker_target, "revision_reader": lambda: revision} if worker_target else {}
     def identity(item):
         return item.get('market', 'a'), item['code'], tuple(item.get('_monitor_periods', settings['frequencies']))
     pending = {identity(stock): stock for stock in stocks}
     recoverable = len(pending) == len(stocks)
     remaining = list(stocks)
+    owns_pool = pool_holder is None
+    holder = [] if owns_pool else pool_holder
     for attempt in range(3):
         failure = None
-        pool = ReusableWorkerPool(revision, max_tasks=min(256,max(1,len(remaining))), **options)
+        if not holder:
+            holder.append(ReusableWorkerPool(revision,
+                max_tasks=min(256,max(1,len(remaining))) if owns_pool else 256, **options))
+        pool = holder[0]
+        completed_batch = False
         try:
             try:
                 for result, current in pool.scan(remaining, settings, contexts, run_dir, workers, revision,
@@ -929,12 +1101,15 @@ def bounded_scan(stocks, settings, contexts, run_dir, workers, revision, *,
                             recoverable = False
                         pending.pop(key, None)
                     yield result, current
+                completed_batch = True
             except PermissionError as exc:
                 failure = exc
         finally:
             # A new pool is permitted only after the old Windows job has been
             # closed and every child reaped. Unknown liveness still fails.
-            pool.close()
+            if owns_pool or not completed_batch:
+                pool.close()
+                holder.clear()
         if failure is None or Path(run_dir, 'cancel').exists() or time_budget_expired(request):
             return
         if not recoverable or attempt == 2 or (not worker_target and source_revision() != revision):
@@ -961,17 +1136,26 @@ def _catalog_worker(connection, settings, _run_dir):
         elif settings.get("scope") in {"watchlist", "symbols"}:
             stocks = []
         elif settings.get("scope") == "codes" and requested:
-            stocks = [{**info, "type": "stock_cn"} for code in sorted(requested)
-                      if (info := _exchange().stock_info(code))]
+            stocks = []
+            for code in sorted(requested):
+                try:
+                    info = _exchange().stock_info(code)
+                except Exception:
+                    info = None
+                if not isinstance(info, dict) or info.get('code') != code or not info.get('name'):
+                    stocks.append({'code': code, 'name': code, 'type': 'stock_cn', '_screening_name_missing': True})
+                else:
+                    stocks.append({**info, 'type': 'stock_cn'})
         else:
             raise ValueError("选股范围必须明确指定")
         stocks = sorted((s for s in stocks if is_a_share(s)
-                         and (not requested or s["code"] in requested)
-                         and not (settings["exclude_st"] and ("ST" in s["name"].upper() or "退" in s["name"]))),
+                         and (not requested or s["code"] in requested)),
                         key=lambda s: s["code"])
+        canonical_names = {s['code']: s['name'] for s in stocks}
         if settings.get("scope") in {"all_a_watchlist", "watchlist", "symbols"}:
             from chanlun.screening.markets import watchlist_symbols
-            additions = settings.get("symbols", []) if settings["scope"] == "symbols" else watchlist_symbols()
+            additions = (settings.get("symbols", []) if settings["scope"] == "symbols" else
+                         watchlist_symbols(settings['watch_groups']) if settings.get('watch_groups') else watchlist_symbols())
             combined = {("a", s["code"]): {**s, "market": "a"} for s in stocks}
             for item in additions:
                 item = {**item, "name": item.get("name", item["code"])}
@@ -979,8 +1163,29 @@ def _catalog_worker(connection, settings, _run_dir):
             # User-maintained groups are checked first, without enumerating any
             # non-A-share exchange. The remaining A-share pool follows.
             stocks = sorted(combined.values(), key=lambda s: (s.get("origin") != "watchlist", s["market"], s["code"]))
+        exclusions = []
+        eligible = []
+        for stock in stocks:
+            if (settings.get('exclude_st') and stock.get('market', 'a') == 'a'
+                    and is_a_share({'code': stock['code'], 'type': 'stock_cn'})):
+                name = canonical_names.get(stock['code'])
+                if name is None:
+                    try:
+                        details = _exchange().stock_info(stock['code'])
+                    except Exception:
+                        details = None
+                    name = details.get('name') if isinstance(details, dict) else None
+                if not isinstance(name, str) or not name.strip():
+                    eligible.append({**stock, '_screening_name_missing': True})
+                    continue
+                if 'ST' in name.upper() or '退' in name:
+                    exclusions.append({'market': 'a', 'code': stock['code'], 'name': name,
+                                       'reason': 'ST_NAME_EXCLUDED'})
+                    continue
+            eligible.append(stock)
+        stocks = eligible
         if not stocks:
-            raise ValueError("所选范围没有符合股票类别条件的标的")
+            raise ValueError('所选标的全部被 ST / 退市名称条件排除' if exclusions else '所选范围没有符合股票类别条件的标的')
         from chanlun.screening.markets import holding_symbols
         holding_lookup_failed = False
         try:
@@ -993,6 +1198,7 @@ def _catalog_worker(connection, settings, _run_dir):
                   else {**stock, "holding_lookup_failed": True} if holding_lookup_failed else stock for stock in stocks]
         connection.send({"stocks": stocks,
                          "excluded_requested_codes": sorted(requested - {s["code"] for s in stocks}),
+                         'universe_exclusions': exclusions,
                          **({'catalog_diagnostics': catalog_diagnostics} if isinstance(catalog_diagnostics, dict) else {})})
     except Exception as exc:
         connection.send({"error": f"{type(exc).__name__}: {exc}"})
@@ -1103,6 +1309,7 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
             raise ScreeningTimeBudget()
         stocks = catalog["stocks"]
         state["excluded_requested_codes"] = catalog["excluded_requested_codes"]
+        state['universe_exclusions'] = catalog.get('universe_exclusions', [])
         if isinstance(catalog.get('catalog_diagnostics'), dict):
             state['catalog_diagnostics'] = catalog['catalog_diagnostics']
         contexts = {}
@@ -1142,10 +1349,28 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
                 and settings.get('strategy') != STRATEGY):
             from .period_tasks import PeriodProgress, period_tasks
             period_progress = PeriodProgress(stocks, settings['frequencies'])
-            state.update(progress_unit='symbol_period', total_symbols=len(stocks), completed_symbols=0)
+            state.update(progress_unit='symbol_period', total_symbols=len(stocks), completed_symbols=0,
+                         period_progress=period_progress.snapshot())
             stocks = period_tasks(stocks, settings['frequencies'])
             state['total'] = len(stocks)
         publish_status()
+        pipelined = request.get('verify_completed_inputs') is True
+        if worker_pool is None and request.get('prewarm_rolling_windows', True) and not request.get('force_rebuild'):
+            from .rolling_proofs import window_targets
+            targets = window_targets(settings, contexts)
+            if targets:
+                request = {**request, 'rolling_window_targets': targets}
+                state['rolling_window_targets'] = targets
+        if request.get('verify_completed_inputs') is True and not pipelined:
+            from .tail_preparation import prepare_inputs
+            state['phase'] = 'source_preparation'
+            for progress in prepare_inputs(stocks, settings, contexts, run_dir.parent / 'analysis_cache', run_dir):
+                if time_budget_expired(request):
+                    raise ScreeningTimeBudget()
+                state.update(native_input_preparation=progress, updated_at=time.time(),
+                             elapsed_seconds=round(time.time()-state['started_at'],1))
+                publish_status()
+            state['phase'] = 'screening'
         from .compute_capacity import worker_capacity, MAX_WORKERS
         workers = worker_capacity(settings.get('workers', MAX_WORKERS), monitor=worker_pool is not None)
         state["effective_workers"] = workers
@@ -1156,24 +1381,47 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
             state['resource_limit']=pressure['limit']
             state['resource_mode']='waiting' if pressure.get('waiting') else 'limited' if pressure['limit']<request.get('compute_budget',{}).get('limit',workers) else 'normal'
             state['available_memory_mb']=pressure.get('available_mb')
-        stream = (bounded_scan(stocks, settings, contexts, run_dir, workers, state["source_revision"],
+        if pipelined:
+            from .prepared_scan import pipelined_scan
+            state.update(phase='screening', preparation_mode='pipelined')
+            def preparation_changed(progress):
+                state['native_input_preparation'] = progress
+            stream = pipelined_scan(stocks, settings, contexts, run_dir, workers, state['source_revision'],
+                request=request, capacity_callback=capacity_changed, preparation_callback=preparation_changed,
+                **({'worker_pool':worker_pool} if worker_pool is not None else {}))
+        else:
+            stream = (bounded_scan(stocks, settings, contexts, run_dir, workers, state["source_revision"],
                                timeout_seconds=30 if deadline is not None else SYMBOL_TIMEOUT_SECONDS,
-                               capacity_callback=capacity_changed)
+                               capacity_callback=capacity_changed, request=request)
                   if worker_pool is None else worker_pool.scan(
                       stocks, settings, contexts, run_dir, workers, state["source_revision"], request=request,capacity_callback=capacity_changed))
         for result, current_codes in stream:
             if result is not None:
                 if period_progress is not None:
                     state['completed_symbols'] = period_progress.accept(result)
+                    state['period_progress'] = period_progress.snapshot()
                 with (run_dir / "results.jsonl").open("a", encoding="utf-8") as result_file:
                     result_file.write(json.dumps(result, ensure_ascii=False, allow_nan=False) + "\n")
                 state["completed"] += 1
                 state["selected_count"] += int(any(r["selected"] for r in result["rows"]))
-                state["error_count"] += int(bool(result.get("error")) or any(r.get("data_errors") for r in result["rows"]))
+                state["error_count"] += int(bool(result.get("error")) or any(
+                    r.get("data_errors") and r['data_errors']!=['DATA_SOURCE_PREPARING'] for r in result["rows"]))
+                state['source_waiting_count']=state.get('source_waiting_count',0)+sum(
+                    r.get('data_errors')==['DATA_SOURCE_PREPARING'] for r in result['rows'])
                 state['successful_period_count'] += successful_period_count(result)
                 state["reused_combinations"] = state.get("reused_combinations", 0) + sum(bool(r.get("calculation_reused")) for r in result["rows"])
+                state['reused_selections'] = state.get('reused_selections', 0) + sum(bool(r.get('selection_reused')) for r in result['rows'])
                 state["symbol_seconds_total"] = round(state.get("symbol_seconds_total", 0) + result.get("seconds", 0), 3)
+                resources = result.get('execution_metrics') or {}
+                if resources:
+                    for source, target in (('cpu_seconds','task_cpu_seconds_total'),
+                                           ('slot_wait_seconds','compute_slot_wait_seconds_total')):
+                        state[target] = round(state.get(target,0) + resources.get(source,0),4)
                 for row in result["rows"]:
+                    if row.get('period_timings_ms'):
+                        costs = state.setdefault('period_cost_seconds',{})
+                        for period, value in row['period_timings_ms'].items():
+                            costs[period] = round(costs.get(period,0) + value/1000,4)
                     market = row.get("market", result.get("market", "a"))
                     cutoff = row.get("source_closed_at")
                     periods = state.get("market_cutoffs", {}).get(market, {})
@@ -1201,6 +1449,10 @@ def run_screening(run_dir: Path, *, worker_pool=None, pinned_revision=None, hear
             stream.close()
     state.update(current_codes=[], finished_at=time.time(), elapsed_seconds=round(time.time() - state["started_at"], 1))
     publish_status()
+    if state['status'] == 'completed' and request.get('rolling_window_targets'):
+        from .rolling_maintenance import launch
+        state['rolling_window_maintenance'] = launch(run_dir,request,contexts,stocks,state['source_revision'])
+        publish_status()
 
 
 
@@ -1208,4 +1460,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
-    run_screening(parser.parse_args().run_dir.resolve())
+    # Helpers import chanlun.screening.runner. Execute that canonical module
+    # too, so its cancellation exceptions are not mistaken for failures by a
+    # second class defined in the -m __main__ copy.
+    from chanlun.screening.runner import run_screening as execute_screening
+    execute_screening(parser.parse_args().run_dir.resolve())

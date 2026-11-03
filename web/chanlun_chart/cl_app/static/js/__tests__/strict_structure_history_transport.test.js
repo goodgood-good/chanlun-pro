@@ -140,6 +140,9 @@ test('numeric deltas restore exact history and MACD columns', () => {
     higher_macd_dif: [0, 10000, 10000, 10000],
     higher_macd_dea: [0, 20000, 20000, 20000],
     higher_macd_hist: [0, -10000, -10000, -10000],
+    higher_macd_raw_dif: [0, 0.123456789123, null, -0.0123456789123],
+    higher_macd_raw_dea: [0, 0.01, 0.02, 0.03],
+    higher_macd_raw_hist: [0, 0.226913578246, null, -0.0846913578246],
   });
 
   hp.applyChanlunUpdate(payload, {
@@ -152,4 +155,7 @@ test('numeric deltas restore exact history and MACD columns', () => {
   assert.equal(Number.isNaN(stored.macd_dif[0]), true);
   assert.deepEqual(Array.from(stored.macd_dif.slice(1)), [0.123456, 0.12, -0.1]);
   assert.deepEqual(Array.from(stored.higher_macd_hist), [0, -0.01, -0.02, -0.03]);
+  assert.equal(stored.higher_macd_raw_dif[1], 0.123456789123);
+  assert.equal(Number.isNaN(stored.higher_macd_raw_dif[2]), true);
+  assert.equal(stored.higher_macd_raw_hist[3], -0.0846913578246);
 });

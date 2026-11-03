@@ -29,9 +29,10 @@ def retain(state, now, new=()):
 
 
 def evidence_references(events):
+    from .notification_evidence import evidence_sources
     references = set()
     for event in events:
-        for source in (event, event.get("invalidation_reference") or {}):
+        for source in evidence_sources(event):
             run = source.get("evidence_run_id")
             if isinstance(run, str) and re.fullmatch(r"[a-f0-9]{32}", run):
                 references.add(run)

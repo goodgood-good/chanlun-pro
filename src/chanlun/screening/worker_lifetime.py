@@ -4,6 +4,32 @@ from ctypes import wintypes
 import os
 
 
+def prefer_analysis_performance(process_handle=None):
+    """Use all suitable hybrid cores without raising process scheduling priority.
+
+    Windows may infer a low QoS for hidden, BelowNormal workers and confine
+    expensive calculations to efficient cores. Explicit HighQoS only opts out
+    of execution-speed throttling; CPU affinity and priority remain unchanged.
+    https://learn.microsoft.com/windows/win32/procthread/quality-of-service
+    """
+    if os.name != 'nt':
+        return {'state':'not_applicable'}
+    class Power(ctypes.Structure):
+        _fields_ = [('Version',wintypes.ULONG),('ControlMask',wintypes.ULONG),('StateMask',wintypes.ULONG)]
+    try:
+        kernel = ctypes.WinDLL('kernel32',use_last_error=True)
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.SetProcessInformation.argtypes = [wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD]
+        kernel.SetProcessInformation.restype = wintypes.BOOL
+        handle = kernel.GetCurrentProcess() if process_handle is None else process_handle
+        state = Power(1,1,0)  # CURRENT_VERSION, EXECUTION_SPEED control, throttling off.
+        if kernel.SetProcessInformation(handle,4,ctypes.byref(state),ctypes.sizeof(state)):
+            return {'state':'high_qos','priority_changed':False,'affinity_changed':False}
+        return {'state':'unavailable','error':ctypes.get_last_error()}
+    except (AttributeError,OSError,TypeError,ValueError) as exc:
+        return {'state':'unavailable','error_type':type(exc).__name__}
+
+
 def process_identity(pid):
     """Read liveness and creation identity through the same Windows handle.
 
@@ -77,10 +103,12 @@ class WindowsWorkerJob:
             error = ctypes.WinError(ctypes.get_last_error())
             self.close()
             raise error
+        self.owner_power_policy = prefer_analysis_performance()
 
     def assign(self, process):
         if not self.kernel.AssignProcessToJobObject(self.handle, process.sentinel):
             raise ctypes.WinError(ctypes.get_last_error())
+        return prefer_analysis_performance(process.sentinel)
 
     def close(self):
         if self.handle:

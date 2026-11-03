@@ -32,6 +32,11 @@ _config.DB_PWD = ""
 
 
 @pytest.fixture(autouse=True)
+def _isolate_quote_only_monitor_preference(monkeypatch):
+    monkeypatch.delenv('CHANLUN_MONITOR_QUOTE_ONLY_SYMBOLS', raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_native_instrument_metadata(monkeypatch):
     """Vendor metadata is explicit test input, never the developer's live feed."""
     from xtquant import xtdata
@@ -39,6 +44,12 @@ def _isolate_native_instrument_metadata(monkeypatch):
         function = getattr(xtdata, name, None)
         if getattr(function, "__module__", "").startswith("xtquant"):
             monkeypatch.setattr(xtdata, name, lambda *_args, **_kwargs: None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_current_suspension_status(monkeypatch):
+    from chanlun.screening import suspension_status
+    monkeypatch.setattr(suspension_status,'_fetch',lambda *_args:[])
 
 
 @atexit.register

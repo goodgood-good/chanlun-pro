@@ -34,7 +34,7 @@ def box_at(tmp_path, clock, event, images):
 
 
 @pytest.mark.parametrize('inline', [False, True])
-def test_partial_first_delivery_then_exactly_one_complete_supplement(tmp_path, inline):
+def test_partial_first_delivery_then_page_only_completion_without_another_message(tmp_path, inline):
     clock = [1000.]
     event = {**image_event(), 'frequency': '1m'}
     if inline:
@@ -53,13 +53,13 @@ def test_partial_first_delivery_then_exactly_one_complete_supplement(tmp_path, i
     box.deliver_one()
     with box._connect() as db:
         complete = db.execute("SELECT id,status,content FROM outbox WHERE id LIKE 'chart-complete:%'").fetchall()
-        assert len(complete) == 1 and complete[0][1] == 'sent'
+        assert len(complete) == 1 and complete[0][1] == 'suppressed'
         assert '原通知附图补全' in complete[0][2]
         for identity, content, sent in original:
             assert tuple(db.execute('SELECT content,sent FROM outbox WHERE id=?', (identity,)).fetchone()) == (content, sent)
     assert box.charts.store.coverage(job['initial_image_hash'])['missing_periods'] == ['5m', '30m']
     box.charts.recover(); box.charts.process_one(); box.deliver_one()
-    assert len(calls) == 2
+    assert len(calls) == 2 and len(transport.images) == 1
 
 
 @pytest.mark.parametrize('first_complete', [False, True])
@@ -124,20 +124,23 @@ def test_committed_supplement_is_not_resent_after_worker_restart(tmp_path):
     clock[0] += 61; box.charts.process_one(); box.deliver_one()
     with box._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM outbox WHERE id LIKE 'chart-complete:%'").fetchone()[0] == 1
-    assert len(transport.images) == 2
+    assert len(transport.images) == 1
 
 
 @pytest.mark.parametrize('expired', [True, False])
-def test_outdated_or_invalid_signal_never_gets_a_completion_delivery(tmp_path, expired):
+def test_delivered_original_can_complete_silently_after_signal_expires_or_changes(tmp_path, expired):
     clock = [1000.]; event = {**image_event(), 'frequency': '1m'}
-    box, transport, calls = box_at(tmp_path, clock, event, [rendered('partial', ['1m'])])
+    box, transport, calls = box_at(tmp_path, clock, event,
+        [rendered('partial', ['1m']), rendered('complete', ['1m','5m','30m'])])
     box.charts.process_one(); clock[0] += 5; box.deliver_one()
     clock[0] += 1800 if expired else 31
     if not expired: box.signal_validator = lambda rows: ([], [])
     box.charts.process_one()
     with box.charts._db() as db:
-        assert db.execute('SELECT status FROM jobs').fetchone()[0] == 'expired'
-    assert len(calls) == 1 and len(transport.images) == 1
+        assert db.execute('SELECT status FROM jobs').fetchone()[0] == 'ready'
+    assert len(calls) == 2 and len(transport.images) == 1
+    with box._read_connect() as db:
+        assert db.execute("SELECT status FROM outbox WHERE id LIKE 'chart-complete:%'").fetchone()[0] == 'suppressed'
 
 
 def test_png_coverage_is_immutable_even_if_a_renderer_mislabels_identical_bytes(tmp_path):

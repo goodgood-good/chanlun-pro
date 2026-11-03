@@ -55,9 +55,10 @@ def test_committed_worker_progress_preserves_usable_empty_periods(
                 **({"error": "worker failed"} if case == "symbol_failed" else {}),
             }
         )
-    monkeypatch.setattr(
-        runner, "bounded_scan", lambda *_, capacity_callback=None: iter((record, []) for record in records)
-    )
+    def scan(*_, capacity_callback=None, timeout_seconds=None, request=None):
+        assert timeout_seconds == runner.SYMBOL_TIMEOUT_SECONDS
+        return iter((record, []) for record in records)
+    monkeypatch.setattr(runner, "bounded_scan", scan)
     runner.run_screening(tmp_path)
     state = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
     assert state["status"] == "completed"

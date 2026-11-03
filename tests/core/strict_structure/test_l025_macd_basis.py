@@ -7,7 +7,7 @@ import pandas as pd
 from chanlun.screening.runner import snapshot_for
 
 
-def test_recorded_area_disagreement_uses_local_macd_reminder_only():
+def test_recorded_area_disagreement_uses_raw_htf_under_native_center_geometry():
     frame = pd.read_parquet(
         Path(__file__).parents[2] / "fixtures" / "segment_origin" / "SH.688377_5m.parquet"
     )
@@ -20,6 +20,7 @@ def test_recorded_area_disagreement_uses_local_macd_reminder_only():
     assert signals
     assert all(item["divergence"]["kind"] == "native_two_center_divergence"
                and item["divergence"]["histogram_area_decayed"] is True
-               and item["rule_basis"] == "user_declared_native_center_macd_v6"
+               and item["rule_basis"] == "user_declared_native_center_macd_v7"
+               and item['divergence']['strength_source'] == 'macd_htf'
                and item["formal_point_issued"] is True
                and item["status"] == "confirmed" for item in signals)

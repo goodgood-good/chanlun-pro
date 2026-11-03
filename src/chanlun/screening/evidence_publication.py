@@ -58,20 +58,19 @@ def _verified_copy(source, temporary, checksum):
         return False
 
 
-def save_evidence(run_dir, code, frequency, frame, snapshot):
-    from .markets import storage_symbol
+def save_evidence(run_dir, code, frequency, frame, snapshot, *, namespace=None):
+    from .evidence import evidence_paths
 
     market = frame.attrs.get('screening_market', 'a')
     directory = Path(run_dir).resolve()
-    base = directory / 'evidence' / f'{storage_symbol(code, market)}_{frequency}'
-    base.parent.mkdir(parents=True, exist_ok=True)
-    parquet, packed = Path(str(base) + '.parquet'), Path(str(base) + '.json.gz')
+    parquet, packed = evidence_paths(directory, code, frequency, market, namespace)
+    parquet.parent.mkdir(parents=True, exist_ok=True)
     nonce = f'.{os.getpid()}.{uuid4().hex}.tmp'
     temporary = (Path(str(parquet) + nonce), Path(str(packed) + nonce))
     fingerprint = input_fingerprint(frame, code, frequency)
     snapshot_bytes = json.dumps(snapshot, ensure_ascii=False, allow_nan=False).encode('utf-8')
     identity = _identity(frame, fingerprint, snapshot_bytes)
-    slot = (os.getpid(), str(directory.parent), market, code, frequency)
+    slot = (os.getpid(), str(directory.parent), market, code, frequency, namespace)
     with _stripes[hash(slot) % len(_stripes)]:
         with _lock:
             previous = _references.pop(slot, None)
@@ -93,6 +92,7 @@ def save_evidence(run_dir, code, frequency, frame, snapshot):
                     'parquet_sha256': hashlib.sha256(temporary[0].read_bytes()).hexdigest(),
                     'snapshot_sha256': hashlib.sha256(temporary[1].read_bytes()).hexdigest(),
                     'input_fingerprint': fingerprint,
+                    **({'namespace': namespace} if namespace is not None else {}),
                 }
             os.replace(temporary[0], parquet)
             os.replace(temporary[1], packed)

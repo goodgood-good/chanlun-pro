@@ -1,12 +1,19 @@
 /* Frozen notification view; all candles and structures use the normal renderer. */
 (function () {
     const data = window.__notificationChart;
+    if(data.interactive){
+        const url=new URL(window.location.href);
+        url.searchParams.set('default_study','MACD');
+        window.history.replaceState(null,'',url);
+    }
     window.Utils = {get_market: () => data.market, get_code: () => data.code,
         get_local_data: key => key.includes('interval') ? data.resolution : key === 'theme' ? 'light' : null,
         set_local_data() {}};
     window.__CHANLUN_SSE_ENABLED = false;
     window.__CHANLUN_SCREENING_EVIDENCE = {source: 'notification', point: 'notification'};
     const cm = window.notificationChartManager = new ChartManager('notification');
+    cm.readOnlySnapshot = data.interactive === true;
+    cm.datafeedUrl = data.datafeed_url;
     // Background candles/indicators have their own provenance. This isolated
     // export must not draw or validate them as a frozen signal structure.
     if (data.background_data_only) cm.draw_chanlun = function () {};
@@ -74,8 +81,10 @@
         await cm.chart.setVisibleRange({from: coord(data.from), to: coord(data.cutoff)}, {percentRightMargin: 8});
         const panes = cm.chart.getPanes();
         if (panes.length !== 3) throw new Error('MACD / MACD_HTF pane is missing');
-        panes[1].setHeight(175);
-        panes[2].setHeight(175);
+        const chartHeight=data.interactive?(document.getElementById('tv_chart_container_notification')?.clientHeight||window.innerHeight):0;
+        const studyHeight=data.interactive?Math.max(70,Math.min(150,Math.floor(chartHeight*.22))):175;
+        panes[1].setHeight(studyHeight);
+        panes[2].setHeight(studyHeight);
         await waitForReady();
         const options = {lock: true, disableSelection: true, disableSave: true, disableUndo: true};
         if (data.marker) {
@@ -97,7 +106,7 @@
                 overrides: {linecolor: '#DC2626', linewidth: 1, linestyle: 2, showLabel: true, textcolor: '#DC2626'},
             });
         }
-        await cm.chart.createAnchoredShape({x: 0.01, y: 0.09}, {...options, shape: 'anchored_text',
+        if(!data.interactive)await cm.chart.createAnchoredShape({x: 0.01, y: 0.09}, {...options, shape: 'anchored_text',
             text: data.title + '\n' + data.caption + (data.invalidation_reason ? '\n失效原因：'+data.invalidation_reason : ''),
             overrides: {color: '#334155', fontsize: 14, backgroundColor: '#ffffff', fillBackground: true}});
         await document.fonts.ready;
@@ -106,6 +115,7 @@
         await waitForReady();
         await settleHistoryRange();
         window.__notificationReady = true;
+        if(data.interactive)window.dispatchEvent(new Event('notification-chart-ready'));
     }
     window.exportNotificationChart = async function () {
         if (window.devicePixelRatio !== 1) throw new Error('native export requires a 1:1 pixel ratio');
@@ -144,5 +154,8 @@
         }
         return canvas.toDataURL('image/png');
     };
-    prepare().catch(error => { window.__notificationError = error.message; });
+    prepare().catch(error => {
+        window.__notificationError = error.message;
+        if(data.interactive)window.dispatchEvent(new Event('notification-chart-error'));
+    });
 })();

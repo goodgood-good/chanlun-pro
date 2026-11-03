@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from chanlun.core.cl import CL
-from chanlun.core.macd_htf import CausalPartialHigherMACDCalculator
+from chanlun.core.macd_htf import CausalPartialHigherMACDCalculator, level_plus_one
 from chanlun.core.strict_structure.base_profile import strict_base_config
 from chanlun.core.strict_structure.models import ConstituentUnit, SourceKind
 from chanlun.core.strict_structure.strength import (
@@ -58,7 +58,10 @@ class FakeCD:
         self._dates = tuple(dates)
         self._native = dict(native)
         self._frequency = frequency
-        self._strict_htf_macd_by_level = dict(legacy_htf_by_level or {})
+        self._strict_htf_macd_by_level = dict(legacy_htf_by_level) if legacy_htf_by_level is not None else {0:{
+            **self._native,'dea':self._native['dif'], 'algorithm':'causal-partial-htf',
+            'source_frequency':frequency,'target_frequency':level_plus_one(frequency),
+            'dates':self._dates,'known_at':self._dates}}
 
     def get_src_klines(self):
         return tuple(SimpleNamespace(date=value) for value in self._dates)
@@ -181,18 +184,31 @@ def test_divergence_price_and_time_refer_to_the_same_internal_extreme(direction)
     assert divergence.confirmed_at == after.confirmed_at
 
 
-def test_physical_strength_uses_native_macd():
+def test_physical_strength_uses_raw_macd_htf():
     provider = fake_strength_provider(
         native_hist=(2, 3, 4),
     )
 
     snapshot = provider.snapshot(unit_covering_indexes(0, 2, direction="up"))
 
-    assert snapshot.source == "macd"
+    assert snapshot.source == "macd_htf"
     assert snapshot.histogram_area == 9
 
 
-def test_every_recursive_level_uses_native_macd_over_the_exact_source_interval():
+def test_raw_htf_values_control_both_line_heights_even_if_native_macd_disagrees():
+    dates=source_dates(3)
+    raw={'hist':[2,3,4],'dif':[5,6,7],'dea':[1,2,3],
+         'algorithm':'causal-partial-htf','source_frequency':'5m','target_frequency':'30m',
+         'dates':dates,'known_at':dates}
+    cd=FakeCD(dates,native={'hist':[900]*3,'dif':[800]*3,'dea':[700]*3},legacy_htf_by_level={0:raw})
+    snapshot=MacdStrengthProvider(cd).snapshot(unit_covering_indexes(0,2,direction='up'))
+    assert (snapshot.histogram_area,snapshot.histogram_peak,snapshot.dif_extreme,snapshot.dea_extreme)==(9,4,7,3)
+    raw['known_at']=dates[1:]+dates[:1]
+    with pytest.raises(ValueError,match='clocks'):
+        MacdStrengthProvider(cd)
+
+
+def test_every_structural_level_uses_the_source_charts_raw_htf_over_the_exact_interval():
     provider = fake_strength_provider(
         native_hist=(-99, 2, -3, 4, 5, -7, 99),
         native_dif=(0, 10, 20, 30, 40, 50, 60),
@@ -205,13 +221,13 @@ def test_every_recursive_level_uses_native_macd_over_the_exact_source_interval()
         for level in (0, 1, 2)
     )
 
-    assert {snapshot.source for snapshot in snapshots} == {"macd"}
+    assert {snapshot.source for snapshot in snapshots} == {"macd_htf"}
     assert {snapshot.histogram_area for snapshot in snapshots} == {11}
     assert {snapshot.histogram_peak for snapshot in snapshots} == {5}
     assert {snapshot.dif_extreme for snapshot in snapshots} == {50}
 
 
-def test_recursive_strength_needs_no_higher_period_series():
+def test_structural_levels_do_not_select_different_physical_htf_series():
     provider = fake_strength_provider(native_hist=(1, 2, 3))
 
     snapshots = tuple(
@@ -237,7 +253,7 @@ def test_recursive_native_snapshot_is_prefix_stable_after_new_source_bar():
     )
 
     assert before == after
-    assert before.source == "macd"
+    assert before.source == "macd_htf"
 
 
 def test_causal_partial_htf_calculator_never_rewrites_a_frozen_prefix():
@@ -307,7 +323,7 @@ def test_recursive_strength_ignores_native_bars_after_the_unit_endpoint():
     assert base.histogram_area == pytest.approx(5.9)
 
 
-def test_fixed_frequency_labels_and_legacy_htf_state_do_not_control_strength():
+def test_wrong_or_unbound_htf_series_cannot_silently_fall_back_to_native_macd():
     legacy = {
         0: {
             "hist": (-999, -999, -999),
@@ -315,19 +331,11 @@ def test_fixed_frequency_labels_and_legacy_htf_state_do_not_control_strength():
             "algorithm": "causal-partial-htf",
         }
     }
-    snapshots = tuple(
-        fake_strength_provider(
-            native_hist=(1, 2, 3),
-            frequency=frequency,
-            legacy_htf_by_level=legacy,
-        ).snapshot(
-            unit_covering_indexes(0, 2, direction="up", structural_level=2)
-        )
-        for frequency in ("1m", "5m", "30m", "d")
-    )
-
-    assert {snapshot.histogram_area for snapshot in snapshots} == {6}
-    assert {snapshot.dif_extreme for snapshot in snapshots} == {3}
+    for frequency in ('1m','5m','30m','d'):
+        with pytest.raises(ValueError,match='MACD HTF'):
+            fake_strength_provider(native_hist=(1,2,3),frequency=frequency,legacy_htf_by_level=legacy)
+    with pytest.raises(ValueError,match='unavailable'):
+        fake_strength_provider(native_hist=(1,2,3),legacy_htf_by_level={})
 
 
 class TableProvider:
@@ -537,7 +545,7 @@ def test_dif_alone_confirms_when_directional_histogram_is_unavailable():
     assert evidence.is_divergent is True
 
 
-def test_strict_strength_matches_directional_native_formula_for_locked_xd_pair():
+def test_strict_strength_matches_directional_raw_htf_formula_for_locked_xd_pair():
     frame = (
         pd.read_parquet("tests/fixtures/SH.600519_5m.parquet")[
             ["date", "open", "high", "low", "close", "volume"]
@@ -564,7 +572,7 @@ def test_strict_strength_matches_directional_native_formula_for_locked_xd_pair()
         constituent_lines=cd.get_bis(),
     )
     provider = MacdStrengthProvider(cd)
-    native = cd.get_idx()["macd"]
+    native = cd._strict_htf_macd_by_level[0]
     native_dates = tuple(kline.date for kline in cd.get_src_klines())
 
     def expected_strength(value):
@@ -612,7 +620,7 @@ def test_strict_strength_matches_directional_native_formula_for_locked_xd_pair()
             direction = later_unit.direction
             earlier_area, earlier_peak, earlier_dif = expected_strength(earlier_unit)
             later_area, later_peak, later_dif = expected_strength(later_unit)
-            assert earlier_snapshot.source == later_snapshot.source == "macd"
+            assert earlier_snapshot.source == later_snapshot.source == "macd_htf"
             assert earlier_snapshot.histogram_area == (
                 None if earlier_area is None else pytest.approx(earlier_area)
             )

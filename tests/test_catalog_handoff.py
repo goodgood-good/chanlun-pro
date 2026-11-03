@@ -31,6 +31,7 @@ def test_limited_handoff_explicitly_forwards_disabled_catalog(tmp_path):
     script = tmp_path / "limited_handoff.ps1"
     script.write_text(
         "$ErrorActionPreference='Stop'\n"
+        f". {ps_quote(ROOT / 'ops/no_console.ps1')}\n"
         "$tokens=$null; $errors=$null\n"
         "$ast=[Management.Automation.Language.Parser]::ParseFile("
         f"{ps_quote(ROOT / 'ops/restart_web.ps1')},[ref]$tokens,[ref]$errors)\n"
@@ -40,7 +41,7 @@ def test_limited_handoff_explicitly_forwards_disabled_catalog(tmp_path):
         "$node.Name -eq 'Register-LimitedWebLaunchTask'}, $true)\n"
         ". ([scriptblock]::Create($definition.Extent.Text))\n"
         # All scheduler commands are replaced before the actual function runs.
-        "function New-ScheduledTaskAction { param($Execute,$Argument) "
+        "function New-ScheduledTaskAction { param($Execute,$Argument,$WorkingDirectory) "
         "[pscustomobject]@{execute=$Execute; arguments=$Argument} }\n"
         "function New-ScheduledTaskPrincipal { param($UserId,$LogonType,$RunLevel) "
         "[pscustomobject]@{run_level=$RunLevel} }\n"
@@ -60,7 +61,7 @@ def test_limited_handoff_explicitly_forwards_disabled_catalog(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     captured = json.loads(result.stdout)
     assert captured["registrations"] == 1
-    assert captured["action"]["execute"] == "powershell.exe"
+    assert Path(captured["action"]["execute"]).name.startswith("no-console-")
     arguments = captured["action"]["arguments"].split()
     assert "-DisableFullSymbolCatalog" in arguments
     assert "-EnableFullSymbolCatalog" not in arguments

@@ -313,7 +313,7 @@ def test_restart_replaces_watchdog_with_current_scope_after_deploy_verification(
     watchdog_gate = restart.index("if (-not $SkipWatchdog) {")
     watchdog_body = restart[watchdog_gate:]
     stop_at = watchdog_body.index("Stop-Process `")
-    launch_at = watchdog_body.index("$watchdogProcess = Start-Process `")
+    launch_at = watchdog_body.index("$watchdogProcess = Start-NoConsoleProcess ")
 
     assert stop_at < launch_at
     assert "$watchdogScriptToken = '-File {0}' -f $watchdogScript" in watchdog_body
@@ -322,7 +322,7 @@ def test_restart_replaces_watchdog_with_current_scope_after_deploy_verification(
     assert "Get-CimInstance Win32_Process" in watchdog_body
     assert "$_.ProcessId -ne $PID" in watchdog_body
     assert "-ErrorAction Stop" in watchdog_body[stop_at:launch_at]
-    assert "-WindowStyle Hidden" in watchdog_body[launch_at:]
+    assert "-RedirectStandardError" in watchdog_body[launch_at:]
     assert "with current deployment scope" in watchdog_body[launch_at:]
 
 

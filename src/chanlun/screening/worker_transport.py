@@ -5,9 +5,12 @@ from multiprocessing.connection import BUFSIZE
 from pathlib import Path
 import pickle
 import re
+import zlib
 
 SCHEMA = 'screening-worker-inputs-v1'
+TIMING_SCOPE = 'screening-period-task-v1'
 MAX_CONTROL_BYTES = min(4096, BUFSIZE // 2)
+MAX_INLINE_BYTES = 64 * 1024
 
 
 def bounded_message(value):
@@ -73,10 +76,20 @@ class JobInputReader:
         return {**self.value, 'ticket': message['ticket'], 'stock': self.value['stocks'][index]}
 
 
-def store_reply(task, result):
+def store_reply(task, result, *, prefer_inline=False):
     ticket = task['ticket']
     if not re.fullmatch(r'[a-f0-9]{32}_\d+', ticket):
         raise ValueError('Invalid worker reply ticket')
+    if prefer_inline:
+        raw = json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        if len(raw) <= MAX_INLINE_BYTES:
+            message = {'ticket':ticket, 'result_inline':{
+                'schema':'screening-inline-result-v1', 'bytes':len(raw),
+                'sha256':hashlib.sha256(raw).hexdigest(), 'data':zlib.compress(raw, level=1)}}
+            try:
+                return bounded_message(message)
+            except ValueError:
+                pass  # Large replies retain the authenticated file protocol.
     reference = _store(task['run_dir'], f'worker_reply.{ticket}', result)
     return bounded_message({'ticket': ticket, 'result_file': reference})
 
@@ -84,6 +97,25 @@ def store_reply(task, result):
 def read_reply(message, ticket, run_dir):
     if not isinstance(message, dict) or message.get('ticket') != ticket:
         raise ValueError('Worker response belongs to another task')
+    if 'result_inline' in message:
+        if set(message) != {'ticket','result_inline'}:
+            raise ValueError('Ambiguous inline worker response')
+        value = message['result_inline']
+        if (not isinstance(value, dict) or set(value) != {'schema','bytes','sha256','data'}
+                or value['schema'] != 'screening-inline-result-v1'
+                or type(value['bytes']) is not int or not 0 <= value['bytes'] <= MAX_INLINE_BYTES
+                or not isinstance(value['data'], bytes)):
+            raise ValueError('Invalid inline worker response')
+        bounded_message(message)
+        try:
+            decoder = zlib.decompressobj()
+            raw = decoder.decompress(value['data'], value['bytes'] + 1)
+            if (len(raw) != value['bytes'] or not decoder.eof or decoder.unconsumed_tail or decoder.unused_data
+                    or hashlib.sha256(raw).hexdigest() != value['sha256']):
+                raise ValueError('Inline worker response checksum mismatch')
+            return json.loads(raw)
+        except (zlib.error, UnicodeError) as exc:
+            raise ValueError('Damaged inline worker response') from exc
     value, _ = _read(message['result_file'], run_dir, f'worker_reply.{ticket}')
     return value
 
@@ -95,6 +127,9 @@ def discard_reply(message, ticket, run_dir):
     replaced while a scanner/indexer held it. Run retention owns any remainder.
     """
     try:
+        if isinstance(message, dict) and 'result_inline' in message:
+            read_reply(message, ticket, run_dir)
+            return True
         if not isinstance(message, dict) or message.get('ticket') != ticket:
             return False
         _, path = _read(message['result_file'], run_dir, f'worker_reply.{ticket}')

@@ -88,6 +88,7 @@ def test_post_close_preview_stays_visible_but_does_not_notify_then_recovers_on_n
     cutoff = int(clock[0].replace(minute=35).timestamp())
     current = deepcopy(row)
     current['source_closed_at'] = current['point']['available_at'] = cutoff
+    current['center_sequence']['known_at'] = cutoff
     service.check_now(); service.tick()
     live.rows = [current]; live.finish(cutoff); service.tick()
     latest = service._load()['events'][0]

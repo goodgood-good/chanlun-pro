@@ -5,6 +5,8 @@ from copy import deepcopy
 import pytest
 
 from tests.web.test_signal_monitor import setup as setup, _seed, signal
+from cl_app.services.signal_monitor import SignalMonitor, _signal
+from chanlun.screening.timeframe_policy import POLICY, SCAN_PERIODS, LIVE_PERIODS
 
 
 def checked_pool(setup):
@@ -173,3 +175,75 @@ def test_new_candidate_cannot_be_hidden_by_an_inconsistent_old_negative_check(se
     finish_replacement(manual, manual.state["settings"], cutoff)
     service.tick()
     assert len(live.started) == 2
+
+
+def fixed_role_handoff():
+    row = {**signal(), 'input_fingerprint': 'a' * 64}
+    symbol = 'a:SH.600088'
+    cutoff = row['source_closed_at']
+    metadata = {'selection_policy_version': 'policy', 'result_reader_revision': 'reader'}
+    settings = {'timeframe_policy': POLICY, 'point_types': ['3buy']}
+    state = {
+        'seed': {**metadata, 'settings': {**settings, 'frequencies': list(LIVE_PERIODS)}},
+        'selection_checks': {f'{symbol}:{period}': {
+            'symbol': symbol, 'revision': 'code', 'error': False, 'cutoff': cutoff,
+            'input_fingerprint': 'a' * 64,
+            'identities': [_signal(row)['id']] if period == '5m' else [],
+        } for period in LIVE_PERIODS},
+        'checked_cutoffs': {symbol: cutoff}, 'attempted_cutoffs': {symbol: cutoff},
+    }
+    result = {
+        **metadata, 'current_source_revision': 'code',
+        'settings': {**settings, 'frequencies': list(SCAN_PERIODS)},
+        'selected': [row],
+        'verified_periods': [{key: value for key, value in {**row, 'frequency': period}.items()
+                              if key != 'point'} for period in SCAN_PERIODS],
+    }
+    return state, result
+
+
+def test_fixed_roles_retain_matching_checks_across_scan_and_live_period_sets():
+    state, result = fixed_role_handoff()
+    retained, attempted, checked = SignalMonitor._reusable_pool_checks(state, result)
+    assert retained == state['selection_checks']
+    assert attempted == checked == state['checked_cutoffs']
+
+
+def test_fixed_roles_still_schedule_the_missing_minute_check():
+    state, result = fixed_role_handoff()
+    state['selection_checks'].pop('a:SH.600088:1m')
+    retained, attempted, checked = SignalMonitor._reusable_pool_checks(state, result)
+    assert set(retained) == {'a:SH.600088:5m', 'a:SH.600088:30m'}
+    assert attempted == checked == {}
+
+
+@pytest.mark.parametrize('change', ['legacy', 'different_policy', 'unexpected_period', 'different_rule'])
+def test_fixed_role_normalization_does_not_hide_real_policy_changes(change):
+    state, result = fixed_role_handoff()
+    if change == 'legacy':
+        state['seed']['settings'].pop('timeframe_policy')
+        result['settings'].pop('timeframe_policy')
+    elif change == 'different_policy':
+        result['settings']['timeframe_policy'] = 'other-policy'
+    elif change == 'unexpected_period':
+        result['settings']['frequencies'] = ['5m', '15m']
+    else:
+        result['settings']['point_types'] = ['1buy']
+    assert SignalMonitor._reusable_pool_checks(state, result) == ({}, {}, {})
+
+
+@pytest.mark.parametrize('change', ['revised_input', 'missing_identity', 'failed_period', 'partial_preview'])
+def test_fixed_role_handoff_still_requires_equivalent_successful_evidence(change):
+    state, result = fixed_role_handoff()
+    if change == 'revised_input':
+        result['selected'][0]['input_fingerprint'] = 'b' * 64
+    elif change == 'missing_identity':
+        state['selection_checks']['a:SH.600088:5m']['identities'] = []
+    elif change == 'partial_preview':
+        state['selection_checks']['a:SH.600088:5m']['pending_identities'] = ['unchecked-preview']
+    else:
+        result['errors'] = [{'market': 'a', 'code': 'SH.600088', 'frequency': '5m'}]
+    retained, attempted, checked = SignalMonitor._reusable_pool_checks(state, result)
+    assert 'a:SH.600088:5m' not in retained
+    assert 'a:SH.600088:30m' in retained
+    assert attempted == checked == {}

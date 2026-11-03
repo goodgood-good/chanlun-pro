@@ -56,6 +56,10 @@ def _in_scope(row, settings, universe):
         return symbol[0] == 'a' and symbol[1] in settings.get('codes', [])
     if scope == 'symbols':
         return symbol in {(r.get('market', 'a'), r['code']) for r in settings.get('symbols', [])}
+    if scope == 'watchlist':
+        # A group name is not proof that a previous result is still a member.
+        # Wait for this run's committed universe before retaining its old rows.
+        return False
     return scope != 'all_a' or symbol[0] == 'a'
 
 
@@ -82,7 +86,7 @@ class RollingDisplay:
             state = _read(directory / 'status.json')
             if not isinstance(state, dict):
                 continue
-            if state.get('status') != 'completed' or state.get('run_id') != directory.name:
+            if state.get('status') not in {'completed','cancelled','interrupted','failed'} or state.get('run_id') != directory.name:
                 continue
             started = state.get('started_at', 0)
             if result.get('started_at') and started >= result['started_at']:
@@ -90,6 +94,11 @@ class RollingDisplay:
             candidates.append((started, directory))
         self.pending_baseline = None
         for _, directory in sorted(candidates, key=lambda item: item[0], reverse=True):
+            display = _read(directory/FILENAME)
+            state = _read(directory/'status.json') or {}
+            if (_valid_snapshot(display) and display['run_id'] == directory.name
+                    and 0 < display['through'] <= state.get('completed', 0)):
+                return {**display, 'started_at': state.get('started_at', 0)}
             path = directory / 'verified_results.json.gz'
             stamp = _stamp(path)
             saved = _read(path)
@@ -124,11 +133,15 @@ class RollingDisplay:
                     self.snapshot = saved
                 self.loaded = True
             through = result.get('results_through', result.get('completed', 0)) or 0
-            finished = result.get('status') == 'completed' and not result.get('results_loading')
+            stale_version=(result.get('source_current') is False
+                           and (result.get('status')!='completed'
+                                or bool(result.get('source_revision') or result.get('frozen_native_review'))))
+            finished = result.get('status') == 'completed' and not result.get('results_loading') and not stale_version
+            failed = {tuple(p) for p in result.get('_workbench_failed', [])}
             saved = self.snapshot or {}
             caught_up = saved.get('run_id') != source or through >= saved.get('through', 0)
             ready_later = self.pending_baseline and _stamp(self.pending_baseline[0]) != self.pending_baseline[1]
-            if not finished and caught_up and (self.baseline_checked != source or ready_later):
+            if (not finished or failed) and caught_up and (self.baseline_checked != source or ready_later):
                 self.baseline_checked = source
                 baseline = self._bootstrap(result, project)
                 prior_source = saved.get('baseline_run_id') if saved.get('run_id') == source else saved.get('run_id')
@@ -138,25 +151,36 @@ class RollingDisplay:
                 if baseline and (self.snapshot is None or baseline['started_at'] > saved_started):
                     self.snapshot = baseline
             saved = self.snapshot or {}
-            restoring = result.get('results_loading') and (not result.get('results_available') or through < saved.get('through', 0))
+            restoring = (result.get('results_loading') and (not result.get('results_available') or through < saved.get('through', 0))
+                         or stale_version)
             prior = saved.get('rows', []) if saved.get('run_id') != source or restoring else [
-                row for row in saved.get('rows', []) if row.get('refresh_state')]
+                row for row in saved.get('rows', []) if row.get('refresh_state') or _period(row) in failed]
             universe = _read(self.root / source / 'universe.json')
             universe = {(r.get('market', 'a'), r['code']) for r in universe} if isinstance(universe, list) else None
             replaced = {tuple(p) for p in result.get('_workbench_verified', [])} | {_period(row) for row in rows}
+            if stale_version:
+                # Historical review may recover only formal structures. It is
+                # not a new-version negative proof for the old previews, even
+                # when a recovered formal point shares their symbol/period.
+                replaced=set()
+                rows=[{**row,'refresh_state':'limited','result_source':row.get('result_source') or source,
+                       'detail_loaded':True,'evidence_chart_available':False} for row in rows]
+            current_ids={row['id'] for row in rows}
             processed = {tuple(p) for p in result.get('_workbench_processed', [])}
             processed_periods = {tuple(p) for p in result.get('_workbench_processed_periods', [])}
             def attempted(row):
                 return (_period(row) in processed_periods if result.get('progress_unit') == 'symbol_period'
                         else _period(row)[:2] in processed)
             groups = defaultdict(list)
-            if not finished:
+            if not finished or failed:
                 for row in prior:
-                    if _period(row) in replaced or not _in_scope(row, result.get('settings', {}), universe):
+                    if finished and _period(row) not in failed:
+                        continue
+                    if row['id'] in current_ids or _period(row) in replaced or not _in_scope(row, result.get('settings', {}), universe):
                         continue
                     old_source = row.get('result_source', saved.get('run_id'))
                     groups[old_source].append({**row, 'result_source': old_source,
-                        'refresh_state': 'limited' if attempted(row) else 'pending',
+                        'refresh_state': 'limited' if attempted(row) or _period(row) in failed else 'pending',
                         'detail_loaded': True, 'evidence_chart_available': False})
             previous = []
             for old_source, old_rows in groups.items():
@@ -177,7 +201,22 @@ class RollingDisplay:
                 path = self.root / FILENAME
                 temporary = path.with_name(f'{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
                 try:
-                    temporary.write_bytes(gzip.compress(json.dumps(snapshot, ensure_ascii=False).encode('utf-8'), compresslevel=1))
+                    packed = gzip.compress(json.dumps(snapshot, ensure_ascii=False).encode('utf-8'), compresslevel=1)
+                    # Keep the verified display with its run as well as the
+                    # latest pointer, including interrupted partial batches.
+                    run_folder = self.root/source
+                    if run_folder.is_dir() and run_folder.resolve().parent == self.root.resolve() and not run_folder.is_symlink():
+                        run_file = run_folder/FILENAME
+                        run_tmp = run_file.with_name(temporary.name)
+                        try:
+                            run_tmp.write_bytes(packed)
+                            os.replace(run_tmp, run_file)
+                        except OSError:
+                            pass  # The global display cache can still succeed.
+                        finally:
+                            try: run_tmp.unlink(missing_ok=True)
+                            except OSError: pass
+                    temporary.write_bytes(packed)
                     os.replace(temporary, path)
                     self.dirty = False
                 except OSError:

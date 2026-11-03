@@ -11,14 +11,12 @@ insert_klines(None)→db.klines_insert 首行 klines.empty 对 None 抛 Attribut
 修复=两处对 None/空 df 守卫: 冷路径返回空 DataFrame, 增量路径用库中现有数据兜底,
 与 tdx 家族'如实返回现有数据'口径一致。
 """
-import sys
-import types
+from importlib import import_module
 
 import pandas as pd
 import pytest
 
-if "ccxt" not in sys.modules:
-    sys.modules["ccxt"] = types.ModuleType("ccxt")
+import_module('ccxt')
 
 from chanlun.exchange.exchange_binance import ExchangeBinance  # noqa: E402
 from chanlun.exchange.exchange_binance_spot import ExchangeBinanceSpot  # noqa: E402

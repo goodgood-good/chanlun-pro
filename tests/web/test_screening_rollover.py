@@ -35,6 +35,24 @@ def test_new_scan_keeps_previous_rows_after_page_and_process_reload(tmp_path):
     assert all(r['evidence_chart_available'] is False for r in rows)
 
 
+def test_code_upgrade_preserves_both_formal_and_preview_rows_as_readonly(tmp_path):
+    view=RollingDisplay(tmp_path)
+    formal=row('SH.600001',identity='formal')
+    preview={**row('SH.600001',identity='preview'),'stage':'approaching'}
+    merge(view,run(tmp_path,A,'completed',source_current=True,completed=2),[formal,preview])
+    historical=run(tmp_path,A,'completed',source_current=False,completed=2,
+                   frozen_native_review=True,_workbench_verified=[('a','SH.600001','5m')])
+    rows,_=merge(view,historical,[formal])
+    assert {r['id'] for r in rows}=={'formal','preview'}
+    assert all(r['refresh_state']=='limited' or r['refresh_state']=='pending' for r in rows)
+    assert all(r['evidence_chart_available'] is False for r in rows)
+    restored,_=merge(RollingDisplay(tmp_path),historical,[formal])
+    assert {r['id'] for r in restored}=={'formal','preview'}
+    # Only a new/current successful evaluation can remove the old preview.
+    current=run(tmp_path,B,'completed',source_current=True,completed=2)
+    assert merge(view,current,[])[0]==[]
+
+
 def test_successful_empty_period_removes_old_point_while_new_matches_arrive(tmp_path):
     view=RollingDisplay(tmp_path)
     merge(view,run(tmp_path,A,'completed'),[row('SH.600001'),row('SH.600002')])
@@ -65,6 +83,17 @@ def test_failed_checks_stay_labelled_until_final_result_and_completed_empty_is_a
     assert merge(view,run(tmp_path,C))[0]==[]
 
 
+def test_completed_scan_keeps_failed_periods_readonly_until_a_successful_recheck(tmp_path):
+    view=RollingDisplay(tmp_path)
+    merge(view,run(tmp_path,A,'completed'),[row('SH.600001'),row('SH.600002')])
+    result=run(tmp_path,B,'completed',completed=2,_workbench_failed=[('a','SH.600001','5m')])
+    rows,count=merge(view,result)
+    assert count==1 and rows[0]['code']=='SH.600001'
+    assert rows[0]['refresh_state']=='limited' and rows[0]['evidence_chart_available'] is False
+    assert len(merge(RollingDisplay(tmp_path),result)[0])==1
+    assert merge(view,{**result,'_workbench_failed':[]})==([],0)
+
+
 def test_cancel_then_restart_carries_the_latest_partial_display(tmp_path):
     view=RollingDisplay(tmp_path)
     merge(view,run(tmp_path,A,'completed'),[row('SH.600001'),row('SH.600002')])
@@ -73,6 +102,27 @@ def test_cancel_then_restart_carries_the_latest_partial_display(tmp_path):
     rows,count=merge(view,run(tmp_path,C))
     assert count==2
     assert {r['id']:r['result_source'] for r in rows}=={'replacement':B,'SH.6000025m':A}
+
+
+def test_runtime_update_preserves_last_verified_partial_rows_as_readonly(tmp_path):
+    view=RollingDisplay(tmp_path)
+    merge(view,run(tmp_path,A,'running',completed=1,source_current=True),[row('SH.600001')])
+    unavailable=run(tmp_path,A,'cancelled',completed=1,source_current=False,results_through=0)
+    rows,count=merge(view,unavailable)
+    assert count==1 and rows[0]['result_source']==A
+    assert rows[0]['refresh_state']=='pending' and rows[0]['evidence_chart_available'] is False
+
+
+def test_interrupted_partial_display_bootstraps_after_global_cache_loss(tmp_path):
+    folder=tmp_path/A;folder.mkdir()
+    (folder/'status.json').write_text(json.dumps({'run_id':A,'status':'interrupted','started_at':100,'completed':1}))
+    view=RollingDisplay(tmp_path)
+    merge(view,run(tmp_path,A,'interrupted',completed=1,started_at=100),[row('SH.600001')])
+    assert (folder/FILENAME).exists()
+    (tmp_path/FILENAME).unlink()
+    rows,count=merge(RollingDisplay(tmp_path),run(tmp_path,B,started_at=200))
+    assert count==1 and rows[0]['result_source']==A
+    assert rows[0]['refresh_state']=='pending' and rows[0]['evidence_chart_available'] is False
 
 
 def test_saved_verified_result_bootstraps_a_page_not_opened_during_prior_scan(tmp_path):

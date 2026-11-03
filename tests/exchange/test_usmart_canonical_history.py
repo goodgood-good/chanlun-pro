@@ -70,7 +70,7 @@ def test_default_high_period_contract_is_not_three_thousand_minutes(tmp_path, mo
     exchange._canonical_history = source
     with pytest.raises(CanonicalHistoryPending) as raised:
         exchange.klines('NVDA.US','5m',end_date=cutoff.isoformat())
-    assert raised.value.preparation['required_rows']==3000
+    assert raised.value.preparation['required_rows'] is None
     assert raised.value.preparation['available_rows']<1000
     assert len(pages.calls)<=4
     for _ in range(5):
@@ -81,7 +81,7 @@ def test_default_high_period_contract_is_not_three_thousand_minutes(tmp_path, mo
             pass
     else:
         pytest.fail('bounded slices did not finish available history')
-    assert len(frame)==3000 and frame.date.max()==cutoff
+    assert len(frame)==len(raw)//5 and len(frame)>3000 and frame.date.max()==cutoff
 
 
 def test_open_minute_at_cutoff_cannot_enter_any_completed_period(tmp_path):
@@ -249,7 +249,7 @@ def test_missing_first_expected_minute_is_not_a_partial_left_page(tmp_path,frequ
     assert coverage['reason']=='minute_contract_error' and not coverage['complete']
 
 
-def test_warmed_30m_keeps_three_thousand_expected_high_period_bars(tmp_path,monkeypatch):
+def test_warmed_30m_keeps_all_available_high_period_history(tmp_path,monkeypatch):
     monkeypatch.setattr(config,'US_HISTORY_KLINE_SOURCE','usmart')
     raw,cutoff=minutes(240);source,pages=source_at(tmp_path,raw,cutoff)
     source._save(source._path('NVDA.US',1),raw,{'frontier':raw.date.min().timestamp(),
@@ -257,7 +257,8 @@ def test_warmed_30m_keeps_three_thousand_expected_high_period_bars(tmp_path,monk
         'tail_checked':cutoff.timestamp(),'tail_checked_at':cutoff.timestamp()})
     exchange=ExchangeUSmart('us',client=source.client);exchange._canonical_history=source
     frame=exchange.klines('NVDA.US','30m',end_date=cutoff.isoformat())
-    assert len(frame)==3000 and frame.date.max()==cutoff and pages.calls==[]
+    assert len(frame)==len(raw)//30 and len(frame)>3000 and frame.date.max()==cutoff
+    assert len(pages.calls)==1  # One empty older page establishes the actual source origin.
 
 
 @pytest.mark.parametrize('field',['market','symbol','type','right'])

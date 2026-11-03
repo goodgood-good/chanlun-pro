@@ -145,7 +145,7 @@ var TvIdxMACDBackend = (function () {
           id: "MACD_HTF@tv-basicstudies-1",
           name: "MACD_HTF",
           description: "MACD_HTF",
-          shortDescription: "MACD_HTF",
+          shortDescription: "MACD HTF（平滑参考）",
           is_price_study: false,
           isCustomIndicator: true,
           plots: [
@@ -285,9 +285,9 @@ var TvIdxMACDBackend = (function () {
                 }
                 const hasHigherMacd = this._hasHigherMacd;
 
-                var src_dif = hasHigherMacd ? barsResult.higher_macd_dif : barsResult.macd_dif;
-                var src_dea = hasHigherMacd ? barsResult.higher_macd_dea : barsResult.macd_dea;
-                var src_hist = hasHigherMacd ? barsResult.higher_macd_hist : barsResult.macd_hist;
+                var src_dif = hasHigherMacd ? barsResult.higher_macd_dif : null;
+                var src_dea = hasHigherMacd ? barsResult.higher_macd_dea : null;
+                var src_hist = hasHigherMacd ? barsResult.higher_macd_hist : null;
 
                 if (src_dif) {
                   const dataTime = barsResult.times[barsResult.times.length - 1];
@@ -308,10 +308,11 @@ var TvIdxMACDBackend = (function () {
                   const alignedIndex = smartSearch(barsResult.times, searchTime, rawInterval);
 
                   if (alignedIndex !== -1) {
-                    v_dif = Number(src_dif[alignedIndex]);
-                    v_dea = Number(src_dea[alignedIndex]);
-                    v_hist = Number(src_hist[alignedIndex]);
-                    if (alignedIndex > 0) prev_hist = Number(src_hist[alignedIndex - 1]);
+                    const valueAt = (values, index) => Number.isFinite(values?.[index]) ? values[index] : NaN;
+                    v_dif = valueAt(src_dif, alignedIndex);
+                    v_dea = valueAt(src_dea, alignedIndex);
+                    v_hist = valueAt(src_hist, alignedIndex);
+                    if (alignedIndex > 0) prev_hist = valueAt(src_hist, alignedIndex - 1);
                   }
                 }
               }

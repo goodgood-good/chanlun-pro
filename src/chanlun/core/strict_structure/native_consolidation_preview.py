@@ -16,7 +16,7 @@ from chanlun.core.strict_structure.native_center_signals import _center_sources_
 from chanlun.core.strict_structure.strength import center_entry_comparison_leg, _comparison_leg
 from .preview_momentum import contraction_witness
 
-PREVIEW_RULE = "native_consolidation_early_v1"
+PREVIEW_RULE = "native_consolidation_early_v2"
 PREVIEW_AUDIT = ("cold_rebuild", "closed_bar_replay")
 
 
@@ -152,6 +152,7 @@ def build_native_consolidation_previews(units, centers, strength, frame, histogr
                 "anchor_tick": tail.end_tick, "confirmed_at": None,
                 "available_at": int(as_of.timestamp()), "measurement_end_at": int(as_of.timestamp()),
                 "macd_area_a": area_a, "macd_area_c": area_c, "macd_area_ratio": area_c / area_a,
+                "strength_source": "macd_htf", "strength_frequency": getattr(strength, 'frequency', None),
                 "estimated_area_c": 2 * area_c, "estimate_factor": 2,
                 "preview_trigger":"macd_first_contraction", **contraction,
                 "price_extreme_confirmed": False,

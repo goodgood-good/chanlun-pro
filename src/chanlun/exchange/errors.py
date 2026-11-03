@@ -21,6 +21,19 @@ class USmartHistoryPending(USmartAPIError):
         return type(self), ()
 
 
+class SourcePreparationPending(USmartHistoryPending):
+    public_message = '行情数据正在排队或准备完整窗口，请稍后复核。'
+
+    def __init__(self, preparation=None, code='source_preparation_pending'):
+        super().__init__()
+        self.preparation=dict(preparation or {})
+        self.code=code
+        self.retry_after=max(1,min(300,int(self.preparation.get('retry_after',3))))
+
+    def __reduce__(self):
+        return type(self),(self.preparation,self.code)
+
+
 class LongbridgeConnectionLimitError(RuntimeError):
     """The provider rejected a quote connection; data is unavailable, not empty."""
 

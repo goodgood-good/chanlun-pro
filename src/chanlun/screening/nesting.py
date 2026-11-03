@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from .cache import REPLAY_CHECKS
 from .confirmation import is_confirmed
+from .interval_clock import a_share_opening, contains
 
 STRATEGY = "5m_with_1m_confirmation"
 MAIN_FREQUENCY = "5m"
@@ -38,6 +39,8 @@ def main_interval(snapshot, point):
     return {"kind": "terminal_departure" if first else "first_retest",
             "unit_ids": identifiers, "start_after": start, "end_at": anchor,
             "pivot_after": anchor - 300, "pivot_through": anchor,
+            "start_inclusive": a_share_opening(snapshot, selected[0]['start_time'], minute=35),
+            "pivot_start_inclusive": a_share_opening(snapshot, anchor, minute=35),
             "anchor_tick": point["anchor_tick"]}
 
 
@@ -61,13 +64,13 @@ def matching_confirmations(main_snapshot, point, lower_snapshot, candidates):
                 or lower.get("side") != point["side"]
                 or lower.get("price_basis_revision") != main_snapshot["price_basis_revision"]
                 or lower.get("point_type") not in {"1" + point["side"], "2" + point["side"], "3" + point["side"]}
-                or not interval["start_after"] < lower["anchor_at"] <= interval["end_at"]
+                or not contains(interval, lower['anchor_at'])
                 or not lower["anchor_at"] <= lower["available_at"] <= lower_snapshot["source_closed_at"]):
             continue
         if (point["point_type"].startswith("1")
                 and (lower.get("point_type") != "1" + point["side"]
                      or (lower.get("divergence") or {}).get("kind") != "trend"
-                     or not interval["pivot_after"] < lower["anchor_at"] <= interval["pivot_through"]
+                     or not contains(interval, lower['anchor_at'], pivot=True)
                      or lower["anchor_tick"] != point["anchor_tick"]
                      or type(lower.get("dependency_from")) is not int
                      or lower["dependency_from"] <= interval["start_after"])):
@@ -101,6 +104,15 @@ def attach_confirmation(candidate, interval, lower):
 
 
 def is_nested_observation(item):
+    from .timeframe_policy import POLICY
+    if item.get('nested_confirmation', {}).get('policy') == POLICY:
+        return (item.get('selection_status') == 'approaching'
+                and item.get('point', {}).get('evidence_scope') == 'native_center_signal'
+                and bool(item.get('selection_missing_conditions'))
+                and (set(item.get('reasons', [])) in ({PENDING}, {'NOT_CONFIRMED', PENDING})
+                     or set(item.get('reasons', [])) == {'NOT_CONFIRMED'}
+                     and item.get('point', {}).get('status') == 'approaching'
+                     and item.get('nested_confirmation', {}).get('state') == 'confirmed'))
     return (item.get("nested_confirmation", {}).get("strategy") == STRATEGY
             and item.get("point", {}).get("source_kind") == "segment"
             and item.get("point", {}).get("structural_level") == 0
@@ -113,6 +125,9 @@ def is_nested_observation(item):
 def saved_confirmation_valid(candidate, main_snapshot, lower_snapshot):
     """Recheck the saved association; neither polling nor charts run analysis."""
     record = candidate.get("nested_confirmation", {})
+    from .timeframe_policy import POLICY, saved_binding_valid
+    if record.get('policy') == POLICY:
+        return saved_binding_valid(candidate, main_snapshot, lower_snapshot)
     if record.get("strategy") != STRATEGY:
         return False
     try:

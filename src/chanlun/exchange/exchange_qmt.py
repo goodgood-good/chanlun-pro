@@ -257,24 +257,11 @@ class ExchangeQMT(Exchange):
 
         # 默认回看窗口来自 _lookback 统一来源，修改请改 _lookback.py。
         # 保留 self.DEFAULT_LOOKBACK 字段供外部访问，类内部通过 get_start_date_by_frequency 使用。
-        from chanlun.exchange._lookback import DEFAULT_LOOKBACK_DAYS
+        from chanlun.exchange._lookback import DEFAULT_LOOKBACK_DAYS, get_lookback_timedelta
 
         self.DEFAULT_LOOKBACK = {
-            freq: timedelta(days=days) for freq, days in DEFAULT_LOOKBACK_DAYS.items()
+            freq: get_lookback_timedelta(freq, market="a") for freq in DEFAULT_LOOKBACK_DAYS
         }
-
-        # QMT 的历史覆盖单独配置，其他数据源继续使用共享回看设置。
-        # 5m 回看 365 天，为本周期笔、线段与中枢提供足够的历史。
-        # 1m 覆盖到 60 天(2026-06-25 用户反馈"1m 周期还是太短"):QMT 本地源切标的快、可承受更长
-        # 1m;只覆盖 A股,不动共享 _lookback.py → 美股(长桥)1m 仍 30 天(拉 60 天会切标的卡 20-31s)。
-        # 历史越长，计算量和图表传输量也越大，需要兼顾首次加载耗时；
-        #       且 QMT 实际能回看多少由数据源返回为准(指数/主板通常比个股长,部分个股可能不足 60 天)。
-        QMT_LOOKBACK_OVERRIDE_DAYS = {
-            "1m": 60,  # A股 1m 拉长(本地源快;US 不动以保切标的速度)
-            "5m": 365,  # 本周期结构的历史覆盖
-        }
-        for _freq, _days in QMT_LOOKBACK_OVERRIDE_DAYS.items():
-            self.DEFAULT_LOOKBACK[_freq] = timedelta(days=_days)
 
     def _ensure_live_kline_subscription(
         self,
@@ -692,6 +679,29 @@ class ExchangeQMT(Exchange):
             },
         }
 
+    def download_completed_window(self, codes, period, start, end, *, progress=None):
+        """Refresh an explicit small native window, including existing tail rows."""
+        if period not in {'1m', '5m'} or not codes or len(codes) > 100:
+            raise ValueError('completed history requires 1–100 symbols and a native minute period')
+        if any(not isinstance(code, str) or not code for code in codes) or len(set(codes)) != len(codes):
+            raise ValueError('completed history symbols must be unique nonempty strings')
+        beginning = datetime.datetime.strptime(start, '%Y%m%d%H%M%S')
+        ending = datetime.datetime.strptime(end, '%Y%m%d%H%M%S')
+        if beginning.date() != ending.date() or beginning > ending:
+            raise ValueError('completed history refresh is limited to one explicit day')
+        # The bundled SDK's download_history_data2 can wait indefinitely for a
+        # completion callback. It also owns a shared server download session.
+        # Use the synchronous native range RPC used by _download_history_data;
+        # an explicit range overwrites that window. Release the process lane
+        # after each symbol so screening cannot monopolize live monitoring.
+        for index, code in enumerate(codes):
+            with _xtdata_download_interprocess_lock(), _XTDATA_NATIVE_LOCK:
+                xtdata.get_client().supply_history_data(
+                    self.code_to_qmt(code), period, start, qmt_exclusive_download_end(ending))
+            if progress:
+                progress(index + 1, len(codes))
+        return True
+
     @retry(stop=stop_after_attempt(3), wait=wait_random(min=0.1, max=1))
     def klines(
         self,
@@ -947,6 +957,11 @@ class ExchangeQMT(Exchange):
         shapes = {raw_data[field].shape for field in field_list}
         if len(shapes) != 1 or next(iter(shapes))[0] != 1:
             raise ValueError("QMT K-line response fields must share one-symbol shape")
+        if list(time_col.index) != [qmt_code] or any(
+            not raw_data[field].index.equals(time_col.index)
+            or not raw_data[field].columns.equals(time_col.columns) for field in field_list
+        ):
+            raise ValueError('QMT K-line response identity or field axes differ from the request')
         data_dict = {
             "date": raw_data["time"].values[0],
             "open": raw_data["open"].values[0],

@@ -46,6 +46,17 @@ def test_native_center_notification_uses_confirmed_point_status():
     assert "观察" not in lines[0]
 
 
+@pytest.mark.parametrize('signal_type', ['native_point_preview', 'consolidation_divergence'])
+def test_htf_notification_names_raw_source_without_relabeling_archived_macd(signal_type):
+    row = {**event('warning'), 'signal_type': signal_type, 'point_status': 'warning',
+           'macd_area_a': 10., 'macd_area_c': 2., 'estimate_factor': 2,
+           'preview_trigger': 'macd_first_contraction'}
+    current = '\n'.join(signal_status_lines({**row, 'strength_source': 'macd_htf', 'strength_frequency': '30m'}))
+    assert 'MACD HTF 原始值' in current and '（30m）' in current
+    assert '20.0%' in current and '不含绘图平滑插值' in current
+    assert 'MACD HTF' not in '\n'.join(signal_status_lines(row))
+
+
 def test_early_consolidation_states_dedupe_across_restart_and_allow_a_new_episode(tmp_path):
     transport, clock = Transport(), [1000.]
     path = tmp_path / "early.sqlite3"
@@ -423,7 +434,7 @@ def test_signing_and_destination_validation(http, monkeypatch):
     assert query["timestamp"][0].isdigit() and query["sign"][0]
     assert query["access_token"] == ["private-test-token"]
     monkeypatch.setenv("CHANLUN_DINGTALK_WEBHOOK", "https://example.com/robot/send?access_token=token")
-    assert not DingTalkTransport.configuration()["configured"]
+    assert not DingTalkTransport().configuration()["configured"]
     with pytest.raises(DeliveryError):
         DingTalkTransport().send("提醒")
 

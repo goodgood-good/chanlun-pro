@@ -125,6 +125,19 @@ def test_forced_or_range_queries_bypass_adapter_cache(history, monkeypatch):
     assert forced == [True]
 
 
+def test_transport_timeout_does_not_bypass_us_history_cache(history, monkeypatch):
+    from chanlun.exchange.exchange_cq import ExchangeChangQiao
+    frame, *_ = history
+    exchange = object.__new__(ExchangeChangQiao.__wrapped__)
+    calls=[]
+    monkeypatch.setattr(cache,'load_closed_us_history',lambda **kwargs:calls.append('cache') or frame)
+    monkeypatch.setattr(exchange,'_fetch_klines',lambda *args:calls.append('provider') or frame)
+    assert exchange.klines('QQQ.US','5m',args={'timeout':20}) is frame
+    assert calls==['cache']
+    exchange.klines('QQQ.US','5m',args={'adjustment':'none','timeout':20})
+    assert calls==['cache','provider']
+
+
 def test_manual_refresh_replaces_old_prices_and_a_failed_refresh_cannot_resurrect_them(history):
     frame, observed, calls, read, storage = history
     read()

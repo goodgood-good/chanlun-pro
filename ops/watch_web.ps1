@@ -28,6 +28,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'no_console.ps1')
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
@@ -227,9 +228,8 @@ function Test-WebHealth {
 
 function Invoke-WebRecovery {
     Write-WatchdogLog ('recovery requested after health failure: {0}' -f $healthUri)
-    # Do not capture restart output here. A long-running Web descendant can keep
-    # the capture pipe open after the restart script exits and deadlock recovery.
-    # The deployment has its own log; wait only for the direct child exit code.
+    # Use file handles, not capture pipes, so a long-running Web descendant
+    # cannot hold recovery open after the direct restart process exits.
     $arguments = @(
         '-NoProfile',
         '-ExecutionPolicy',
@@ -247,13 +247,17 @@ function Invoke-WebRecovery {
         $arguments += '-DisableFullSymbolCatalog'
     }
 
-    $restartProcess = Start-Process `
+    $restartProcess = Start-NoConsoleProcess -ProjectRoot $ProjectRoot `
         -FilePath 'powershell.exe' `
         -ArgumentList $arguments `
-        -WindowStyle Hidden `
-        -PassThru
-    $restartProcess.WaitForExit()
-    $exitCode = $restartProcess.ExitCode
+        -RedirectStandardOutput (Join-Path $logRoot 'web_recovery.stdout.log') `
+        -RedirectStandardError (Join-Path $logRoot 'web_recovery.stderr.log')
+    try {
+        $restartProcess.WaitForExit()
+        $exitCode = $restartProcess.ExitCode
+    } finally {
+        $restartProcess.Dispose()
+    }
     if ($exitCode -ne 0) {
         Write-WatchdogLog ('recovery failed with exit code {0}' -f $exitCode)
         return $false

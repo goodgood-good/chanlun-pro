@@ -140,7 +140,8 @@ def _background_snapshot(frame, event, frequency):
 
 
 def background_evidence(event, runs_root, frequency, primary_attrs, *, anchor_frame=None,
-                        fetch=True, max_pages=4, timeout_seconds=20, page_source=None):
+                        fetch=True, max_pages=4, timeout_seconds=20, page_source=None,
+                        previous_coverage=None):
     """Prepare independent long history, without changing delivered evidence.
 
     ``fetch=False`` never asks a provider for history. Normal bounded progress
@@ -162,6 +163,12 @@ def background_evidence(event, runs_root, frequency, primary_attrs, *, anchor_fr
             context = _history_context(event, frequency)
             fetched_anchor = False
             if anchor is None:
+                old_scope = (previous_coverage or {}).get('scope')
+                if anchor_frame is None and old_scope and old_scope != scope:
+                    # Reader upgrades invalidate derived results. The original
+                    # raw anchor remains useful after transient runs are pruned.
+                    old = HistoryArchive(Path(runs_root).parent/'notification_history', old_scope)
+                    anchor_frame, _, _, _ = old.read()
                 if anchor_frame is None:
                     if not fetch:
                         raise HistoryPending(base)
@@ -204,6 +211,10 @@ def background_evidence(event, runs_root, frequency, primary_attrs, *, anchor_fr
                            max_pages=max_pages, timeout_seconds=timeout_seconds, fetch=fetch and not fetched_anchor)
             if page_source is not None and event['market'] in {'us','currency_spot'}:
                 options['page_source'] = page_source
+            if event['market']=='us' and primary_attrs.get('price_basis_provider')=='longbridge':
+                # These are separate, explicitly labelled background panels.
+                # The original signal/context frames and pixels stay frozen.
+                options['allow_source_revisions'] = True
             result = prepare(event, frequency, primary_attrs, **options)
             coverage = {**base, **result.coverage, 'scope':scope}
             if result.coverage.get('scope') and result.coverage['scope'] != scope:
@@ -217,10 +228,10 @@ def background_evidence(event, runs_root, frequency, primary_attrs, *, anchor_fr
                 coverage['state'] = 'source_error'
             elif reason == 'unsupported_source':
                 coverage.update(state='unsupported',can_resume=False)
-            elif not coverage.get('compatible_with_anchor'):
+            elif not (coverage.get('compatible_with_anchor') or coverage.get('independent_source_verified')):
                 coverage.update(state='invalid',can_resume=False)
             else:
-                coverage['state'] = ('source_exhausted' if coverage.get('source_origin')
+                coverage['state'] = ('source_exhausted' if (coverage.get('source_origin') or coverage.get('provider_exhausted'))
                                      and not coverage.get('target_reached') else 'target_reached')
             result = HistoryResult(result.frame, coverage, result.state)
             archive.write(anchor, result)

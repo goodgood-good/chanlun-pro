@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'no_console.ps1')
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
@@ -39,8 +40,9 @@ $arguments = @(
     ('-PoolSize {0}' -f $PoolSize),
     ('-PollSeconds {0}' -f $PollSeconds)
 ) -join ' '
-$action = New-ScheduledTaskAction `
-    -Execute "$PSHOME\powershell.exe" `
+$action = New-NoConsoleTaskAction `
+    -ProjectRoot $ProjectRoot -Label $taskName -OwnProcessTree `
+    -FilePath "$PSHOME\powershell.exe" `
     -Argument $arguments `
     -WorkingDirectory $ProjectRoot
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $identity

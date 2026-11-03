@@ -20,7 +20,7 @@ from chanlun.core.strict_structure.strength import (
     compare_terminal_trend_divergence,
 )
 
-NATIVE_SIGNAL_RULE_BASIS = "user_declared_native_center_macd_v6"
+NATIVE_SIGNAL_RULE_BASIS = "user_declared_native_center_macd_v7"
 
 
 def _epoch(moment: datetime) -> int:
@@ -72,6 +72,7 @@ def _alert(
         "evidence_scope": "native_center_signal",
         "rule_basis": NATIVE_SIGNAL_RULE_BASIS,
         "member_basis": "native_locked_segment",
+        "strength_source": "macd_htf",
         "formal_point_issued": True,
         "tradable": True,
         "structural_level": 0,
@@ -215,7 +216,7 @@ def build_native_center_signals(
                 evidence_codes=("two_separated_same_grade_centers",
                                 "completed_third_class_departure",
                                 "new_trend_price_extreme",
-                                "native_macd_histogram_area_decay",
+                                "raw_htf_histogram_area_decay",
                                 "user_declared_signal_policy"),
                 divergence={
                     "kind": "native_two_center_divergence",
@@ -226,6 +227,8 @@ def build_native_center_signals(
                     "histogram_area_decayed": divergence.histogram_area_decayed,
                     "histogram_peak_decayed": divergence.histogram_peak_decayed,
                     "dif_extreme_decayed": divergence.dif_extreme_decayed,
+                    "strength_source": divergence.strength_source,
+                    "strength_frequency": getattr(strength, 'frequency', None),
                     "first_center_id": previous.center_id,
                     "last_center_id": center.center_id,
                 },

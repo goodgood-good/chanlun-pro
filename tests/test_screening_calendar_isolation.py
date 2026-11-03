@@ -27,7 +27,8 @@ def isolated_run(tmp_path,monkeypatch):
         request={'run_id':tmp_path.name,'settings':settings,'observed_at':'2026-09-17T23:14:00+08:00',
                  'holding_snapshot':{'schema':'monitor-holdings-v1','keys':[]}}
         runner.write_json(tmp_path/'request.json',request)
-        def worker(items,options,contexts,directory,_workers,revision, *, capacity_callback=None):
+        def worker(items,options,contexts,directory,_workers,revision, *, capacity_callback=None, timeout_seconds=None, request=None):
+            assert timeout_seconds == runner.SYMBOL_TIMEOUT_SECONDS
             for stock in items:
                 yield runner._scan_worker_symbol(stock,options,contexts,directory,revision,request),[]
         monkeypatch.setattr(runner,'bounded_scan',worker)

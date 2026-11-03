@@ -17,6 +17,22 @@ from tests.web.test_notification_state_freshness import ready_event as ready_eve
 from tests.web.test_signal_monitor import setup as setup
 
 
+def test_a_completed_dependency_wakes_dispatch_without_authorizing_the_receipt():
+    release,woken=threading.Event(),threading.Event()
+    reads=notification_validation.DependencyReads(wake=woken.set)
+    def slow():
+        assert release.wait(5)
+        return 'read-only-proof'
+    try:
+        assert reads.read('ordinary',slow,time.monotonic()+.01,key='receipt',context_key='epoch') is None
+        assert not woken.is_set()
+    finally:
+        release_lane(reads,'ordinary',release)
+    assert woken.wait(1)
+    assert reads.read('ordinary',lambda:pytest.fail('reuse the completed read'),time.monotonic()+.1,
+                      key='receipt',context_key='epoch')=='read-only-proof'
+
+
 def release_lane(reads, lane, release):
     release.set()
     future = reads._lanes[lane]
@@ -210,29 +226,38 @@ def test_stably_slow_holding_read_eventually_sends_once_via_outbox(ready_event, 
     state['holding_risk_plans']['a:SH.600088:5m'] = {
         'active': True, 'binding_id': 'binding', 'stop_triggered_at': event['available_at']}
     calls = []
+    release = threading.Event()
+    clock = [0.]
 
     def slow_holdings():
         calls.append(1)
-        time.sleep(read_seconds)
+        assert release.wait(5)
         return [{'market': 'a', 'code': 'SH.600088'}]
 
     monkeypatch.setattr(signal_monitor, 'holding_symbols', slow_holdings)
-    started, base = time.monotonic(), service.now().timestamp()
-    now = lambda: base + time.monotonic() - started
+    # Model dependency age and outbox time together. Durable SQLite writes on
+    # a busy host must not spend the read's one-second handoff window. The
+    # real wall-budget tests separately verify that Future waits are bounded.
+    monkeypatch.setattr(notification_validation, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    base = service.now().timestamp()
+    now = lambda: base + clock[0]
     transport = Transport()
     box = DingTalkOutbox(tmp_path / 'slow-holding.sqlite', transport=transport, now=now,
                         signal_validator=service._validate_notification_events)
     box.signal_events([event], since=0)
-    box.deliver_one()
-    assert not transport.messages
-    while not transport.messages and time.monotonic() - started < 3:
-        next_due = box.deliver_one()
-        if next_due is not None:
-            time.sleep(max(.001, min(.5, next_due - now())))
-    assert len(transport.messages) == 1 and calls == [1]
-    box.signal_events([event], since=0)
-    box.deliver_one()
-    assert len(transport.messages) == 1
+    try:
+        box.deliver_one()
+        assert not transport.messages
+        clock[0] = read_seconds
+        release_lane(service._notification_dependency_reads, 'holding', release)
+        clock[0] += .25
+        box.deliver_one()
+        assert len(transport.messages) == 1 and calls == [1]
+        box.signal_events([event], since=0)
+        box.deliver_one()
+        assert len(transport.messages) == 1
+    finally:
+        release_lane(service._notification_dependency_reads, 'holding', release)
 
 
 def test_two_slow_holding_receipts_cannot_evict_each_others_completed_reads(ready_event, monkeypatch, tmp_path):

@@ -9,6 +9,7 @@ from typing import Literal
 import numpy as np
 
 from chanlun.core.strict_structure.identity import stable_structure_id
+from chanlun.core.strict_structure.indicator_source import STRENGTH_SOURCE, strength_macd
 from chanlun.core.strict_structure.models import (
     ConstituentUnit,
     Direction,
@@ -25,8 +26,9 @@ class StrengthSnapshot:
     histogram_area: float | None
     histogram_peak: float | None
     dif_extreme: float
-    source: Literal["macd"]
+    source: Literal["macd", "macd_htf"]
     available_at: datetime
+    dea_extreme: float | None = None
 
     def __post_init__(self) -> None:
         if not self.unit_id:
@@ -39,6 +41,7 @@ class StrengthSnapshot:
                 self.histogram_area,
                 self.histogram_peak,
                 self.dif_extreme,
+                self.dea_extreme,
             )
             if value is not None
         )
@@ -58,7 +61,7 @@ class StrengthSnapshot:
             and self.histogram_peak >= 0
         ):
             raise ValueError("down strength peak must be negative")
-        if self.source != "macd":
+        if self.source not in {"macd", "macd_htf"}:
             raise ValueError("unsupported MACD strength source")
 
 
@@ -190,11 +193,7 @@ class ComparisonLeg:
 
 
 class MacdStrengthProvider:
-    """在来源 ``CL`` 的原生 MACD 上测量每个结构单元。
-
-    递归层级表示结构关系，不等于固定的物理 K 线周期。L0、L1 以及更高层
-    因而读取同一条原生序列，差别只来自各单元覆盖的精确来源 K 线区间。
-    """
+    """Measure each structural interval on the source chart's raw MACD HTF."""
 
     def __init__(self, cd) -> None:
         self._dates = tuple(kline.date for kline in cd.get_src_klines())
@@ -206,15 +205,19 @@ class MacdStrengthProvider:
         ):
             raise ValueError("source K-line dates must be strictly increasing")
 
-        index_values = cd.get_idx()
-        if not isinstance(index_values, dict):
-            raise ValueError("native MACD index result is invalid")
-        native = index_values.get("macd")
-        if not isinstance(native, dict):
-            raise ValueError("native MACD index result is unavailable")
-        self._validate_series(native, "native MACD")
+        native = strength_macd(cd)
+        self._validate_series(native, "MACD HTF raw")
         self._hist_series = np.asarray(native["hist"], dtype=float).copy()
         self._dif_series = np.asarray(native["dif"], dtype=float).copy()
+        self._dea_series = np.asarray(native["dea"], dtype=float).copy()
+        self.frequency = native['target_frequency']
+        self.algorithm = native['algorithm']
+        for series in (self._hist_series, self._dif_series, self._dea_series):
+            series.flags.writeable = False
+
+    @property
+    def histogram(self):
+        return self._hist_series
 
     def _validate_series(self, values: dict, label: str) -> None:
         for key in ("hist", "dif"):
@@ -242,6 +245,7 @@ class MacdStrengthProvider:
         selected_indexes = np.arange(left, right, dtype=int)
         hist = self._hist_series[selected_indexes]
         dif = self._dif_series[selected_indexes]
+        dea = self._dea_series[selected_indexes]
         if not np.isfinite(hist).all() or not np.isfinite(dif).all():
             raise ValueError("MACD slice must be finite")
         if unit.direction == "up":
@@ -249,19 +253,22 @@ class MacdStrengthProvider:
             area = None if directional.size == 0 else float(directional.sum())
             peak = None if directional.size == 0 else float(directional.max())
             dif_extreme = float(dif.max())
+            dea_extreme = float(dea.max())
         else:
             directional = hist[hist < 0]
             area = None if directional.size == 0 else float(abs(directional.sum()))
             peak = None if directional.size == 0 else float(directional.min())
             dif_extreme = float(dif.min())
+            dea_extreme = float(dea.min())
         return StrengthSnapshot(
             unit_id=unit.unit_id,
             direction=unit.direction,
             histogram_area=area,
             histogram_peak=peak,
             dif_extreme=dif_extreme,
-            source="macd",
+            source=STRENGTH_SOURCE,
             available_at=max(unit.available_at, self._dates[right - 1]),
+            dea_extreme=dea_extreme,
         )
 
     def zero_axis_phase_observation(
@@ -303,7 +310,7 @@ class MacdStrengthProvider:
         )
         return {
             "status": status,
-            "source": "native_macd_dif",
+            "source": "raw_macd_htf_dif",
             "first_leg_dif_extreme": earlier_strength.dif_extreme,
             "second_leg_dif_extreme": later_strength.dif_extreme,
             "first_leg_directional": first_directional,

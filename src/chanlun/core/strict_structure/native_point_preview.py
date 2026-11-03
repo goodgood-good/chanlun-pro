@@ -17,13 +17,13 @@ from .native_center_signals import build_native_center_signals
 from .strength import _comparison_leg, MacdStrengthUnavailable
 from .preview_momentum import contraction_witness, contraction_source_valid
 
-PREVIEW_RULE = 'native_point_unconfirmed_v1'
+PREVIEW_RULE = 'native_point_unconfirmed_v2'
 PREVIEW_AUDIT = ('cold_rebuild', 'closed_bar_replay')
 
 
 def preview_codes(point, trigger='closed_local_turn'):
     names = {'completed_third_class_departure':'forming_third_class_departure',
-             'native_macd_histogram_area_decay':'provisional_macd_area_margin',
+             'raw_htf_histogram_area_decay':'provisional_macd_area_margin',
              'first_complete_retest_held':'first_unfinished_retest_held',
              'first_complete_return_held_core':'first_unfinished_return_holds_core'}
     return [names.get(code,code) for code in point['evidence_codes']] + [trigger,'conditional_point_preview']
@@ -117,7 +117,8 @@ def build_point_previews(units, centers, strength, bars, histogram, *, as_of, se
             except (KeyError, ValueError, TypeError, MacdStrengthUnavailable):
                 continue
             witness.update(macd_area_a=area_a, macd_area_c=area_c, estimate_factor=factor,
-                           estimated_area_c=factor*area_c)
+                           estimated_area_c=factor*area_c, strength_source='macd_htf',
+                           strength_frequency=getattr(strength,'frequency',None))
         hypothesis = point['preview_key']
         output.append({**point, 'point_id':stable_structure_id(PREVIEW_RULE, hypothesis),
             'render_kind':'point_approaching', 'status':'approaching', 'strict_status':'approaching',

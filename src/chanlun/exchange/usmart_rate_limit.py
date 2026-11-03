@@ -111,10 +111,11 @@ class USmartRateLimiter:
     when its HTTP session is a fixture rather than a live provider transport.
     """
     def __init__(self, root=None, *, clock=time.time, monotonic=time.monotonic,
-                 sleep=time.sleep, is_alive=_process_alive):
+                 sleep=time.sleep, is_alive=_process_alive, bucket=None):
         self.root = None if root is None else Path(root)
         self.clock, self.monotonic, self.sleep = clock, monotonic, sleep
         self.is_alive = is_alive
+        self.bucket = bucket or _bucket
 
     def _root(self):
         if self.root is not None:
@@ -177,7 +178,7 @@ class USmartRateLimiter:
             raise ValueError("uSMART rate-limit timeout must be positive")
         if priority not in {"interactive", "background"}:
             raise ValueError("uSMART quote priority must be interactive or background")
-        identity, interval = _bucket(host, channel, endpoint)
+        identity, interval = self.bucket(host, channel, endpoint)
         path = self._root() / (identity + ".json")
         started = self.monotonic()
         deadline, ticket = started + timeout, uuid4().hex

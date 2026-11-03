@@ -1,11 +1,28 @@
-"""Noon scans use important periods and one shared finite retry budget."""
+"""Noon scans finish their important periods without a wall-clock deadline."""
 from copy import deepcopy
 from datetime import timedelta
+from unittest.mock import Mock
 
 from cl_app.services import monitor_schedule
 from cl_app.services.signal_monitor import monitor_settings
 from tests.web.test_signal_monitor import setup
 from tests.web.test_monitor_incremental_priority import monitor, publish_candidate, consume_increment
+
+
+def test_daily_schedule_waits_for_same_run_recovery_before_starting_over(setup):
+    service,manual,_,clock=setup
+    clock[0]=clock[0].replace(hour=11,minute=35)
+    service.tick()
+    manual.state.update(status='interrupted',source_current=True)
+    recovery=manual._automatic_recovery=Mock()
+    recovery.pending.return_value=True
+    clock[0]+=timedelta(minutes=2)
+    service.tick()
+    assert len(manual.started)==1
+    recovery.pending.return_value=False
+    manual.state['recovery_error']='original input is unavailable'
+    service.tick()
+    assert len(manual.started)==2
 
 
 def test_noon_uses_5m_30m_without_changing_afternoon_or_live_1m(setup):
@@ -15,33 +32,44 @@ def test_noon_uses_5m_30m_without_changing_afternoon_or_live_1m(setup):
     original=deepcopy(service._load()['settings']['screening'])
     service.tick()
     assert manual.started[0]['frequencies']==['5m','30m']
-    assert manual.state['deadline_at']==(clock[0]+timedelta(minutes=20)).timestamp()
+    assert 'deadline_at' not in manual.state
+    assert 'deadline_at' not in service._load()['daily']['morning']
     assert service._load()['settings']['screening']==original
     assert '1m' in monitor_settings(service._load(),manual.started[0])['frequencies']
 
 
-def test_noon_retry_reuses_original_deadline_instead_of_resetting_twenty_minutes(setup):
+def test_noon_retries_can_run_after_twenty_minutes_but_keep_attempt_limit(setup):
     service, manual, live, clock = setup
     clock[0]=clock[0].replace(hour=11,minute=35)
     service.tick()
-    deadline=manual.state['deadline_at']
     manual.state.update(status='failed',error='PermissionError: failed retirement')
     assert service._load()['daily']['morning']['retry_at']==(clock[0]+timedelta(minutes=1)).timestamp()
     clock[0]+=timedelta(minutes=1)
     service.tick()
-    assert len(manual.started)==2 and manual.state['deadline_at']==deadline
+    assert len(manual.started)==2 and 'deadline_at' not in manual.state
     manual.state.update(status='failed',error='PermissionError: failed retirement')
     clock[0]+=timedelta(minutes=20)
     service.tick()
-    assert len(manual.started)==2
-    assert service._load()['daily']['morning']['status']=='timed_out'
+    assert len(manual.started)==3
+    assert service._load()['daily']['morning']['status']=='started'
+    manual.state.update(status='failed',error='PermissionError: failed retirement')
+    clock[0]+=timedelta(minutes=1)
+    service.tick()
+    assert len(manual.started)==3
 
 
-def test_late_noon_start_cannot_run_past_1255(setup):
+def test_late_noon_start_runs_past_1255_without_restart_or_cancellation(setup):
     service, manual, _, clock=setup
     clock[0]=clock[0].replace(hour=12,minute=50)
     service.tick()
-    assert manual.state['deadline_at']==clock[0].replace(minute=55).timestamp()
+    assert 'deadline_at' not in manual.state
+    clock[0]+=timedelta(minutes=8)
+    service.tick()
+    assert len(manual.started)==1
+    assert manual.state['status']=='running' and not manual.state.get('cancel_requested')
+    view=monitor_schedule.describe(service._load(),manual.status(),clock[0])
+    assert '持续处理至完成' in view['detail']
+    assert '20 分钟' not in view['detail'] and '12:55' not in view['detail']
 
 
 def test_budget_stop_is_visible_as_partial_and_never_whole_market_completion(setup):
@@ -49,7 +77,7 @@ def test_budget_stop_is_visible_as_partial_and_never_whole_market_completion(set
     clock[0]=clock[0].replace(hour=11,minute=35)
     service.tick()
     manual.state.update(status='cancelled',stop_reason='time_budget',completed=6000,total=10000,
-                        finished_at=manual.state['deadline_at'])
+                        finished_at=(clock[0]+timedelta(minutes=20)).timestamp())
     service._record_daily_run(manual.status())
     state=service._load()
     assert state['daily']['morning']['status']=='partial'
@@ -74,18 +102,34 @@ def test_time_budget_keeps_audited_candidates_and_imports_the_last_committed_pre
     assert 'a:SZ.000001' in service._load()['seed']['codes']
 
 
-def test_failed_noon_start_does_not_extend_the_budget(setup,monkeypatch):
+def test_failed_noon_start_can_retry_after_old_deadline(setup,monkeypatch):
     service,manual,_,clock=setup
     clock[0]=clock[0].replace(hour=11,minute=35)
-    def unavailable(*args,**kwargs):
-        raise OSError('fixture startup unavailable')
-    monkeypatch.setattr(manual,'start',unavailable)
-    service.tick()
-    deadline=service._load()['daily']['morning']['deadline_at']
+    with monkeypatch.context() as patch:
+        def unavailable(*args,**kwargs):
+            raise OSError('fixture startup unavailable')
+        patch.setattr(manual,'start',unavailable)
+        service.tick()
+    service._startup_retries['daily']['retry_at']=0
     clock[0]+=timedelta(minutes=21)
     service.tick()
-    assert service._load()['daily']['morning']['deadline_at']==deadline
-    assert service._load()['daily']['morning']['status']=='timed_out'
+    assert service._load()['daily']['morning']['status']=='started'
+    assert 'deadline_at' not in manual.state
+
+
+def test_resumed_legacy_partial_run_updates_daily_completion(setup):
+    service,manual,_,clock=setup
+    clock[0]=clock[0].replace(hour=11,minute=35)
+    service.tick()
+    phase=service._load()['daily']['morning']
+    phase.update(status='partial',completed=6,total=10,deadline_at=clock[0].timestamp())
+    manual.state.update(resume_count=1,completed=8,total=10)
+    view=monitor_schedule.describe(service._load(),manual.status(),clock[0])
+    assert view['status']=='running' and '正在续算 8 / 10' in view['detail']
+    manual.state.update(status='completed',completed=10,successful_period_count=9,finished_at=clock[0].timestamp())
+    service._record_daily_run(manual.status())
+    assert phase['status']=='completed' and phase['completed']==10
+    assert 'deadline_at' not in phase
 
 
 def test_noon_phase_is_valid_when_manual_settings_use_one_period_macd_filter(setup):

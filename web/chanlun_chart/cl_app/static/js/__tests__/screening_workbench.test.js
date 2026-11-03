@@ -17,6 +17,39 @@ const rows=[
   {id:'b',market:'us',code:'AAPL',name:'Apple',frequency:'5m',point:{},stage:'monitoring',origin:'watchlist'},
   {id:'c',market:'a',code:'SZ.301004',name:'另一候选',frequency:'30m',point:{point_type:'2buy'},stage:'confirmed',origin:'screening',sectors:['other']},
 ];
+test('unclassified filtering does not invent sector mappings for unknown or unsupported markets',()=>{
+  const values=[rows[0],{...rows[0],id:'us',market:'us',code:'AAPL.US',sectors:[]},
+    {...rows[0],id:'missing-catalog',sectors:['unknown']}];
+  assert.deepEqual(filterRows(values,{...filters,sector:'__unclassified__'},{},{media:'传媒'}).map(row=>row.id),['us','missing-catalog']);
+});
+test('lower confirmation labels distinguish incomplete data, no match, unstarted checks and internal proof',()=>{
+  const {lowerConfirmationText}=require('../screening_workbench.js');
+  assert.match(lowerConfirmationText({nested_confirmation:{state:'waiting',check_state:'not_checked'}}),/尚未检查/);
+  assert.match(lowerConfirmationText({nested_confirmation:{state:'waiting',check_state:'no_match',assessment:{reason:'LOWER_PIVOT_WINDOW_MISMATCH'}}}),/已检查未匹配.*目标 5m/);
+  assert.match(lowerConfirmationText({nested_confirmation:{state:'unavailable',data_errors:['LOWER_HISTORY_INCOMPLETE']}}),/历史未覆盖/);
+  const text=lowerConfirmationText({nested_confirmation:{state:'confirmed',check_state:'confirmed',evidence_type:'internal_divergence'}});
+  assert.match(text,/内部力度/);assert.doesNotMatch(text,/一买/);
+});
+test('optional third-sell first-center filtering requires bound sequence proof instead of the old scalar',()=>{
+  const base={...rows[0],point:{point_type:'3sell',status:'confirmed',evidence_scope:'native_center_signal',
+    center_ordinal:1,center_id:'c',available_at:200}};
+  const proof={schema:'native-first-center-sequence-v2',state:'first',ordinal:1,direction:'down',
+    center_id:'c',known_at:200,origin_center_id:'c',preceding_center_ids:[],
+    origin_witness:{kind:'opposite_departure_and_separated_centers'}};
+  const candidates=[
+    {...base,id:'missing'},
+    {...base,id:'later',center_sequence:{...proof,state:'later',ordinal:3}},
+    {...base,id:'unknown',center_sequence:{...proof,state:'unverified',ordinal:null}},
+    {...base,id:'wrong-center',center_sequence:{...proof,center_id:'other'}},
+    {...base,id:'wrong-clock',center_sequence:{...proof,known_at:300}},
+    {...base,id:'wrong-direction',center_sequence:{...proof,direction:'up'}},
+    {...base,id:'first',point:{...base.point,center_ordinal:99},center_sequence:proof},
+    {...base,id:'second-buy',point:{point_type:'2buy'}},
+    {...rows[0],id:'third-buy'},
+  ];
+  assert.equal(filterRows(candidates,{...filters,center_order:'all'}).length,9);
+  assert.deepEqual(filterRows(candidates,{...filters,center_order:'first'}).map(r=>r.id),['first','second-buy','third-buy']);
+});
 test('candidate pages are bounded and retain global filters beyond the first page',()=>{
   const all=Array.from({length:121},(_,i)=>({...rows[0],id:String(i),name:i===120?'target':'ordinary'}));
   assert.equal(pageRows(all,1).rows.length,50);

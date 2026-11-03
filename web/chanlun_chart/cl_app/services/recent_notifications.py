@@ -13,12 +13,17 @@ import sqlite3
 import threading
 import time
 
-from .monitor_view import LABELS
+from .monitor_view import LABELS, POINT_TYPES
 
 STAGES = {"confirmed": "确认", "warning": "预警", "approaching": "未确认预警", "invalidated": "失效", "triggered": "触发", "left": "退出"}
 STATUSES = {"sent": "已发送", "pending": "待发送", "failed": "发送失败", "expired": "已过期", "suppressed": "静默", "unknown": "状态未知"}
 KINDS = {"signal": "买卖点", "consolidation": "盘整背驰", "risk": "持仓风控", "screening": "选股摘要", "chart": "通知图表"}
 EVENT_FIELDS = frozenset({
+    'warning_state', 'warning_assessment', 'candidate_updated', 'candidate_previous_price',
+    'candidate_updated_at', 'preview_trigger_active', 'invalidation_reason_code', 'invalidation_checked_at',
+    'lower_check_state', 'lower_assessment', 'lower_evidence_type',
+    'center_sequence',
+    'timeframe_policy', 'operating_role', 'background_30m', 'lower_confirmation_state', 'lower_frequency',
     'preview_repriced','preview_key','confirmed_preview_id',
     'preview_trigger','estimated_area_c','estimate_factor',
     "id", "market", "code", "name", "frequency", "point_type", "signal_type", "stage", "point_status",
@@ -54,7 +59,7 @@ def _unpack(value):
 
 
 def parse_options(args, now):
-    allowed = {"page", "size", "page_size", "q", "status", "kind", "scope", "frequency", "hours", "as_of", "cursor"}
+    allowed = {"page", "size", "page_size", "q", "status", "kind", "scope", "frequency", "point_type", "hours", "as_of", "cursor"}
     if set(args) - allowed or (hasattr(args, "getlist") and any(len(args.getlist(k)) != 1 for k in args)):
         raise ValueError("通知筛选参数不合法")
     if "size" in args and "page_size" in args:
@@ -69,6 +74,7 @@ def parse_options(args, now):
     if len(result["q"]) > 100:
         raise ValueError("搜索内容不能超过100个字符")
     choices = {"status": {"all", "sent", "pending", "failed", "expired", "suppressed"},
+               'point_type': {'all', *POINT_TYPES},
                "kind": {"all", *KINDS}, "scope": {"all", "holdings"},
                "frequency": {"all", "1m", "5m", "30m"}, "hours": {"24", "168", "720", "all"}}
     for field, values in choices.items():
@@ -94,7 +100,7 @@ def parse_options(args, now):
 
 
 def _filter_key(options):
-    return hashlib.sha256(json.dumps({"order": ORDER_BASIS, **{k: options[k] for k in ("q", "status", "kind", "scope", "frequency", "hours")}},
+    return hashlib.sha256(json.dumps({"order": ORDER_BASIS, **{k: options[k] for k in ("q", "status", "kind", "scope", "frequency", "point_type", "hours")}},
                                     sort_keys=True).encode()).hexdigest()[:20]
 
 
@@ -119,7 +125,7 @@ def _body(content):
 
 def _delivery_status(status):
     return ('sent' if status == 'sent' else 'pending' if status in ('pending', 'retry', 'sending')
-            else status if status in ('failed', 'expired') else 'unknown')
+            else status if status in ('failed', 'expired', 'suppressed') else 'unknown')
 
 
 def _chart_periods(value):
@@ -147,12 +153,14 @@ def _public_history(value):
                 public[field] = stamp
             elif isinstance(stamp, str) and re.fullmatch(r'\d{4}-\d\d-\d\d(?:T[0-9:.+Z-]+)?', stamp):
                 public[field] = stamp
-        for field in ('target_days','rows'):
+        for field in ('target_days','rows','source_revision_rows'):
             if type(row.get(field)) is int and row[field] >= 0:
                 public[field] = row[field]
-        for field in ('target_reached','source_origin'):
+        for field in ('target_reached','source_origin','provider_exhausted','original_frozen_preserved'):
             if type(row.get(field)) is bool:
                 public[field] = row[field]
+        if row.get('source_view') in ('current_source_history','frozen_compatible_history'):
+            public['source_view'] = row['source_view']
         result[frequency] = public
     return result
 
@@ -253,7 +261,8 @@ class RecentNotifications:
             if self.now() - self._metadata_at < 15:
                 return self._metadata
             try:
-                state = json.loads((self.root / "state.json").read_text(encoding="utf-8"))
+                from chanlun.screening.state_io import read_state_json
+                state = read_state_json(self.root / "state.json")
                 events, profiles = {}, {}
                 values = [*state.get("signals", {}).values(), *state.get("unverified_signals", {}).values(),
                           *state.get("events", [])]
@@ -296,6 +305,8 @@ class RecentNotifications:
                 args.append("consolidation_divergence" if options["kind"] == "consolidation" else "holding_risk")
         if options["frequency"] != "all":
             clauses.append(f"{value('frequency')}=?"); args.append(options["frequency"])
+        if options['point_type'] != 'all':
+            clauses.append(f"{value('point_type')}=?"); args.append(options['point_type'])
         if options["scope"] == "holdings":
             if not held:
                 clauses.append("0")
@@ -323,12 +334,12 @@ class RecentNotifications:
             expression = f"EXISTS (SELECT 1 FROM json_each({payload}) j WHERE {event_filter})"
             # Unstructured screening summaries have no per-symbol payload.
             # Do not let receipt-wide text satisfy a different signal's filter.
-            if options['q'] and kind in ('all', 'screening') and options['scope'] == options['frequency'] == 'all':
+            if options['q'] and kind in ('all', 'screening') and options['scope'] == options['frequency'] == options['point_type'] == 'all':
                 expression = f"({expression} OR (o.kind='screening' AND lower(o.content) LIKE ? ESCAPE '\\'))"
                 event_args.append(event_args[-1])
             where.append(expression); args.extend(event_args)
         source = f"FROM outbox o LEFT JOIN signal_payloads p ON p.outbox_id=o.id WHERE {' AND '.join(where)}"
-        status = "CASE WHEN o.status='sent' THEN 'sent' WHEN o.status IN ('pending','retry','sending') THEN 'pending' WHEN o.status IN ('failed','expired') THEN o.status ELSE 'unknown' END"
+        status = "CASE WHEN o.status='sent' THEN 'sent' WHEN o.status IN ('pending','retry','sending') THEN 'pending' WHEN o.status IN ('failed','expired','suppressed') THEN o.status ELSE 'unknown' END"
         return source, args, status, payload
 
     def _silent_rows(self, options, held, *, count_only=False, after=None):
@@ -426,6 +437,8 @@ class RecentNotifications:
                     return False
                 if options['frequency'] != 'all' and event.get('frequency') != options['frequency']:
                     return False
+                if options['point_type'] != 'all' and event.get('point_type') != options['point_type']:
+                    return False
                 if options['scope'] == 'holdings' and f"{event.get('market','a')}:{event.get('code')}" not in held:
                     return False
                 text = ' '.join(str(event.get(k) or '') for k in ('code','name','point_type'))
@@ -436,7 +449,7 @@ class RecentNotifications:
             # of the same actually sent message from its detail or counts.
             events = [e for e in events if matches(e)] + [e for e in events if not matches(e)]
         status = ('sent' if row['status'] == 'sent' else 'pending' if row['status'] in ('pending','retry','sending')
-                  else row['status'] if row['status'] in ('failed','expired') else 'unknown')
+                  else row['status'] if row['status'] in ('failed','expired','suppressed') else 'unknown')
         item = self._item('d.' + _pack(row['id']), status, row['kind'], events, row['created'], row['sent'], row['error'])
         body, title = _body(row['content'])
         if row['kind'] in ('screening','chart'):
@@ -489,8 +502,8 @@ class RecentNotifications:
             return False
         since = 0 if options['hours'] == 'all' else now - int(options['hours']) * 3600
         current = {**options, 'as_of': now, 'since': max(options['as_of'], since)}
-        if options['status'] == 'suppressed':
-            return self._silent_rows(current, held, after=options['as_of'])
+        if options['status'] == 'suppressed' and self._silent_rows(current, held, after=options['as_of']):
+            return True
         with self._read('dingtalk_outbox.sqlite3') as db:
             if db is None:
                 return False
@@ -501,6 +514,20 @@ class RecentNotifications:
                 params.extend(statuses)
             return db.execute('SELECT 1 ' + source + f' AND ({DELIVERY_TIME})>? LIMIT 1',
                               [*params, options['as_of']]).fetchone() is not None
+
+    def _suppressed_receipts(self, options, held):
+        with self._read('dingtalk_outbox.sqlite3') as db:
+            if db is None:
+                return []
+            source,params,_,payload=self._delivery_sql(options,held)
+            source+=" AND o.status='suppressed'"
+            cursor=options.get('cursor')
+            if cursor:
+                source+=f' AND (({DELIVERY_TIME})<? OR (({DELIVERY_TIME})=? AND o.id<?))'
+                params += [cursor['at'],cursor['at'],cursor['id']]
+            return [self._receipt_item(row,options) for row in db.execute(
+                f'SELECT o.*, {payload} AS events {source} ORDER BY ({DELIVERY_TIME}) DESC,o.id DESC LIMIT ?',
+                [*params,options['size']+1]).fetchall()]
 
     def list(self, args):
         options = parse_options(args, self.now())
@@ -531,9 +558,17 @@ class RecentNotifications:
                     rows = [self._receipt_item(row, options) for row in db.execute(
                         f"SELECT o.*, {payload} AS events {source} ORDER BY ({DELIVERY_TIME}) DESC,o.id DESC LIMIT ? OFFSET ?",
                         [*params, options['size'] + 1, 0 if cursor else (options['page']-1)*options['size']]).fetchall()]
-        summary['suppressed'] = self._silent_rows(options, held, count_only=True)
+        summary['suppressed'] += self._silent_rows(options, held, count_only=True)
         if options['status'] == 'suppressed':
-            total = summary['suppressed']; rows = self._silent_rows(options, held)
+            total = summary['suppressed']
+            offset=0 if options.get('cursor') else (options['page']-1)*options['size']
+            if offset>=total:
+                rows=[]
+            else:
+                window={**options,'page':1,'size':offset+options['size']}
+                rows=self._silent_rows(window,held)+self._suppressed_receipts(window,held)
+                rows.sort(key=lambda item:(item['sort_at'],item['_source_id']),reverse=True)
+                rows=rows[offset:offset+options['size']+1]
         has_more = len(rows) > options['size']
         rows = rows[:options['size']]
         cursor = None
@@ -604,6 +639,7 @@ class RecentNotifications:
             state = job.get('status')
             retry = {'pending': '补图等待重试', 'running': '正在重试补图', 'failed': '补图重试失败',
                      'expired': '补图已过期，未补发', 'ready': '补图生成已完成，请查看关联图表回执',
+                     'limited': '图表已生成，部分长期历史来源受限',
                      'unavailable': '补图生成状态暂不可读取'}.get(state)
             current = _job_history(job)
             limited = [p for p, value in current.items() if value['state'] in ('unsupported','invalid')]
@@ -615,6 +651,8 @@ class RecentNotifications:
         else:
             note = '原始图' + delivery + ('；三个周期齐全' if coverage['coverage_status'] == 'complete' else '；周期完整性未记录')
         for period, value in coverage.get('history_coverage', {}).items():
+            if value.get('source_view') == 'current_source_history':
+                note += f'；{period}历史回看含事后修订，原通知证据保留'
             if value['state'] == 'source_exhausted':
                 note += f'；{period}{value.get("source_label") or "当前来源"}已取尽' + ('（不足目标范围）' if value.get('target_reached') is False and value.get('target_days') else '')
         return note
@@ -711,8 +749,64 @@ class RecentNotifications:
             if not result['metadata_complete']: result['record_notes'].append('历史记录没有保留完整标的信息。')
         else:
             raise ValueError('通知标识不合法')
+        result['charts'] = self.chart_links(identity, result.get('signals', []),
+                                           _events(receipt['events']) if identity.startswith('d.') else None,
+                                           notification=result)
         result.pop('_source_id',None)
         return result
+
+    @property
+    def chart_viewer(self):
+        from .notification_viewer import NotificationViewer
+        with self._lock:
+            if not hasattr(self, '_chart_viewer'):
+                self._chart_viewer = NotificationViewer(self.root, now=self.now)
+            return self._chart_viewer
+
+    def chart_event(self, identity, index):
+        if type(index) is not int or index < 0:
+            raise ValueError('图表序号不合法')
+        if identity.startswith('d.'):
+            receipt = self._receipt(_unpack(identity[2:]))
+            events = _events(receipt['events']) if receipt else []
+            return events[index] if index < len(events) else None
+        if not re.fullmatch(r's\.[a-f0-9]{64}', identity):
+            raise ValueError('通知标识不合法')
+        if index != 0:
+            return None
+        with self._read('signal_analytics.sqlite3') as db:
+            row = db.execute('SELECT signal_id,stage,recorded FROM events WHERE id=? AND external=0',
+                             (identity[2:],)).fetchone() if db else None
+        if row is None:
+            return None
+        from chanlun.screening.state_io import read_state_json
+        try:
+            state = read_state_json(self.root / 'state.json')
+            return next((event for event in state.get('events', []) if event.get('id') == row['signal_id']
+                         and event.get('stage') == row['stage'] and event.get('recorded_at') == row['recorded']), None)
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def chart_links(self, identity, signals, saved_events=None, *, notification=None):
+        from .notification_viewer import ChartUnavailable, current_chart_settings, current_chart_url, event_version
+        charts = []
+        for index, signal in enumerate(signals):
+            current = current_chart_url(signal)
+            if current is None:
+                continue
+            saved = (saved_events[index] if index < len(saved_events) else None) if saved_events is not None else self.chart_event(identity, index)
+            available = self.chart_viewer.available(saved)
+            try:
+                settings = current_chart_settings(signal, notification or {})
+                view_url = f'/monitor/notifications/{identity}/current-chart/{index}?version={event_version(settings)}'
+            except ChartUnavailable:
+                view_url = None
+            charts.append({'index':index, 'market':signal.get('market','a'), 'code':signal.get('code'), 'name':signal.get('name'),
+                'frequency':signal.get('frequency'), 'point_type':signal.get('point_type'), 'stage':signal.get('stage'),
+                'source_closed_at':signal.get('source_closed_at'), 'available':available,
+                'url':f'/monitor/notifications/{identity}/charts/{index}?version={event_version(saved)}' if available else None,
+                'view_url':view_url, 'current_url':current, 'note':'' if available else '当时行情数据未保存或已过期，可查看当前行情。'})
+        return charts
 
     def image_path(self, identity, index, version=None):
         if (not identity.startswith('d.') or type(index) is not int or index < 0 or index > 100

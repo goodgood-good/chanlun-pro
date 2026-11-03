@@ -172,6 +172,36 @@ def test_memory_pressure_releases_idle_workers_and_resumes_without_losing_stocks
     assert pool.started_processes==2
 
 
+def test_optional_maintenance_does_not_reserve_full_scan_capacity_and_waits_for_foreground(pool,tmp_path,monkeypatch):
+    from chanlun.screening import compute_capacity
+    calls=[]
+    def pressure(_budget,*,monitor=False):
+        calls.append(monitor)
+        return {'limit':2,'background_until':time.time()+10 if len(calls)<3 else 0}
+    monkeypatch.setattr(compute_capacity,'update_resource_budget',pressure)
+    rows=results(scan(pool,tmp_path/'maintenance',workers=2,
+        request={'compute_budget':{'limit':2},'background_maintenance':True}))
+    assert len(rows)==1 and len(calls)>=3 and all(calls)
+    assert pool.started_processes==1
+
+
+@pytest.mark.parametrize('available,expected_starts',[(8192,2),(2300,3)])
+def test_monitor_reservation_keeps_warm_children_only_with_memory_headroom(pool,tmp_path,monkeypatch,available,expected_starts):
+    from chanlun.screening import compute_capacity
+    stocks=[{'code':'SH.600001','name':'one'},{'code':'SH.600002','name':'two'}]
+    first=results(scan(pool,tmp_path/'warm',stocks,workers=2))
+    pressure={'limit':2,'screening_capacity':1,'monitor_capacity':1,'monitor_reserved':1,
+              'available_mb':available,'reserve_mb':2048}
+    monkeypatch.setattr(compute_capacity,'update_resource_budget',lambda *a,**k:dict(pressure))
+    results(scan(pool,tmp_path/'reserved',stocks[:1],workers=2,request={'compute_budget':{'limit':2}}))
+    assert len(pool.slots)==(2 if available==8192 else 1)
+    pressure.update(screening_capacity=2,monitor_reserved=0,available_mb=8192)
+    later=results(scan(pool,tmp_path/'restored',stocks,workers=2,request={'compute_budget':{'limit':2}}))
+    assert pool.started_processes==expected_starts
+    if available==8192:
+        assert {r['pid'] for r in first}=={r['pid'] for r in later}
+
+
 def test_critical_memory_requeues_unpublished_work_without_a_false_failure(pool,tmp_path,monkeypatch):
     from chanlun.screening import compute_capacity
     marker=tmp_path/'first_attempt'

@@ -9,9 +9,9 @@ const row=(id,category,when=10)=>({id,code:'SH.600000',market:'a',name:id,freque
   point:{point_id:id,point_type:'3buy',status:'approaching',available_at:when},
   higher_context:{schema,category,priority:priorities[category],label:category,periods:[]}});
 
-test('linkage is the default order while every unconfirmed category stays visible',()=>{
-  const filters=normalizeViewState(null).filters;
-  assert.equal(filters.sort,'linkage');
+test('linkage ordering is explicit while every unconfirmed category stays visible',()=>{
+  const defaults=normalizeViewState(null).filters;assert.equal(defaults.sort,'recent');
+  const filters={...defaults,sort:'linkage'};
   const input=[row('risk','countertrend',30),row('unknown','unverified',40),row('turn','turning',20),row('support','aligned',10)];
   assert.deepEqual(filterRows(input,filters).map(r=>r.id),['support','turn','risk','unknown']);
   assert.equal(input[0].id,'risk');
@@ -27,7 +27,7 @@ test('one operating period remains selected when filtering linkage verdicts',()=
 
 test('old views retain period and unconfirmed choice when adopting linkage order',()=>{
   const state=normalizeViewState({version:3,filters:{signal_period:'30m',signal_points:['1buy'],point_status:'forming',sort:'recent'}});
-  assert.equal(state.filters.sort,'linkage');
+  assert.equal(state.filters.sort,'recent');
   assert.equal(state.filters.point_status,'forming');
   assert.equal(state.filters.signal_period,'30m');
   assert.deepEqual(state.filters.signal_points,['1buy']);
@@ -63,8 +63,9 @@ test('visible linkage meanings distinguish support, reversal and missing evidenc
   assert.match(higherContextMeaning({category:'aligned'}),/不要求三个周期/);
   assert.match(higherContextMeaning({category:'turning'}),/不能视为已经反转/);
   assert.match(higherContextMeaning({category:'unverified'}),/不等于当前周期没有买卖点/);
-  assert.match(periodLinkPlan('1m'),/5m、30m 背景/);
-  assert.match(periodLinkPlan('30m'),/30m 为最高参考周期/);
+  assert.match(periodLinkPlan('1m'),/5m 交易状态和 30m 背景/);
+  assert.match(periodLinkPlan('5m'),/1m 确认.*30m 判断背景/);
+  assert.equal(periodLinkPlan('30m'),'','background is embedded in the trade view');
   assert.match(higherContextText(null),/联动待核验/);
   assert.equal(higherContextDetail({category:'retired',trend:{kind:'trend'}}),higherContextText(null));
   assert.equal(filterRows([row('missing',undefined)],{...normalizeViewState(null).filters,higher:'unverified'}).length,1);

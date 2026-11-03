@@ -259,11 +259,15 @@ def test_live_failures_never_restore_exited_candidates_or_publish_unverified_one
     assert failed["status"]["live_unverified_count"] == 0
     assert failed["status"]["live_recheck_version"] != good_version
 
-    # A first failure carries no successful negative proof and suspends the
-    # row instead. Recovery can restore it without altering its point facts.
+    # A failure without successful negative proof suspends admission, while
+    # retaining a clearly labelled readonly reference for the existing row.
     records[key] = {"error": True, "failed_at": 1234, "failed_cutoff": cutoff + 300}
     failed = workbench.dashboard(compact=True)
-    assert failed["candidates"] == []
+    assert len(failed['candidates']) == 1
+    assert failed['candidates'][0]['refresh_state'] == 'limited'
+    assert failed['candidates'][0]['evidence_chart_available'] is False
+    assert failed['status']['current_result_count'] == 0
+    assert failed['status']['previous_result_count'] == 1
     assert failed["status"]["live_exclusion_count"] == 0
     assert failed["status"]["live_unverified_count"] == 1
     with pytest.raises(ValueError, match="复核失败"):
@@ -666,7 +670,7 @@ def test_restored_routes_require_login_and_writes_keep_csrf(fixture_run):
     app.config["LOGIN_DISABLED"] = True
     assert client.post("/screening/reviews", json={}).status_code == 400
     html = client.get("/decision-support/early-screening").get_data(as_text=True)
-    for module in ("板块筛选", "sector-level", "sector-prev", "sector-next", "买卖点与关注队列", "人工确认清单", "chart-layout"):
+    for module in ("板块筛选", "sector-level", "sector-prev", "sector-next", "本轮选股结果", "previous-results", "人工确认清单", "chart-layout"):
         assert module in html
     assert 'id="run-source"' not in html
     assert "结果来源" not in html

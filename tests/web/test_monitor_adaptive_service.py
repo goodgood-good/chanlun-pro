@@ -246,6 +246,44 @@ def test_untrusted_or_missing_timing_does_not_create_a_measurement():
     assert not state["monitor_period_costs"]
 
 
+def test_complete_task_cost_replaces_legacy_primary_cost_and_survives_wall_clock_rollback():
+    from chanlun.screening.worker_transport import TIMING_SCOPE
+    state = {'monitor_period_costs': {'5m': {'seconds': 3., 'samples': 50}}}
+    period = {'frequency': '5m', 'timings_ms': {'total': 12000},
+              'processing_timeline': {'measurement_scope': TIMING_SCOPE,
+                  'calculation_started_at': 100, 'calculation_finished_at': 99}}
+    record_costs(state, [period])
+    assert state['monitor_period_costs']['5m'] == {'seconds': 12., 'samples': 1, 'measurement_scope': TIMING_SCOPE}
+    record_costs(state, [{'frequency': '5m', 'processing_timeline': {
+        'calculation_started_at': 100, 'calculation_finished_at': 103}}])
+    assert state['monitor_period_costs']['5m']['seconds'] == 12.
+    assert state['monitor_period_costs']['5m']['samples'] == 1
+    record_costs(state, [{**period, 'timings_ms': {'total': 10000}}])
+    assert state['monitor_period_costs']['5m']['seconds'] == 11.6
+
+
+@pytest.mark.parametrize('duration', [None, float('nan'), float('inf'), -1, 0, True, 180001])
+def test_invalid_complete_task_cost_does_not_fall_back_to_partial_time(duration):
+    from chanlun.screening.worker_transport import TIMING_SCOPE
+    state = {}
+    record_costs(state, [{'frequency': '5m', 'timings_ms': {'total': duration},
+        'processing_timeline': {'measurement_scope': TIMING_SCOPE,
+                               'calculation_started_at': 100, 'calculation_finished_at': 103}}])
+    assert not state['monitor_period_costs']
+
+
+def test_linked_period_cost_changes_the_live_capacity_estimate():
+    from chanlun.screening.worker_transport import TIMING_SCOPE
+    state, keys, decisions, planned, targets = pressure_state(.25)
+    before = service_pressure(state, planned, targets, decisions, set(keys), 0, 16)
+    record_costs(state, [{'frequency': '5m', 'timings_ms': {'total': 12000},
+        'processing_timeline': {'measurement_scope': TIMING_SCOPE,
+                               'calculation_started_at': 100, 'calculation_finished_at': 112}}])
+    after = service_pressure(state, planned, targets, decisions, set(keys), 0, 16)
+    assert after['required_workers'] > before['required_workers'] and after['overdue_pressure'] is True
+    assert service_pressure(state, planned, targets, decisions, set(), 0, 16)['overdue_pressure'] is False
+
+
 def test_measured_demand_uses_the_effective_memory_limit_for_escalation(
     cold, monkeypatch
 ):
@@ -267,16 +305,16 @@ def test_measured_demand_uses_the_effective_memory_limit_for_escalation(
     monkeypatch.setattr(
         "cl_app.services.signal_monitor.publish_monitor_demand", publish
     )
-    # Seven workers fit the physical CPU's normal split, but not the actual
-    # eight-slot memory budget's 6/2 split. Upgrade to 7/1 in this dispatch.
+    # Measured pressure is compared with the effective memory-limited pool.
+    # The expanded lease still leaves two of its eight slots to screening.
     assert (
         service._monitor_capacity(
             16, True, service_estimate={"required_workers": 7, "boost_ready": True}
         )
-        == 7
+        == 6
     )
-    assert calls == [(16, False), (7, True)]
-    assert service._last_compute_limits["screening_capacity"] == 1
+    assert calls == [(8, False), (7, True)]
+    assert service._last_compute_limits["screening_capacity"] == 2
 
 
 def test_reported_wait_is_admission_age_not_old_market_clock_age():

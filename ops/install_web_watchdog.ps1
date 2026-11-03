@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'no_console.ps1')
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
@@ -29,8 +30,9 @@ $taskName = 'ChanlunProWebWatchdog-{0}' -f $token.Substring(0, 12)
 $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ProjectRoot "{1}" -WebPort {2}' -f `
     $watchdogScript, $ProjectRoot, $WebPort
-$action = New-ScheduledTaskAction `
-    -Execute "$PSHOME\powershell.exe" `
+$action = New-NoConsoleTaskAction `
+    -ProjectRoot $ProjectRoot -Label $taskName `
+    -FilePath "$PSHOME\powershell.exe" `
     -Argument $arguments `
     -WorkingDirectory $ProjectRoot
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser

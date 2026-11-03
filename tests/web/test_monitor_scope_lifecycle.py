@@ -55,9 +55,19 @@ def queued_event(lifecycle, point_type='3buy'):
             'change': 'discovered', 'external_notifications': True}
 
 
+def hold_for_minute_notifications(lifecycle, monkeypatch):
+    # Independent 1m delivery is now a holding-only rule. Keep these recheck
+    # regressions on that supported path instead of bypassing the policy.
+    service, _, _, _, key, _ = lifecycle
+    service._load().update(holding_symbols=[key], holding_source_current=True)
+    monkeypatch.setattr('cl_app.services.signal_monitor.holding_symbols',
+                        lambda: [{'market': 'a', 'code': key.split(':', 1)[1]}])
+
+
 @pytest.mark.parametrize('kind', ['text', 'chart'])
 @pytest.mark.parametrize('check_state', ['missing', 'stale', 'failed', 'current_positive'])
-def test_queued_minute_notice_with_empty_current_state_waits_for_real_recheck(lifecycle, tmp_path, kind, check_state):
+def test_queued_minute_notice_with_empty_current_state_waits_for_real_recheck(lifecycle, tmp_path, kind, check_state, monkeypatch):
+    hold_for_minute_notifications(lifecycle, monkeypatch)
     service, _, _, clock, key, _ = lifecycle
     event = queued_event(lifecycle)
     state = service._load()
@@ -99,7 +109,8 @@ def test_queued_minute_notice_with_empty_current_state_waits_for_real_recheck(li
 
 
 @pytest.mark.parametrize('kind', ['text', 'chart'])
-def test_recheck_with_a_current_negative_retires_the_queued_notice(lifecycle, tmp_path, kind):
+def test_recheck_with_a_current_negative_retires_the_queued_notice(lifecycle, tmp_path, kind, monkeypatch):
+    hold_for_minute_notifications(lifecycle, monkeypatch)
     service, _, _, clock, key, _ = lifecycle
     event = queued_event(lifecycle)
     state = service._load()
@@ -126,7 +137,8 @@ def test_recheck_with_a_current_negative_retires_the_queued_notice(lifecycle, tm
 
 @pytest.mark.parametrize('reason', ['current_negative', 'known_exit', 'newer_status', 'expired',
                                     'unauthorized', 'removed_symbol', 'removed_period', 'disabled_type'])
-def test_missing_state_does_not_resurrect_a_cancelled_or_ineligible_notice(lifecycle, reason):
+def test_missing_state_does_not_resurrect_a_cancelled_or_ineligible_notice(lifecycle, reason, monkeypatch):
+    hold_for_minute_notifications(lifecycle, monkeypatch)
     service, _, _, clock, key, _ = lifecycle
     event = queued_event(lifecycle)
     state = service._load()
@@ -147,8 +159,29 @@ def test_missing_state_does_not_resurrect_a_cancelled_or_ineligible_notice(lifec
         state['seed']['settings']['frequencies'] = ['5m']
     else:
         state['seed']['settings']['point_types'] = ['1sell']
+        state['point_notifications']['holdings'] = ['1sell']
     assert service._validate_notification_events([event]) == ([], [])
     assert not service._notification_rechecks and not state['signals']
+
+
+@pytest.mark.parametrize('kind', ['text', 'chart'])
+@pytest.mark.parametrize('frequency', ['1m', '30m'])
+def test_old_ordinary_nontrade_receipts_expire_without_recheck_or_send(lifecycle, tmp_path, kind, frequency):
+    service, _, _, clock, _, _ = lifecycle
+    event = {**queued_event(lifecycle), 'frequency': frequency}
+    transport = Mock()
+    box = DingTalkOutbox(tmp_path / 'scoped_outbox.sqlite', transport=transport,
+                        now=lambda: clock[0].timestamp(), signal_validator=service._validate_notification_events)
+    if kind == 'text':
+        box.signal_events([event], since=0)
+    else:
+        box.enqueue_chart(event, 'https://example.invalid/immutable.png')
+    box.deliver_one()
+    with box._connect() as db:
+        assert db.execute('SELECT status FROM outbox').fetchone()[0] == 'expired'
+    assert not service._notification_rechecks
+    transport.send.assert_not_called()
+    transport.send_markdown.assert_not_called()
 
 
 def checkpoint(lifecycle):
@@ -212,7 +245,7 @@ def test_negative_discovery_keeps_membership_and_checkpoint_across_restart(lifec
 
 
 @pytest.mark.parametrize('protected_by', ['holding', 'watchlist', 'bound_risk', 'pending_notice'])
-def test_cold_minute_checkpoint_cannot_postpone_protected_work(lifecycle, protected_by):
+def test_cold_minute_checkpoint_cannot_postpone_protected_work(lifecycle, protected_by, monkeypatch):
     service, _, live, clock, key, _ = lifecycle
     checkpoint(lifecycle)
     state = service._load()
@@ -225,6 +258,7 @@ def test_cold_minute_checkpoint_cannot_postpone_protected_work(lifecycle, protec
         state['holding_risk_plans'][key + ':1m'] = {
             'market': 'a', 'code': 'SH.600000', 'frequency': '1m', 'active': True}
     else:
+        hold_for_minute_notifications(lifecycle, monkeypatch)
         event = queued_event(lifecycle)
         assert service._validate_notification_events([event]) == ([], [event])
     service._schedule_monitor(clock[0], None)

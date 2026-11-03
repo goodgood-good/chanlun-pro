@@ -131,7 +131,7 @@ _FREQUENCY_LABELS = {
     "y": "Year",
 }
 _CALENDAR_FREQUENCIES = frozenset({"d", "w", "m", "q", "6m", "y"})
-_US_HISTORY_SOURCES = frozenset({"usmart", "longbridge"})
+_US_HISTORY_SOURCES = frozenset({"usmart", "longbridge", "dual"})
 _KLINE_COLUMNS = [
     "date",
     "frequency",
@@ -605,6 +605,7 @@ class ExchangeUSmart(Exchange):
         client: USmartClient | None = None,
         history_exchange: Exchange | None = None,
         history_cache=None,
+        history_source=None,
     ):
         market_key = str(market).lower()
         if market_key not in _MARKET_API_CODES:
@@ -620,7 +621,7 @@ class ExchangeUSmart(Exchange):
         self.tz = pytz.timezone(_MARKET_TIMEZONES[market_key])
         self._us_history_source = (
             str(
-                getattr(config, "US_HISTORY_KLINE_SOURCE", "usmart")
+                history_source or getattr(config, "US_HISTORY_KLINE_SOURCE", "usmart")
             ).strip().lower()
             if market_key == "us"
             else "usmart"
@@ -673,7 +674,7 @@ class ExchangeUSmart(Exchange):
                                     all_origin=False, max_pages=4, timeout_seconds=20,
                                     fetch=True, args=None):
         """Bounded canonical source coverage; never reinterpret a frozen signal."""
-        if self.market != 'us' or self._us_history_source != 'usmart':
+        if self.market != 'us' or self._us_history_source not in {'usmart','dual'}:
             raise ValueError('native canonical history requires the uSMART US source')
         return self._canonical_source().window(code, frequency, cutoff=cutoff,
             right=self._right_type(dict(args or {})), target_from=target_from, all_origin=all_origin,
@@ -709,6 +710,19 @@ class ExchangeUSmart(Exchange):
             or right_type != 1
         ):
             return None
+        if self._us_history_source=='dual':
+            source=getattr(self,'_dual_history_source',None)
+            if source is None:
+                from .us_dual_history import DualUSHistory
+                def longbridge():
+                    if self._us_history_exchange is None:
+                        from .exchange_cq import ExchangeChangQiao
+                        self._us_history_exchange=ExchangeChangQiao()
+                    return self._us_history_exchange
+                native=ExchangeUSmart('us',client=self.client,history_cache=self._history_cache,history_source='usmart')
+                source=DualUSHistory(native,longbridge,primary=getattr(config,'US_HISTORY_PRIMARY_SOURCE','longbridge'))
+                self._dual_history_source=source
+            return source
         if self._us_history_exchange is None:
             credentials = tuple(
                 os.getenv(name)
@@ -881,12 +895,15 @@ class ExchangeUSmart(Exchange):
             raise ValueError(f"uSMART does not support frequency {frequency!r}")
         args = dict(args or {})
         canonical_minute = args.pop("_canonical_closed_minute", False) is True
+        pinned_provider = args.pop('_history_provider',None)
         right_type = self._right_type(args)
         history_exchange = self._configured_us_history_exchange(
             frequency,
             right_type,
         )
         if history_exchange is not None:
+            if self._us_history_source=='dual' and pinned_provider is not None:
+                args['_history_provider']=pinned_provider
             # This adapter promises completed labels even when its selected
             # history provider uses opening labels.  Never mix the conventions
             # across the display bars and their common 1m structure source.
@@ -954,13 +971,14 @@ class ExchangeUSmart(Exchange):
             from chanlun.exchange._lookback import get_lookback_timedelta
             observed = pd.Timestamp.now(tz=self.tz)
             end = observed if end_date is None else min(observed, _to_local_timestamp(end_date, self.tz, end_of_day=True))
-            start = (end-get_lookback_timedelta(frequency) if start_date is None
+            start = (end-get_lookback_timedelta(frequency, market=self.market) if start_date is None
                      else _to_local_timestamp(start_date,self.tz))
             count = min(1000, _positive_number(args.get('count',getattr(config,'USMART_KLINE_PAGE_SIZE',1000)),1000,integer=True))
             pages = _positive_number(args.get('pages',getattr(config,'USMART_KLINE_MAX_PAGES',10)),10,integer=True)
-            # The native service returns at most300 rows per page. Retain the
-            # prior high-period window, not3000 minutes divided into600/100 bars.
-            rows = None if start_date is not None else min(count,300)*pages
+            # Pagination is a per-call budget, not a default history horizon.
+            # Explicit count/pages requests may still ask for a shorter window.
+            rows = (min(count, 300)*pages if start_date is None
+                    and any(key in args for key in ('count', 'pages')) else None)
             frame, coverage = self._canonical_source().window(code, frequency, cutoff=end,
                 right=right_type, target_from=start, target_rows=rows, count=count, legacy_pages=pages,
                 max_pages=4, timeout_seconds=min(20.,_positive_number(args.get('timeout',15),15)),
@@ -1001,7 +1019,14 @@ class ExchangeUSmart(Exchange):
         else:
             from chanlun.exchange._lookback import get_lookback_timedelta
 
-            start_bound = end_bound - get_lookback_timedelta(frequency)
+            start_bound = end_bound - get_lookback_timedelta(frequency, market=self.market)
+        if self.market == 'us' and 'pages' not in args:
+            # Native noncanonical periods also need the requested date range,
+            # rather than a silent ten-page truncation. Intraday pages cap at 300.
+            bars_per_day = (math.ceil(390 / int(frequency[:-1]))
+                            if frequency.endswith('m') and frequency[:-1].isdigit() else 1)
+            days = max(1, math.ceil((end_bound-start_bound).total_seconds()/86400))
+            max_pages = max(max_pages, math.ceil(days*bars_per_day/min(page_size, 300)) + 1)
         if start_bound > end_bound:
             raise ValueError("start_date must not be later than end_date")
 
@@ -1120,6 +1145,29 @@ class ExchangeUSmart(Exchange):
         return frame
 
     def ticks(self, codes: List[str]) -> Dict[str, Tick]:
+        if self.market!='us' or self._us_history_source!='dual' or not codes:
+            return self._native_ticks(codes)
+        failure=None
+        try:
+            result=self._native_ticks(codes)
+        except Exception as exc:
+            failure=exc
+            result={}
+        missing=[code for code in codes if code not in result]
+        if missing:
+            from .quote_capacity import worker_quote_cancelled,QuoteConnectionCancelled
+            if worker_quote_cancelled():
+                raise QuoteConnectionCancelled('US quote request cancelled')
+            try:
+                source=self._configured_us_history_exchange('1m',1)._provider('longbridge')
+                alternate=source.ticks(missing)
+                result.update({code:alternate[code] for code in missing if code in alternate})
+            except Exception:
+                if not result and failure is not None:
+                    raise failure
+        return result
+
+    def _native_ticks(self, codes: List[str]) -> Dict[str, Tick]:
         if not codes:
             return {}
         secu_to_project = {self._to_secu_id(code): code for code in codes}

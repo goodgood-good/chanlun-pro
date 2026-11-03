@@ -11,6 +11,7 @@ docs/superpowers/specs/2026-05-18-kline-precision-normalization-design.md
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from chanlun.tools.log_util import LogUtil
@@ -82,6 +83,21 @@ def _round_half_up(value: Optional[float], decimals: int) -> Optional[float]:
 _OHLC_COLUMNS = ("open", "high", "low", "close")
 
 
+def _round_float_columns(frame, columns, decimals):
+    """Round each distinct binary64 value once, using the scalar decimal rule.
+
+    Factorize bits, not numeric equality: -0.0 and +0.0 must stay distinct.
+    This also retains nonfinite values without approximate float rounding at
+    half-tick boundaries. Other dtypes keep the original scalar conversion.
+    """
+    values = frame[columns].to_numpy(dtype=np.float64).copy(order="C")
+    codes, unique = pd.factorize(values.ravel().view(np.uint64), sort=False)
+    rounded = np.fromiter((_round_half_up(float(value), decimals)
+                           for value in unique.view(np.float64)), dtype=np.float64,
+                          count=len(unique))
+    return rounded[codes].reshape(values.shape)
+
+
 def normalize_kline_precision(df: Optional[pd.DataFrame], market: Optional[str], code: str) -> Optional[pd.DataFrame]:
     """把 K 线 DataFrame 的 OHLC 四列按市场/标的精度严格四舍五入。
 
@@ -101,8 +117,13 @@ def normalize_kline_precision(df: Optional[pd.DataFrame], market: Optional[str],
             )
             return df
         out = df.copy()
+        floats = [col for col in _OHLC_COLUMNS if col in out.columns
+                  and isinstance(out[col].dtype, np.dtype) and out[col].dtype.kind == "f"
+                  and out[col].dtype.itemsize <= 8]
+        if floats:
+            out[floats] = _round_float_columns(out, floats, decimals)
         for col in _OHLC_COLUMNS:
-            if col in out.columns:
+            if col in out.columns and col not in floats:
                 out[col] = out[col].map(lambda v: _round_half_up(v, decimals))
         return out
     except Exception as e:

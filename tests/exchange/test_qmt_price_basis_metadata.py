@@ -48,8 +48,11 @@ class _FakeXt:
         return None
 
     @staticmethod
-    def get_market_data(**_kwargs):
-        return _market_data()
+    def get_market_data(**kwargs):
+        result = _market_data()
+        for values in result.values():
+            values.index = kwargs['stock_list']
+        return result
 
     @classmethod
     def get_divid_factors(cls, _code):

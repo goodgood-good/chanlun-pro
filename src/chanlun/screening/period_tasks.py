@@ -1,5 +1,5 @@
 """Publish independent native periods without waiting for a symbol's 1m work."""
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 
 PERIOD_ORDER = ('5m', '30m', '1m')
@@ -20,6 +20,12 @@ class PeriodProgress:
         self.required = {(s.get('market','a'),s['code']):set(frequencies) for s in stocks}
         self.completed = defaultdict(set)
         self.finished = 0
+        self.period_totals = Counter(period for periods in self.required.values() for period in periods)
+        self.period_completed = Counter()
+
+    def snapshot(self):
+        return {period: {'completed': self.period_completed[period], 'total': total}
+                for period, total in sorted(self.period_totals.items(), key=lambda item: PERIOD_ORDER.index(item[0]))}
 
     def accept(self, result):
         symbol = result.get('market','a'), result['code']
@@ -29,6 +35,7 @@ class PeriodProgress:
         if self.completed[symbol] & set(periods):
             raise ValueError('screening period result was committed twice')
         self.completed[symbol].update(periods)
+        self.period_completed.update(periods)
         if self.completed[symbol] == self.required[symbol]:
             self.finished += 1
         return self.finished

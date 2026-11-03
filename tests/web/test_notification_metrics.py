@@ -7,6 +7,31 @@ from cl_app.services.dingtalk_notifications import DingTalkOutbox
 from tests.web.test_dingtalk_notifications import Transport, event
 
 
+def test_linked_period_work_is_not_misattributed_to_result_reading():
+    from chanlun.screening.worker_transport import TIMING_SCOPE
+    timeline = {'measurement_scope': TIMING_SCOPE, 'source_closed_at': 1000,
+                'scheduled_at': 1001, 'calculation_started_at': 1002, 'fetched_at': 1003,
+                'primary_calculation_finished_at': 1005, 'calculation_finished_at': 1014, 'detected_at': 1015}
+    row = {'kind': 'signals', 'created': 1015, 'send_started': 1016, 'sent': 1017,
+           'events': json.dumps([{**event('confirmed', stamp=1015), 'source_closed_at':1000, 'notification_timeline': timeline}])}
+    measures = summarize([row])[0]['measures']
+    assert measures['compute']['average_seconds'] == 2
+    assert measures['coordination']['average_seconds'] == 9
+    assert measures['result_wait']['average_seconds'] == 1
+    assert sum(measures[name]['average_seconds'] for name in (
+        'schedule_wait', 'worker_wait', 'fetch', 'compute', 'coordination', 'result_wait', 'detection_to_sent'
+    )) == measures['cutoff_to_sent']['average_seconds']
+
+
+@pytest.mark.parametrize('timeline', ['unavailable', [1000, 1001], 3])
+def test_malformed_optional_timeline_keeps_authoritative_receipt_metrics(timeline):
+    row = {'kind': 'signals', 'created': 1015, 'send_started': 1016, 'sent': 1017,
+           'events': json.dumps([{**event('confirmed', stamp=1015), 'notification_timeline': timeline}])}
+    measures = summarize([row])[0]['measures']
+    assert measures['provider']['average_seconds'] == 1
+    assert 'compute' not in measures and 'coordination' not in measures
+
+
 def test_latency_uses_actual_receipts_and_preserves_missing_historical_stages():
     detailed = {
         **event("confirmed", stamp=1010),

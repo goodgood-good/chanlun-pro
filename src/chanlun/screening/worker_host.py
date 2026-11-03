@@ -114,6 +114,9 @@ def serve(root, generation, *, idle_seconds=IDLE_SECONDS, poll_seconds=0.5,
                         heartbeat=lambda: publish('running', directory.name))
                     last_work = time.monotonic()
                     publish('idle', force=True)
+                    from .source_prefetch import run_idle_prefetch
+                    run_idle_prefetch(root, directory, candidate[1], pool, revision, generation,
+                                      revision_reader=revision_reader)
             finally:
                 try:
                     pool.close()

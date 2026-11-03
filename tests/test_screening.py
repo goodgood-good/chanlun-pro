@@ -376,7 +376,7 @@ def test_unrelated_lower_signal_cannot_confirm_five_minute_point(nested_sample, 
     main, lower = nested_sample["snapshots"]["5m"], nested_sample["snapshots"]["1m"]
     point, small = main["levels"][0]["points"][0], lower["levels"][0]["points"][0]
     if fault == "before_interval":
-        small["anchor_at"] = main["screening_segments"][0]["start_time"] - 300
+        small["anchor_at"] = main["screening_segments"][0]["start_time"] - 301
     elif fault == "after_interval":
         small["anchor_at"] = point["anchor_at"] + 60
     elif fault == "opposite":
@@ -1108,12 +1108,13 @@ def test_fetch_repairs_interior_gap_and_uses_trading_day_history(sample, monkeyp
     frame, _, context = sample
     exchange = Mock()
     exchange.get_start_date_by_frequency.return_value = "20260901000000"
-    exchange.klines.side_effect = [frame.drop(index=len(frame)-150), frame]
+    exchange.klines.side_effect = [frame.drop(index=len(frame)-150), None, frame]
     monkeypatch.setattr(runner, "_exchange", lambda: exchange)
     assert runner.fetch_frame("SH.600000", "5m", context) is frame
-    first, second = exchange.klines.call_args_list
+    first, minute_probe, second = exchange.klines.call_args_list
     assert first.kwargs["start_date"] <= context["history_from"].replace("-", "")
     assert first.kwargs["args"]["skip_download"] is True
+    assert minute_probe.args[1] == '1m' and minute_probe.kwargs['args']['skip_download'] is True
     assert second.kwargs["args"] == {"exact_end": True,"local_only":True}
 
 

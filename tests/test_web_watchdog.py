@@ -65,7 +65,7 @@ def test_restart_launches_single_instance_watchdog_without_recursion() -> None:
         assert f"$arguments += '-{switch}'" in watchdog
     assert "watchdog.lock" in watchdog
     assert "[IO.FileShare]::None" in watchdog
-    assert "$restartProcess = Start-Process" in watchdog
+    assert "$restartProcess = Start-NoConsoleProcess" in watchdog
     assert "$restartProcess.WaitForExit()" in watchdog
     assert "$output = & powershell.exe" not in watchdog
     assert "Register-ScheduledTask" in installer

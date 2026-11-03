@@ -37,7 +37,7 @@ def test_ready_host_is_reused_after_a_new_web_manager_instance(dispatcher):
     manager, popen = dispatcher
     first = manager.start(BODY, holding_snapshot=[])
     assert first['worker_pid'] == 1234
-    assert 'chanlun.screening.worker_host' in popen.call_args.args[0]
+    assert 'cl_app.services.native_preparation_host' in popen.call_args.args[0]
     finish(manager, first)
     restored = screening.ScreeningManager(manager.root, warm_results=False, reuse_workers=True)
     second = restored.start({**BODY, 'frequencies': ['30m']}, holding_snapshot=[])

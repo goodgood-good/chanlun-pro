@@ -3,6 +3,7 @@
 from collections import Counter
 from copy import deepcopy
 import math
+from .monitor_scope import independent_monitor_periods
 
 LABELS = {
     "1buy": "一买",
@@ -15,7 +16,13 @@ LABELS = {
     "consolidation_down": "向下盘整背驰",
     'risk_stop':'结构止损触发','risk_reverse':'反向信号确认',
 }
+POINT_TYPES = ('1buy', '2buy', '3buy', '1sell', '2sell', '3sell')
 ROW_FIELDS = {
+    'warning_state', 'warning_assessment', 'candidate_updated', 'candidate_previous_price',
+    'candidate_updated_at', 'preview_trigger_active', 'invalidation_reason_code', 'invalidation_checked_at',
+    'lower_check_state', 'lower_assessment', 'lower_evidence_type',
+    'center_sequence',
+    'timeframe_policy', 'operating_role', 'background_30m',
     "holding",
     "data_freshness",
     "expected_closed_at",
@@ -50,12 +57,17 @@ ROW_FIELDS = {
     "lower_confirmation_state",
     "lower_frequency",
     "coverage_state",
+    "coverage_message",
+    "coverage_reasons",
     "minute_monitoring",
     "warning_recovery_pending",
     "warning_reactivated",
     'exit_reasons','reference_point_type','stop_price','trigger_price','reverse_point_type','reverse_price',
 }
 STATE_FIELDS = {
+    'source_waiting_periods',
+    'suspended_periods',
+    'quote_only_symbols',
     "enabled",
     "dingtalk_enabled",
     "point_notifications",
@@ -91,7 +103,10 @@ def _page_options(name, options):
     scope = options.get(name + "_scope", "all")
     if scope not in ("all", "holdings"):
         raise ValueError("标的范围仅支持全部或我的持仓")
-    return page, size, query, scope
+    point_type = options.get(name + '_point_type', 'all')
+    if point_type not in ('all', *POINT_TYPES):
+        raise ValueError('买卖点筛选不合法')
+    return page, size, query, scope, point_type
 
 
 def validate_page_options(options):
@@ -102,11 +117,12 @@ def validate_page_options(options):
 
 
 def _page(rows, name, options):
-    page, size, query, scope = _page_options(name, options)
+    page, size, query, scope, point_type = _page_options(name, options)
     matched = [
         row
         for row in rows
         if (scope != "holdings" or row.get("holding"))
+        and (point_type == 'all' or row.get('point_type') == point_type)
         and (not query
         or query
         in " ".join(
@@ -134,6 +150,7 @@ def _page(rows, name, options):
         "overall": len(rows),
         "query": query,
         "scope": scope,
+        'point_type': point_type,
     }
 
 
@@ -152,6 +169,11 @@ def paged_state(raw, options, revision, source_current, *, expected_cutoffs=None
     held = set(raw.get("holding_symbols", []))
     expected_cutoffs = expected_cutoffs or {}
     def freshness(market, code, frequency):
+        paused=raw.get('suspended_periods',{}).get(f'{market}:{code}',{}).get(frequency)
+        if paused:
+            return 'suspended' if paused.get('state')=='suspended' else 'scheduled'
+        if f'{market}:{code}:{frequency}' in raw.get('source_waiting_periods',{}):
+            return 'pending'
         if not revision and source_current is not True:
             return 'pending'
         key=f'{market}:{code}:{frequency}'
@@ -188,12 +210,19 @@ def paged_state(raw, options, revision, source_current, *, expected_cutoffs=None
         f"{row.get('market', 'a')}:{row.get('code')}"
         for row in [*raw.get("errors", []), *raw.get("schedule_errors", [])]
     }
+    contract_errors = {}
+    for issue in [*raw.get('errors', []), *raw.get('schedule_errors', [])]:
+        reasons = set(issue.get('reasons', [])) & {'SESSION_CALENDAR_UNAVAILABLE', 'BAR_TIME_LABEL_UNAVAILABLE'}
+        if reasons:
+            key = f"{issue.get('market', 'a')}:{issue.get('code')}"
+            contract_errors.setdefault(key, []).append((issue.get('frequency'), reasons))
     pool = []
     for symbol in symbols:
         key = f"{symbol.get('market', 'a')}:{symbol['code']}"
         minute = (minute_scope or {}).get('per_symbol', {}).get(key, {})
         periods = []
-        for frequency in frequencies:
+        enabled_periods = independent_monitor_periods(raw, key)
+        for frequency in enabled_periods:
             value = freshness(symbol.get('market','a'),symbol['code'],frequency)
             if (frequency == '1m' and value == 'updating'
                     and minute.get('classification') == 'background'
@@ -206,11 +235,32 @@ def paged_state(raw, options, revision, source_current, *, expected_cutoffs=None
             else 'pending' if not periods or 'pending' in periods
             else 'updating' if 'updating' in periods
             else 'scheduled' if 'scheduled' in periods
+            else 'suspended' if 'suspended' in periods
             else 'ready'
         )
+        blocked = set()
+        coverage_reasons = set()
+        for frequency, reasons in contract_errors.get(key, []):
+            blocked.update(enabled_periods if frequency is None else {frequency})
+            coverage_reasons.update(reasons)
+        if enabled_periods and enabled_periods <= blocked:
+            health = 'unsupported'
+        paused=raw.get('suspended_periods',{}).get(key,{})
+        paused_message=''
+        if paused:
+            fact=next(iter(paused.values()))
+            paused_message=(f"停牌至 {fact.get('resume_label','')}，等待复牌后的有效K线"
+                if any(v.get('state')=='suspended' for v in paused.values()) else
+                '复牌后等待首根完整K线：'+'、'.join(sorted(paused)))
         coverage[health] += 1
         pool.append({**symbol, "coverage_state": health, "holding": key in held,
-                     'minute_monitoring': minute.get('classification')})
+                     'minute_monitoring': minute.get('classification'),
+                     **({'coverage_message':paused_message} if paused_message else {}),
+                     **({'coverage_reasons': sorted(coverage_reasons),
+                         'coverage_message': '；'.join(label for reason, label in (
+                             ('SESSION_CALENDAR_UNAVAILABLE', '缺少已核实的交易时段'),
+                             ('BAR_TIME_LABEL_UNAVAILABLE', '分钟K线时间口径尚未核实')) if reason in coverage_reasons)}
+                        if coverage_reasons else {})})
     pool.sort(key=lambda row: not row["holding"])
     holding_coverage = Counter(row['coverage_state'] for row in pool if row['holding'])
     risk_bound, risk_attention = set(), set()
@@ -234,6 +284,14 @@ def paged_state(raw, options, revision, source_current, *, expected_cutoffs=None
         "total": len(pool),
         **{key: coverage[key] for key in ("ready", "updating", "limited", "pending", "scheduled")},
     }
+    if coverage['unsupported']:
+        state['coverage']['unsupported'] = coverage['unsupported']
+    if holding_coverage['unsupported']:
+        state['holding_summary']['unsupported'] = holding_coverage['unsupported']
+    if coverage['suspended']:
+        state['coverage']['suspended']=coverage['suspended']
+    if holding_coverage['suspended']:
+        state['holding_summary']['suspended']=holding_coverage['suspended']
     state["pool_markets"] = dict(Counter(row["market"] for row in symbols))
     state["pagination"] = {}
     for name, rows in (("signals", signals), ("events", raw["events"]), ("pool", pool)):
